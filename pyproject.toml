@@ -1,0 +1,129 @@
+[tool.poetry]
+name = "bop-jax"
+version = "0.1.0"
+description = "Bond Order Potential implementation using JAX and JAX-MD with automatic differentiation"
+authors = ["Sebastian <sebastian@example.com>"]
+readme = "README.md"
+homepage = "https://github.com/sebschre/bop-jax"
+repository = "https://github.com/sebschre/bop-jax"
+documentation = "https://github.com/sebschre/bop-jax"
+keywords = ["molecular-dynamics", "bond-order-potential", "jax", "automatic-differentiation", "materials-science"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+packages = [{include = "bop_jax"}]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+# Core JAX ecosystem with exact compatible versions (CRITICAL for JAX-MD compatibility)
+jax = "0.4.20"
+jaxlib = "0.4.20"
+# JAX-MD with specific version that works with JAX 0.4.20
+jax-md = "0.2.8"
+# Scientific computing
+numpy = "^1.21.0,<2.0.0"
+scipy = "^1.7.0"
+# Optional visualization
+matplotlib = {version = "^3.5.0", optional = true}
+
+[tool.poetry.extras]
+# Optional dependency groups
+viz = ["matplotlib"]
+all = ["matplotlib"]
+
+[tool.poetry.group.dev.dependencies]
+# Development and testing tools
+pytest = "^7.0.0"
+pytest-cov = "^4.0.0"
+black = "^23.0.0"
+isort = "^5.12.0"
+flake8 = "^6.0.0"
+mypy = "^1.0.0"
+pre-commit = "^3.0.0"
+# Documentation
+sphinx = "^6.0.0"
+sphinx-rtd-theme = "^1.2.0"
+# Notebook support for examples
+jupyter = "^1.0.0"
+ipykernel = "^6.20.0"
+
+[tool.poetry.group.test.dependencies]
+# Additional testing utilities
+hypothesis = "^6.70.0"
+pytest-xdist = "^3.2.0"
+pytest-benchmark = "^4.0.0"
+
+[tool.poetry.scripts]
+# Command-line scripts
+bop-test = "bop_jax.scripts.test:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ['py39']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+known_first_party = ["bop_jax"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --cov=bop_jax --cov-report=term-missing --cov-report=html"
+
+[tool.coverage.run]
+source = ["bop_jax"]
+omit = [
+    "*/tests/*",
+    "*/examples/*",
+    "setup.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
