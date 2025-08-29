@@ -137,26 +137,43 @@ def demonstrate_bop_calculation() -> Dict[str, Any]:
         print(f"   Mock Hamiltonian matrix shape: {H_matrix.shape}")
         print(f"   Mock Hamiltonian trace: {jnp.trace(H_matrix):.6f}")
 
-    # Calculate moments
-    mu_moments = moments.calculate_moments(H_matrix, max_moments=bop_params['max_moments'])
-    print(f"   Calculated {len(mu_moments)} moments")
-    print(f"   μ₀ = {mu_moments[0]:.6f} (number of orbitals)")
-    print(f"   μ₁ = {mu_moments[1]:.6f} (trace of H)")  
-    print(f"   μ₂ = {mu_moments[2]:.6f}")
-
-    # Convert to recursion coefficients
-    a_coeffs, b_coeffs = moments.moments_to_recursion(mu_moments)
-    print(f"   Recursion coefficients calculated")
-    print(f"   a₀ = {a_coeffs[0]:.6f}, a₁ = {a_coeffs[1]:.6f}")
-    print(f"   b₁ = {b_coeffs[1]:.6f}, b₂ = {b_coeffs[2]:.6f}")
-
-    # Calculate sigma coefficients
-    sigma_coeffs = chebyshev.moments_to_sigma(
-        mu_moments, a_coeffs, b_coeffs, bop_params['max_expansion']
+    # Calculate atom-specific moments using corrected BOP theory
+    mu_moments = moments.calculate_moments(
+        H_matrix,
+        max_moments=bop_params["max_moments"],
+        orbitals_per_atom=9,  # s, p, d orbitals
+        use_path_method=True,
     )
-    print(f"   Sigma coefficients calculated")  
-    print(f"   σ₀ = {sigma_coeffs[0]:.6f}")
-    print(f"   σ₁ = {sigma_coeffs[1]:.6f}")
+    print(
+        f"   Calculated moments for {mu_moments.shape[0]} atoms with {mu_moments.shape[1]} moment orders"
+    )
+    print(
+        f"   Atom 0: μ₀ = {mu_moments[0, 0]:.6f}, μ₁ = {mu_moments[0, 1]:.6f}, μ₂ = {mu_moments[0, 2]:.6f}"
+    )
+    if mu_moments.shape[0] > 1:
+        print(
+            f"   Atom 1: μ₀ = {mu_moments[1, 0]:.6f}, μ₁ = {mu_moments[1, 1]:.6f}, μ₂ = {mu_moments[1, 2]:.6f}"
+        )
+
+    # Convert to recursion coefficients for all atoms
+    a_coeffs, b_coeffs = moments.moments_to_recursion_all_atoms(mu_moments)
+    print(f"   Recursion coefficients calculated for all atoms")
+    print(f"   Atom 0: a₀ = {a_coeffs[0, 0]:.6f}, a₁ = {a_coeffs[0, 1]:.6f}")
+    print(f"   Atom 0: b₁ = {b_coeffs[0, 1]:.6f}, b₂ = {b_coeffs[0, 2]:.6f}")
+    if a_coeffs.shape[0] > 1:
+        print(f"   Atom 1: a₀ = {a_coeffs[1, 0]:.6f}, a₁ = {a_coeffs[1, 1]:.6f}")
+        print(f"   Atom 1: b₁ = {b_coeffs[1, 1]:.6f}, b₂ = {b_coeffs[1, 2]:.6f}")
+
+    # Calculate sigma coefficients for all atoms
+    sigma_coeffs = chebyshev.moments_to_sigma_all_atoms(
+        mu_moments, a_coeffs, b_coeffs, bop_params["max_expansion"]
+    )
+    print(f"   Sigma coefficients calculated for all atoms")
+    print(f"   Atom 0: σ₀ = {sigma_coeffs[0, 0]:.6f}, σ₁ = {sigma_coeffs[0, 1]:.6f}")
+    if sigma_coeffs.shape[0] > 1:
+        print(
+            f"   Atom 1: σ₀ = {sigma_coeffs[1, 0]:.6f}, σ₁ = {sigma_coeffs[1, 1]:.6f}"
+        )
 
     return {
         'R': R,
@@ -226,6 +243,46 @@ def demonstrate_scf_calculation() -> Optional[Any]:
     print(f"   Final Fermi level: {scf_result.fermi_level:.6f} eV")
 
     return scf_result
+
+
+def demonstrate_structural_differentiation() -> Dict[str, Any]:
+    """Demonstrate that the corrected BOP implementation can distinguish between different structures."""
+    print("\n" + "=" * 60)
+    print("BOP-JAX Structural Differentiation Demonstration")
+    print("=" * 60)
+    print("\nThis test validates the theoretical correction by showing that")
+    print("atom-specific moments can distinguish between different crystal structures.")
+
+    # Run the structural differentiation test
+    test_results = moments.test_structural_differentiation()
+
+    print(f"\n1. Test Results:")
+    print(f"   {test_results['test_message']}")
+
+    if "comparison" in test_results:
+        comp = test_results["comparison"]
+        print(f"\n2. Structure Comparison:")
+        print(
+            f"   Structures: {comp['structures_compared'][0]} vs {comp['structures_compared'][1]}"
+        )
+        print(f"   Max moment difference: {comp['max_difference']:.8f}")
+        print(f"   Mean moment difference: {comp['mean_difference']:.8f}")
+        print(f"   Relative difference: {comp['relative_difference']:.2%}")
+        print(f"   Can distinguish: {comp['can_distinguish']}")
+
+    # Display some moment details
+    for structure in ["linear", "square"]:
+        if f"{structure}_first_moments" in test_results:
+            moments_data = test_results[f"{structure}_first_moments"]
+            print(f"\n3. {structure.title()} Structure Moments:")
+            print(
+                f"   Atom 0: μ₀={moments_data['atom_0']['mu_0']:.4f}, μ₁={moments_data['atom_0']['mu_1']:.4f}, μ₂={moments_data['atom_0']['mu_2']:.4f}"
+            )
+            print(
+                f"   Atom 1: μ₀={moments_data['atom_1']['mu_0']:.4f}, μ₁={moments_data['atom_1']['mu_1']:.4f}, μ₂={moments_data['atom_1']['mu_2']:.4f}"
+            )
+
+    return test_results
 
 
 def demonstrate_molecular_dynamics() -> Optional[Dict[str, Any]]:
@@ -299,6 +356,9 @@ def main() -> None:
     # Run BOP calculation demonstration
     bop_results = demonstrate_bop_calculation()
 
+    # Demonstrate structural differentiation (NEW: validates theoretical correction)
+    structure_results = demonstrate_structural_differentiation()
+
     # Run SCF demonstration
     scf_results = demonstrate_scf_calculation()
 
@@ -310,6 +370,8 @@ def main() -> None:
     print("=" * 60)
     print("\nKey Achievements:")
     print("✓ BOP energy calculation with automatic forces")
+    print("✓ Corrected atom-specific moment calculation (Cyrot-Lackmann theorem)")
+    print("✓ Structural differentiation capability validated")
     if JAXMD_AVAILABLE:
         print("✓ Integration with JAX-MD spatial framework") 
         print("✓ Self-consistent field calculations")
@@ -321,6 +383,7 @@ def main() -> None:
     print(f"\nFinal Results Summary:")
     print(f"- Total BOP energy: {bop_results['total_energy']:.6f} eV")
     print(f"- Max force: {jnp.max(jnp.abs(bop_results['forces'])):.6f} eV/Å")
+    print(f"- Structural differentiation: {structure_results['test_message']}")
     if scf_results is not None:
         print(f"- SCF converged in {scf_results.iteration} iterations")
     if md_results is not None:

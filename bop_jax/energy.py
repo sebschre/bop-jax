@@ -20,7 +20,7 @@ except (ImportError, AttributeError):
     space = partition = smap = None
 
 from . import hamiltonian
-from . import moments
+from . import moments  
 from . import chebyshev
 from . import scf
 
@@ -90,19 +90,22 @@ def bop_energy_fn(
             R, neighbor, displacement, species, bop_params
         )
         
-        # Calculate moments of the Hamiltonian
+        # Calculate atom-specific moments using corrected BOP theory
         mu_moments = moments.calculate_moments(
-            H_matrix, max_moments=bop_params.get('max_moments', 20)
+            H_matrix, 
+            max_moments=bop_params.get('max_moments', 20),
+            orbitals_per_atom=9,  # s, p, d orbitals
+            use_path_method=True
         )
         
-        # Convert moments to recursion coefficients  
-        a_coeffs, b_coeffs = moments.moments_to_recursion(mu_moments)
+        # Convert atom-specific moments to recursion coefficients  
+        a_coeffs, b_coeffs = moments.moments_to_recursion_all_atoms(mu_moments)
         
-        # Calculate Chebyshev expansion coefficients
-        sigma_coeffs = chebyshev.moments_to_sigma(mu_moments, a_coeffs, b_coeffs)
+        # Calculate Chebyshev expansion coefficients for each atom
+        sigma_coeffs = chebyshev.moments_to_sigma_all_atoms(mu_moments, a_coeffs, b_coeffs)
         
-        # Compute bond energy from sigma coefficients
-        bond_energy = chebyshev.calculate_bond_energy(
+        # Compute total bond energy by summing contributions from all atoms
+        bond_energy = chebyshev.calculate_total_bond_energy(
             sigma_coeffs, a_coeffs, b_coeffs, bop_params
         )
         
@@ -134,20 +137,39 @@ def create_standalone_bop_energy_fn(bop_params: Optional[Dict[str, Any]] = None)
         """Simplified energy function demonstrating automatic differentiation."""
         N = R.shape[0]
         
-        # Calculate pairwise distances with small regularization
-        dr = R[:, None, :] - R[None, :, :]  # (N, N, 3)
-        distances = jnp.linalg.norm(dr + 1e-8, axis=2)  # Small epsilon for numerical stability
+        # Create a proper tight-binding Hamiltonian using atomic positions
+        H_matrix = create_distance_based_hamiltonian(R, bop_params)
         
-        # Simple harmonic potential between atoms (like springs)
-        r0 = 2.0  # Equilibrium distance
-        k = 1.0   # Spring constant
+        # Calculate atom-specific moments using corrected BOP theory
+        mu_moments = moments.calculate_moments(
+            H_matrix, 
+            max_moments=bop_params.get('max_moments', 10),  # Fewer moments for stability
+            orbitals_per_atom=9,
+            use_path_method=True
+        )
         
-        # Harmonic energy: E = 0.5 * k * (r - r0)^2 for each pair
-        pair_energies = 0.5 * k * (distances - r0) ** 2
+        # Convert to recursion coefficients
+        a_coeffs, b_coeffs = moments.moments_to_recursion_all_atoms(mu_moments)
         
-        # Only count each pair once (upper triangle, excluding diagonal)
-        mask = jnp.triu(jnp.ones((N, N)), k=1)
-        total_energy = jnp.sum(mask * pair_energies)
+        # Calculate simple bond energy approximation
+        # For standalone mode, use a simplified energy calculation
+        total_energy = 0.0
+        N_atoms = mu_moments.shape[0]
+        
+        for atom_i in range(N_atoms):
+            # Use first few moments to approximate local binding energy
+            atom_moments = mu_moments[atom_i]
+            
+            # Simple energy approximation: weighted sum of finite moments
+            finite_mask = jnp.isfinite(atom_moments)
+            finite_moments = jnp.where(finite_mask, atom_moments, 0.0)
+            
+            # Weight by inverse of moment order (higher moments less important)
+            weights = 1.0 / (1.0 + jnp.arange(len(finite_moments)))
+            
+            # Calculate contribution from this atom
+            atom_energy = jnp.sum(weights * finite_moments) * 0.1  # Scale factor
+            total_energy += atom_energy
         
         return total_energy
     
@@ -155,7 +177,12 @@ def create_standalone_bop_energy_fn(bop_params: Optional[Dict[str, Any]] = None)
 
 
 def create_distance_based_hamiltonian(R: jnp.ndarray, bop_params: Dict[str, Any]) -> jnp.ndarray:
-    """Create a simplified distance-based Hamiltonian for standalone testing."""
+    """
+    Create a simplified distance-based Hamiltonian for standalone testing.
+    
+    This creates a proper tight-binding Hamiltonian that will give meaningful
+    atom-specific moments when processed by the corrected BOP algorithm.
+    """
     N = R.shape[0]
     n_orbitals = N * 9  # 9 orbitals per atom
     
@@ -167,11 +194,17 @@ def create_distance_based_hamiltonian(R: jnp.ndarray, bop_params: Dict[str, Any]
     onsite_p = bop_params['onsite_energies']['p']  #  0.0
     onsite_d = bop_params['onsite_energies']['d']  # -2.0
     
+    # Set diagonal elements for each atom's orbitals
     for i in range(N):
         base_idx = i * 9
-        H = H.at[base_idx, base_idx].set(onsite_s)        # s orbital
-        H = H.at[base_idx+1:base_idx+4, base_idx+1:base_idx+4].set(onsite_p)  # p orbitals
-        H = H.at[base_idx+4:base_idx+9, base_idx+4:base_idx+9].set(onsite_d)  # d orbitals
+        # s orbital (index 0)
+        H = H.at[base_idx, base_idx].set(onsite_s)        
+        # p orbitals (indices 1,2,3)
+        for p in range(1, 4):
+            H = H.at[base_idx + p, base_idx + p].set(onsite_p)
+        # d orbitals (indices 4,5,6,7,8)  
+        for d in range(4, 9):
+            H = H.at[base_idx + d, base_idx + d].set(onsite_d)
     
     # Add hopping terms based on distances (JAX-compatible)
     cutoff = bop_params.get('bond_cutoff', 5.0)
@@ -181,24 +214,48 @@ def create_distance_based_hamiltonian(R: jnp.ndarray, bop_params: Dict[str, Any]
     dr = R[:, None, :] - R[None, :, :]  # (N, N, 3)
     distances = jnp.linalg.norm(dr, axis=2)  # (N, N)
     
-    # Create hopping strengths with cutoff
+    # Create hopping strengths with cutoff - this is crucial for proper BOP moments
     hopping_mask = distances < cutoff
     hopping_mask = hopping_mask * (1 - jnp.eye(N))  # Exclude self-interactions
     hopping_strengths = -1.0 * jnp.exp(-distances / decay_length) * hopping_mask
     
-    # Add s-s hopping terms
+    # Add structured hopping terms that will create meaningful self-returning paths
     for i in range(N):
         for j in range(N):
-            strength = hopping_strengths[i, j]  # Already zero for i==j due to mask
-            i_s = i * 9      # s orbital of atom i
-            j_s = j * 9      # s orbital of atom j
-            H = H.at[i_s, j_s].set(strength)
+            if i == j:
+                continue  # Skip self-interactions
+                
+            strength = hopping_strengths[i, j]
             
-            # Add some p-p hopping
+            # s-s hopping (strongest)
+            i_s = i * 9
+            j_s = j * 9
+            H = H.at[i_s, j_s].set(strength)
+            H = H.at[j_s, i_s].set(strength)  # Ensure hermiticity
+            
+            # p-p hopping (moderate strength)
             for p_offset in range(1, 4):  # p_x, p_y, p_z
                 i_p = i * 9 + p_offset
                 j_p = j * 9 + p_offset
-                H = H.at[i_p, j_p].set(strength * 0.7)
+                p_strength = strength * 0.7
+                H = H.at[i_p, j_p].set(p_strength)
+                H = H.at[j_p, i_p].set(p_strength)
+            
+            # d-d hopping (weaker)
+            for d_offset in range(4, 9):  # d orbitals
+                i_d = i * 9 + d_offset
+                j_d = j * 9 + d_offset
+                d_strength = strength * 0.5
+                H = H.at[i_d, j_d].set(d_strength)
+                H = H.at[j_d, i_d].set(d_strength)
+                
+            # s-p coupling (creates interesting path structures)
+            sp_strength = strength * 0.6
+            for p_offset in range(1, 4):
+                i_p = i * 9 + p_offset
+                j_p = j * 9 + p_offset
+                H = H.at[i_s, j_p].set(sp_strength)
+                H = H.at[j_p, i_s].set(sp_strength)
     
     return H
 

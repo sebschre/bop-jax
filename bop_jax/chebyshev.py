@@ -13,7 +13,7 @@ The key functions include:
 
 import jax
 import jax.numpy as jnp
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 from functools import partial
 import math
 
@@ -26,33 +26,80 @@ def moments_to_sigma(
     max_expansion: int = 10
 ) -> jnp.ndarray:
     """
-    Convert moments to Chebyshev expansion coefficients (sigma coefficients).
-    
+    Convert moments for a single atom to Chebyshev expansion coefficients.
+
+    This function processes one atom's moment sequence at a time.
+    For multi-atom systems, use moments_to_sigma_all_atoms.
+    """
+    return _moments_to_sigma_single(mu_moments, a_coeffs, b_coeffs, max_expansion)
+
+
+@partial(jax.jit, static_argnums=(3,))
+def moments_to_sigma_all_atoms(
+    mu_moments: jnp.ndarray,
+    a_coeffs: jnp.ndarray,
+    b_coeffs: jnp.ndarray,
+    max_expansion: int = 10,
+) -> jnp.ndarray:
+    """
+    Convert atom-specific moments to Chebyshev expansion coefficients for all atoms.
+
+    Args:
+        mu_moments: array of shape (N_atoms, max_moments + 1)
+        a_coeffs: array of shape (N_atoms, max_moments)
+        b_coeffs: array of shape (N_atoms, max_moments)
+        max_expansion: maximum order for sigma expansion
+
+    Returns:
+        sigma coefficients array of shape (N_atoms, max_expansion + 1)
+    """
+    N_atoms = mu_moments.shape[0]
+    sigma_coeffs = jnp.zeros((N_atoms, max_expansion + 1))
+
+    for atom_i in range(N_atoms):
+        atom_sigma = _moments_to_sigma_single(
+            mu_moments[atom_i], a_coeffs[atom_i], b_coeffs[atom_i], max_expansion
+        )
+        sigma_coeffs = sigma_coeffs.at[atom_i].set(atom_sigma)
+
+    return sigma_coeffs
+
+
+@partial(jax.jit, static_argnums=(3,))
+def _moments_to_sigma_single(
+    mu_moments: jnp.ndarray,
+    a_coeffs: jnp.ndarray,
+    b_coeffs: jnp.ndarray,
+    max_expansion: int = 10,
+) -> jnp.ndarray:
+    """
+    Convert moments for a single atom to Chebyshev expansion coefficients (sigma coefficients).
+
     This implements the transformation from recursion coefficients to the
     sigma expansion coefficients used in the bond energy calculation.
     Based on the BOPfox bopcheb module.
-    
+
     Args:
-        mu_moments: moment array μₙ
-        a_coeffs: recursion coefficients aₙ  
-        b_coeffs: recursion coefficients bₙ
+        mu_moments: moment array μₙ for one atom
+        a_coeffs: recursion coefficients aₙ for one atom
+        b_coeffs: recursion coefficients bₙ for one atom
         max_expansion: maximum order for sigma expansion
-        
+
     Returns:
         sigma coefficients array σₙ
     """
     n_coeffs = min(len(a_coeffs), max_expansion)
     sigma_coeffs = jnp.zeros(max_expansion + 1)
-    
+
     # Calculate asymptotic values
     a_inf = a_coeffs[-1] if len(a_coeffs) > 0 else 0.0
     b_inf = b_coeffs[-1] if len(b_coeffs) > 0 else 1.0
-    
+
     # Normalize coefficients for Chebyshev expansion
     # Map from [-2b_inf, 2b_inf] interval to [-1, 1]
     norm_a = (a_coeffs - a_inf) / (2.0 * b_inf)
     norm_b = b_coeffs / (2.0 * b_inf)
-    
+
     # Calculate sigma coefficients using orthogonality relations
     # This is a simplified version - full implementation would use
     # the complete Chebyshev orthogonality relations
@@ -62,11 +109,11 @@ def moments_to_sigma(
         if n == 0:
             sigma_coeffs = sigma_coeffs.at[0].set(mu_moments[0] / (2.0 * b_inf))
         elif n < len(norm_a):
-            # Use recursion relation with normalized coefficients  
+            # Use recursion relation with normalized coefficients
             sigma_coeffs = sigma_coeffs.at[n].set(
                 _calculate_sigma_coefficient(n, mu_moments, norm_a, norm_b, b_inf)
             )
-    
+
     return sigma_coeffs
 
 
@@ -107,53 +154,100 @@ def calculate_bond_energy(
     bop_params: dict
 ) -> float:
     """
-    Calculate bond energy from sigma expansion coefficients.
-    
+    Calculate bond energy for a single atom from sigma expansion coefficients.
+
+    This function processes one atom's coefficients at a time.
+    For multi-atom systems, use calculate_total_bond_energy.
+    """
+    return _calculate_bond_energy_single(sigma_coeffs, a_coeffs, b_coeffs, bop_params)
+
+
+@jax.jit
+def calculate_total_bond_energy(
+    sigma_coeffs: jnp.ndarray,
+    a_coeffs: jnp.ndarray,
+    b_coeffs: jnp.ndarray,
+    bop_params: dict,
+) -> float:
+    """
+    Calculate total bond energy for all atoms in the system.
+
+    Args:
+        sigma_coeffs: array of shape (N_atoms, max_expansion + 1)
+        a_coeffs: array of shape (N_atoms, max_moments)
+        b_coeffs: array of shape (N_atoms, max_moments)
+        bop_params: BOP parameters
+
+    Returns:
+        Total bond energy summed over all atoms
+    """
+    N_atoms = sigma_coeffs.shape[0]
+    total_energy = 0.0
+
+    for atom_i in range(N_atoms):
+        atom_energy = _calculate_bond_energy_single(
+            sigma_coeffs[atom_i], a_coeffs[atom_i], b_coeffs[atom_i], bop_params
+        )
+        total_energy += atom_energy
+
+    return total_energy
+
+
+@jax.jit
+def _calculate_bond_energy_single(
+    sigma_coeffs: jnp.ndarray,
+    a_coeffs: jnp.ndarray,
+    b_coeffs: jnp.ndarray,
+    bop_params: dict,
+) -> float:
+    """
+    Calculate bond energy for a single atom from sigma expansion coefficients.
+
     This implements the core BOP energy formula:
     E_bond = 10 * b_inf * Σₙ σₙ [χₙ₊₂(φ_F) - γ₀ χₙ₊₁(φ_F) + χₙ(φ_F)]
-    
+
     where χₙ are the Chebyshev response functions.
-    
+
     Args:
-        sigma_coeffs: Chebyshev expansion coefficients σₙ
-        a_coeffs: recursion coefficients aₙ
-        b_coeffs: recursion coefficients bₙ  
+        sigma_coeffs: Chebyshev expansion coefficients σₙ for one atom
+        a_coeffs: recursion coefficients aₙ for one atom
+        b_coeffs: recursion coefficients bₙ for one atom
         bop_params: BOP parameters including Fermi level
-        
+
     Returns:
-        Bond energy contribution
+        Bond energy contribution from this atom
     """
     # Get asymptotic coefficients
     a_inf = a_coeffs[-1] if len(a_coeffs) > 0 else 0.0
     b_inf = b_coeffs[-1] if len(b_coeffs) > 0 else 1.0
-    
+
     # Get Fermi level (could be determined self-consistently)
     fermi_level = bop_params.get('fermi_level', 0.0)
-    
-    # Calculate normalized Fermi level  
+
+    # Calculate normalized Fermi level
     phi_F = (fermi_level - a_inf) / (2.0 * b_inf)
-    
+
     # Clamp to valid range [-1, 1] for Chebyshev polynomials
     phi_F = jnp.clip(phi_F, -0.99, 0.99)
-    
+
     # Calculate Chebyshev response functions χₙ(φ_F)
     max_order = len(sigma_coeffs) + 2
     chi_values = calculate_chebyshev_response_functions(phi_F, max_order)
-    
-    # BOP energy formula with γ₀ parameter  
+
+    # BOP energy formula with γ₀ parameter
     gamma_0 = bop_params.get('gamma_0', 1.0)  # Termination parameter
     bond_energy = 0.0
-    
+
     # Number of d-orbitals (10 for full d-shell)
     orbital_factor = bop_params.get('orbital_factor', 10.0)
-    
+
     for n in range(len(sigma_coeffs)):
         if n + 2 < len(chi_values):
             energy_contribution = (
                 chi_values[n + 2] - gamma_0 * chi_values[n + 1] + chi_values[n]
             )
             bond_energy += sigma_coeffs[n] * energy_contribution
-    
+
     return orbital_factor * b_inf * bond_energy
 
 
@@ -289,18 +383,82 @@ def calculate_chebyshev_polynomials(x: float, max_order: int) -> jnp.ndarray:
     """
     if max_order == 0:
         return jnp.array([1.0])
-    
+
     polys = jnp.zeros(max_order)
     polys = polys.at[0].set(1.0)  # P₀(x) = 1
-    
+
     if max_order > 1:
         polys = polys.at[1].set(x)  # P₁(x) = x
-        
+
         # Recurrence relation for n ≥ 2
         for n in range(2, max_order):
             polys = polys.at[n].set(2.0 * x * polys[n-1] - polys[n-2])
-    
+
     return polys
+
+
+# Additional utility functions for atom-specific calculations
+
+
+def calculate_atom_specific_ldos(
+    energy: float,
+    sigma_coeffs: jnp.ndarray,
+    a_coeffs: jnp.ndarray,
+    b_coeffs: jnp.ndarray,
+) -> jnp.ndarray:
+    """
+    Calculate local density of states for each atom at given energy.
+
+    Args:
+        energy: energy at which to evaluate LDOS
+        sigma_coeffs: array of shape (N_atoms, max_expansion + 1)
+        a_coeffs: array of shape (N_atoms, max_moments)
+        b_coeffs: array of shape (N_atoms, max_moments)
+
+    Returns:
+        LDOS values for each atom
+    """
+    N_atoms = sigma_coeffs.shape[0]
+    ldos_values = jnp.zeros(N_atoms)
+
+    for atom_i in range(N_atoms):
+        # Get asymptotic values for this atom
+        a_inf = a_coeffs[atom_i, -1] if a_coeffs.shape[1] > 0 else 0.0
+        b_inf = b_coeffs[atom_i, -1] if b_coeffs.shape[1] > 0 else 1.0
+
+        # Calculate LDOS for this atom
+        atom_ldos = calculate_local_density_of_states(
+            energy, sigma_coeffs[atom_i], a_inf, b_inf
+        )
+        ldos_values = ldos_values.at[atom_i].set(atom_ldos)
+
+    return ldos_values
+
+
+def analyze_structural_differences(
+    sigma_coeffs_1: jnp.ndarray,
+    sigma_coeffs_2: jnp.ndarray,
+    structure_names: Tuple[str, str] = ("Structure 1", "Structure 2"),
+) -> Dict[str, any]:
+    """
+    Analyze differences in sigma coefficients between two structures.
+
+    This function helps verify that the corrected BOP implementation
+    can distinguish between different crystal structures.
+    """
+    differences = jnp.abs(sigma_coeffs_1 - sigma_coeffs_2)
+    max_diff = jnp.max(differences)
+    mean_diff = jnp.mean(differences)
+
+    return {
+        "max_difference": float(max_diff),
+        "mean_difference": float(mean_diff),
+        "relative_difference": float(
+            mean_diff / (jnp.mean(jnp.abs(sigma_coeffs_1)) + 1e-10)
+        ),
+        "structures": structure_names,
+        "can_distinguish": bool(max_diff > 1e-6),  # Threshold for meaningful difference
+    }
 
 
 # Utility functions for analysis and testing
