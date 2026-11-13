@@ -1,9 +1,9 @@
 # bopjax
 
-The analytic bond-order potential (BOP) of BOPfox written in JAX. The energy is
-one differentiable function; forces, stress, magnetic torques and the
-self-consistency Jacobian come from automatic differentiation instead of
-hand-derived chains.
+A fresh JAX implementation of the analytic bond-order-potential (BOP)
+methodology implemented by BOPfox. The energy is one differentiable function;
+forces, stress, magnetic torques and the self-consistency Jacobian come from
+automatic differentiation instead of hand-derived chains.
 
 ## Install
 
@@ -52,6 +52,21 @@ electron count.
   stationary in the shifts.
 - `make_potential` wraps the self-consistency into one compiled function
   `E(positions, cell, params)` whose `jax.grad` is the exact force.
+
+## References
+
+For the analytic BOP methodology and its implementation in BOPfox, see:
+
+- R. Drautz, T. Hammerschmidt, M. Cak, and D. G. Pettifor, “Bond-order
+  potentials: Derivation and parameterization for refractory elements,”
+  *Modelling and Simulation in Materials Science and Engineering* 23 (2015),
+  074004. [doi:10.1088/0965-0393/23/7/074004](https://doi.org/10.1088/0965-0393/23/7/074004)
+- T. Hammerschmidt et al., “BOPfox program for tight-binding and analytic
+  bond-order potential calculations,” [arXiv:1803.07491](https://arxiv.org/abs/1803.07491),
+  [doi:10.1016/j.cpc.2018.08.013](https://doi.org/10.1016/j.cpc.2018.08.013).
+
+See the [BOPfox website](https://bopfox.de/) for more information about the
+reference program and its contributors.
 
 ## Features
 
