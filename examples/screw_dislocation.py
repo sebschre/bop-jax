@@ -30,8 +30,11 @@ from bopjax import pairwise as pw
 from bopjax.hamiltonian import v0_bond
 from bopjax.models import tungsten_v0
 
-RADIUS = 18.0  # cylinder radius (Angstrom)
-FIXED = 7.6  # thickness of the fixed outer shell, two bond cutoffs
+RADIUS = 21.0  # cylinder radius (Angstrom)
+# Thickness of the fixed outer shell.  The free surface of the cylinder still
+# exerts 0.2 eV/A at 8-10 A depth in a perfect crystal (moments reach three
+# hops, and self-consistency further), and less than 0.01 eV/A beyond 12 A.
+FIXED = 12.0
 LAYERS = 3  # periodic length along the line, in Burgers vectors
 RELAX_STEPS, FMAX = 100, 0.01  # quick-min steps (5 fs each) and force tolerance (eV/A)
 MD_STEPS = 100
