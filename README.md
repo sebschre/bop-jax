@@ -230,6 +230,12 @@ They share the cutoff of the bond integrals, so no further neighbour list is
 needed and the cost is small next to the moments. Forces and stress, which
 now contain three-body terms, come from the same automatic differentiation.
 
+`examples/screening.py` prints the screened integrals of bcc, fcc and simple
+cubic neighbours and the bcc-fcc energy difference with and without
+screening. With its (made-up) functions the second neighbours of bcc keep
+79 % of the pi and 57 % of the delta integral against 94 % and 74 % for the
+first neighbours, although the unscreened integrals depend on distance alone.
+
 **Not yet validated against BOPfox.** The angular factors and weights are
 checked against explicit Slater-Koster matrices of a trimer, the dimer limit
 `beta / (1 - O^2)`, hermiticity, and forces and stress against finite
