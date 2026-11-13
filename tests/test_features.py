@@ -377,3 +377,31 @@ def test_warm_started_md_matches_cold_start():
     # after the history has filled, the warm start needs fewer Newton steps
     assert np.mean(iterations_w[3:]) < np.mean(iterations_c[3:])
     assert max(iterations_w[3:]) <= 1
+
+
+def test_md_with_fixed_atoms():
+    """Atoms outside the mobile mask stay put, the others move, and the total
+    energy (with the fixed atoms' potential energy included) is conserved."""
+    from bopjax import md
+
+    cell = np.array(CELL) * 4.0 / A
+    pos = POS_NP * 4.0 / A
+    cfg = bj.BOPConfig(nmom=6, rcut=3.6, dcut=0.5, rcut2=3.6, dcut2=0.5, repulsion=pw.V0)
+    topo = bj.build_topology(pos, [0] * 4, cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2, skin=0.3)
+    mobile = np.array([True, False, True, False])
+    init, apply = md.nve(bj.make_energy_fn(topo, cfg, radial=v0_bond), cell, tungsten_v0(),
+                         1.0 / md.TIME_UNIT_FS, mobile=mobile)
+    apply = jax.jit(apply)
+    state = init(jax.random.PRNGKey(1), jnp.array(pos), 183.84, 300 * md.KB_EV)
+    e0 = float(state.energy + md.kinetic_energy(state))
+    for _ in range(15):
+        state = apply(state)
+
+    moved = np.linalg.norm(np.asarray(state.position) - pos, axis=1)
+    assert np.all(moved[~mobile] == 0.0)
+    assert np.all(moved[mobile] > 1e-3)
+    assert np.all(np.asarray(state.momentum)[~mobile] == 0.0)
+    assert float(state.energy + md.kinetic_energy(state)) == pytest.approx(e0, abs=1e-4)
+    # two moving atoms: six degrees of freedom
+    assert float(md.temperature(state)) == pytest.approx(
+        2 * float(md.kinetic_energy(state)) / (6 * md.KB_EV))
