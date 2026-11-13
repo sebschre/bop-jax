@@ -21,7 +21,7 @@ pos[2] += [-0.05, 0.10, 0.02]
 
 cfg = bj.BOPConfig(nmom=6, rcut=3.3, dcut=0.5)
 topo = bj.build_topology(pos, [0, 0, 0, 0], cfg.rcut, cfg.nmom, cell)
-print(f"supercell {topo.reps}: {topo.n_super} atoms, {topo.nbr_mask.shape[1]} neighbours")
+print(f"cluster of {topo.cluster_sizes[-1]} atoms per atom, {topo.nbr_mask.shape[1]} neighbours")
 
 energy = bj.make_energy_fn(topo, cfg)
 scf = bj.make_scf(energy)

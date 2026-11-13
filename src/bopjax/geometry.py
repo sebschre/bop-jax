@@ -1,10 +1,12 @@
 """Neighbour topology (NumPy, not differentiated) and bond vectors (JAX).
 
-Moments are sums over closed hopping paths, so a periodic cell must not let a
-path wrap around and meet itself.  We therefore work on a supercell that is
-large enough that no closed path of ``n_hops`` hops can wrap.  Every supercell
-atom is a translation of a unit-cell atom, so Hamiltonian blocks are only ever
-computed for the unit cell and gathered by index.
+Moments are sums over closed hopping paths that start and end on one atom, so
+each atom only needs its own cluster: the atoms it can reach in half the path
+length.  Clusters are built from the neighbour graph with explicit lattice
+translations, which treats periodic cells and finite clusters alike and makes
+the cost linear in the number of atoms.  Every cluster member is a translation
+of a unit-cell atom, so Hamiltonian blocks are only ever computed for the unit
+cell and gathered by index.
 """
 
 from __future__ import annotations
@@ -20,14 +22,15 @@ class Topology:
     """Static connectivity.  Integer arrays only; positions enter separately."""
 
     n_atoms: int  # atoms in the unit cell
-    n_super: int  # atoms in the supercell
-    reps: tuple[int, int, int]
     species: np.ndarray  # (N,)
     nbr_origin: np.ndarray  # (N, K) unit-cell index of each neighbour
     nbr_cell: np.ndarray  # (N, K, 3) lattice translation of each neighbour
     nbr_mask: np.ndarray  # (N, K) False for padding
-    nbr_super: np.ndarray  # (M, K) supercell index of each neighbour
-    origin: np.ndarray  # (M,) unit-cell index of each supercell atom
+    # Local cluster of each atom, members ordered by hop distance.  Slots
+    # [0, cluster_sizes[h]) hold every atom within h hops (plus padding).
+    cluster_origin: np.ndarray  # (N, C) unit-cell index of each member
+    cluster_nbr: np.ndarray  # (N, C, K) slot of each member's neighbours; C = outside
+    cluster_sizes: tuple[int, ...]  # length n_shells + 1
     # second, longer-ranged list for repulsion, embedding and Coulomb terms
     nbr2_origin: np.ndarray | None = None  # (N, K2)
     nbr2_cell: np.ndarray | None = None  # (N, K2, 3)
@@ -78,9 +81,48 @@ def _neighbours(pos, cell, rcut):
     return origin, trans, mask
 
 
+def _clusters(nbr_origin, nbr_cell, nbr_mask, n_shells):
+    """Breadth-first clusters around every atom, padded to common shell sizes."""
+    n, k_max = nbr_mask.shape
+    valid = [np.nonzero(nbr_mask[i])[0] for i in range(n)]
+    shells_all = []
+    for i in range(n):
+        seen = {(i, 0, 0, 0)}
+        shells = [[(i, 0, 0, 0)]]
+        for _ in range(n_shells):
+            new = []
+            for j, tx, ty, tz in shells[-1]:
+                for k in valid[j]:
+                    c = nbr_cell[j, k]
+                    key = (int(nbr_origin[j, k]), tx + int(c[0]), ty + int(c[1]), tz + int(c[2]))
+                    if key not in seen:
+                        seen.add(key)
+                        new.append(key)
+            shells.append(new)
+        shells_all.append(shells)
+
+    widths = [max(len(sh[h]) for sh in shells_all) for h in range(n_shells + 1)]
+    offsets = np.concatenate([[0], np.cumsum(widths)])
+    size = int(offsets[-1])
+    origin = np.zeros((n, size), dtype=np.int32)
+    nbr = np.full((n, size, k_max), size, dtype=np.int32)
+    for i, shells in enumerate(shells_all):
+        slot = {}
+        for h, members in enumerate(shells):
+            for m, key in enumerate(members):
+                slot[key] = int(offsets[h]) + m
+        for (j, tx, ty, tz), c in slot.items():
+            origin[i, c] = j
+            for k in valid[j]:
+                t = nbr_cell[j, k]
+                key = (int(nbr_origin[j, k]), tx + int(t[0]), ty + int(t[1]), tz + int(t[2]))
+                nbr[i, c, k] = slot.get(key, size)
+    return origin, nbr, tuple(int(o) for o in offsets[1:])
+
+
 def build_topology(positions, species, rcut, n_hops, cell=None, rcut2=None,
                    skin=0.0) -> Topology:
-    """Neighbour lists plus the supercell index map.
+    """Neighbour lists plus the local cluster of every atom.
 
     positions : (N, 3) Cartesian
     cell      : (3, 3) rows are lattice vectors, or None for a finite cluster
@@ -92,41 +134,22 @@ def build_topology(positions, species, rcut, n_hops, cell=None, rcut2=None,
     """
     pos = np.asarray(positions, dtype=float)
     species = np.asarray(species, dtype=int)
-    n = len(pos)
     cell = None if cell is None else np.asarray(cell, dtype=float)
-    r_list = rcut + skin
 
-    if cell is None:
-        reps = (1, 1, 1)
-    else:
-        # a closed path of n_hops hops spans at most n_hops * r_list
-        reps = tuple(int(np.floor(n_hops * r_list / hd)) + 1 for hd in _heights(cell))
-
-    nbr_origin, nbr_cell, nbr_mask = _neighbours(pos, cell, r_list)
-    k_max = nbr_mask.shape[1]
+    nbr_origin, nbr_cell, nbr_mask = _neighbours(pos, cell, rcut + skin)
     second = (None, None, None) if rcut2 is None else _neighbours(pos, cell, rcut2 + skin)
-
-    # supercell atom m = t * N + i, with t the raveled translation index
-    reps_arr = np.array(reps)
-    tg = np.meshgrid(*[np.arange(r) for r in reps], indexing="ij")
-    trans = np.stack([g.ravel() for g in tg], axis=1)  # (T, 3)
-    n_t = len(trans)
-    t_nbr = (trans[:, None, None, :] + nbr_cell[None, :, :, :]) % reps_arr
-    t_idx = np.ravel_multi_index(np.moveaxis(t_nbr, -1, 0), reps)  # (T, N, K)
-    nbr_super = t_idx * n + nbr_origin[None, :, :]
-    self_idx = (np.arange(n_t)[:, None] * n + np.arange(n)[None, :])[:, :, None]
-    nbr_super = np.where(nbr_mask[None, :, :], nbr_super, self_idx)
+    # a closed path of n_hops hops never gets further than half of them away
+    cl_origin, cl_nbr, cl_sizes = _clusters(nbr_origin, nbr_cell, nbr_mask, (n_hops + 1) // 2)
 
     return Topology(
-        n_atoms=n,
-        n_super=n_t * n,
-        reps=reps,
+        n_atoms=len(pos),
         species=species,
         nbr_origin=nbr_origin,
         nbr_cell=nbr_cell,
         nbr_mask=nbr_mask,
-        nbr_super=nbr_super.reshape(n_t * n, k_max),
-        origin=np.tile(np.arange(n), n_t),
+        cluster_origin=cl_origin,
+        cluster_nbr=cl_nbr,
+        cluster_sizes=cl_sizes,
         nbr2_origin=second[0],
         nbr2_cell=second[1],
         nbr2_mask=second[2],

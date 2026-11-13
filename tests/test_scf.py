@@ -65,3 +65,38 @@ def test_two_shells_per_atom():
     f = bj.make_forces(energy)(res.shifts, pos, CELL, params)
     np.testing.assert_allclose(f.sum(axis=0), 0.0, atol=1e-10)
     assert float(f[0, 1]) == pytest.approx(fd_force(scf, pos, params, res.shifts, 0, 1), abs=1e-8)
+
+
+def test_krylov_solver_matches_dense():
+    """Hessian-free Newton gives the same self-consistent state."""
+    n = 2
+    base = np.array([[0, 0, 0], [0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]])
+    grid = np.array([[i, j, k] for i in range(n) for j in range(n) for k in range(n)])
+    pos = A * (grid[:, None, :] + base[None, :, :]).reshape(-1, 3)
+    pos = pos + np.random.default_rng(1).normal(scale=0.05, size=pos.shape)
+    cell = jnp.array(A * n * np.eye(3))
+    cfg = bj.BOPConfig(nmom=6, rcut=3.3, dcut=0.5)
+    topo = bj.build_topology(pos, [0] * len(pos), cfg.rcut, cfg.nmom, np.array(cell))
+    energy = bj.make_energy_fn(topo, cfg)
+    params = canonical_d(hubbard=8.0)
+    pos = jnp.array(pos)
+
+    dense = bj.make_scf(energy, method="dense")(pos, cell, params, tol=1e-10)
+    krylov = bj.make_scf(energy, method="krylov")(pos, cell, params, tol=1e-10)
+    assert dense.converged and krylov.converged
+    assert len(krylov.history) <= 6
+    assert krylov.energy == pytest.approx(dense.energy, abs=1e-10)
+    np.testing.assert_allclose(krylov.shifts, dense.shifts, atol=1e-8)
+
+    e, aux = bj.make_potential(energy, method="krylov")(pos, cell, params)
+    assert float(e) == pytest.approx(dense.energy, abs=1e-9)
+    assert float(aux["scf_residual"]) < 1e-10
+
+
+def test_clusters_grow_by_hop_shells():
+    """Perfect fcc with nearest neighbours: 1, 13, 55, 147 atoms within 0..3 hops."""
+    pos = A * np.array([[0, 0, 0], [0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]])
+    topo = bj.build_topology(pos, [0] * 4, 3.01, 6, A * np.eye(3))
+    assert topo.cluster_sizes == (1, 13, 55, 147)
+    # every listed neighbour of the central atom is in its first shell
+    assert set(topo.cluster_nbr[0, 0]) == set(range(1, 13))

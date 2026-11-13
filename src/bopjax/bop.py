@@ -47,6 +47,7 @@ class BOPConfig:
     spin: str = "none"  # see SPIN_MODES
     repulsion: pw.Repulsion | None = None
     coulomb: str = "diagonal"  # "diagonal" (onsite only) or "frauenheim"
+    batch: int = 64  # atoms whose moments are evaluated at once (memory)
 
     @property
     def n_expansion(self) -> int:
@@ -57,30 +58,60 @@ class BOPConfig:
         return self.spin != "none"
 
 
-def moments(hblk, onsite, topo: Topology, nmom: int):
+def _per_atom(fn, topo: Topology, batch: int):
+    """Apply ``fn(cluster_origin_i, cluster_nbr_i)`` to every atom, in batches
+    so that memory stays bounded for large cells."""
+    xs = (jnp.asarray(topo.cluster_origin), jnp.asarray(topo.cluster_nbr))
+    if topo.n_atoms <= batch:
+        return jax.vmap(fn)(*xs)
+    return jax.lax.map(lambda x: fn(*x), xs, batch_size=batch)
+
+
+def _walk(topo: Topology, nmom: int, start, hop):
+    """Vectors H^a |start> for a = 0..ceil(nmom / 2) on a growing cluster.
+
+    ``hop(origins, w_neighbours, w_self)`` applies H to the first len(origins)
+    cluster members.  After a applications only atoms within a hops are
+    non-zero, so each step works on the smallest cluster that holds them.
+    """
+    sizes = topo.cluster_sizes
+    def run(origin, nbr):
+        ws = [start[None]]
+        for a in range((nmom + 1) // 2):
+            n_in, n_out = sizes[a], sizes[a + 1]
+            w = ws[-1]
+            zero = jnp.zeros((n_out + 1 - n_in,) + w.shape[1:], dtype=w.dtype)
+            w_pad = jnp.concatenate([w, zero])  # slot n_out is the outside world
+            idx = jnp.where(nbr[:n_out] < n_in, nbr[:n_out], n_out)
+            ws.append(hop(origin[:n_out], w_pad[idx], w_pad[:n_out]))
+        return ws
+    return run
+
+
+def moments(hblk, onsite, topo: Topology, nmom: int, batch: int = 64):
     """Diagonal moments <i a|H^n|i a> for all unit-cell orbitals, (N, norb, nmom+1).
 
     hblk   : (N, K, norb, norb) hopping blocks of the unit-cell atoms
     onsite : (N, norb) onsite levels
     """
-    n, norb = onsite.shape
-    hb = hblk[topo.origin]  # (M, K, norb, norb)
-    on = onsite[topo.origin]  # (M, norb)
+    norb = onsite.shape[1]
+    sizes = topo.cluster_sizes
 
-    def apply_h(w):  # w: (S, M, norb, norb_start)
-        hop = jnp.einsum("mkab,smkbc->smac", hb, w[:, topo.nbr_super])
-        return hop + on[None, :, :, None] * w
+    def hop(origins, w_nbr, w_self):  # w_nbr: (C, K, norb, norb_start)
+        return (jnp.einsum("ckab,ckbd->cad", hblk[origins], w_nbr)
+                + onsite[origins][:, :, None] * w_self)
 
-    # one block of start vectors per unit-cell atom (supercell index s == s)
-    w0 = jnp.zeros((n, topo.n_super, norb, norb), dtype=hblk.dtype)
-    w0 = w0.at[np.arange(n), np.arange(n)].set(jnp.eye(norb, dtype=hblk.dtype))
-    ws = [w0]
-    for _ in range((nmom + 1) // 2):
-        ws.append(apply_h(ws[-1]))
+    walk = _walk(topo, nmom, jnp.eye(norb, dtype=hblk.dtype), hop)
 
-    mu = [jnp.einsum("smbc,smbc->sc", ws[k // 2], ws[k - k // 2])
-          for k in range(nmom + 1)]
-    return jnp.stack(mu, axis=-1)
+    def one(origin, nbr):
+        ws = walk(origin, nbr)
+        mu = []
+        for k in range(nmom + 1):
+            a, b = k // 2, k - k // 2
+            mu.append(jnp.einsum("cbd,cbd->d", ws[a], ws[b][: sizes[a]]))
+        return jnp.stack(mu, axis=-1)
+
+    return _per_atom(one, topo, batch)
 
 
 PAULI = np.array(
@@ -96,36 +127,41 @@ def spin_projectors(axes):
     return jnp.stack([0.5 * (eye + e_sigma), 0.5 * (eye - e_sigma)], axis=1)
 
 
-def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int):
+def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: int = 64):
     """Moments of the spinor Hamiltonian projected on each atom's local spin
     axis, shape (N, 2, norb, nmom+1).
 
     onsite : (N, 2, norb) levels of the local spin-up and spin-down channels
     axes   : (N, 3) local spin quantisation axes (need not be normalised)
     """
-    n, _, norb = onsite.shape
+    norb = onsite.shape[2]
+    sizes = topo.cluster_sizes
     proj = spin_projectors(axes)  # (N, 2, 2, 2)
     # onsite block of orbital a on atom i: sum_s level_s P_s
-    on_blk = jnp.einsum("nsa,nstu->natu", onsite.astype(complex), proj)[topo.origin]
-    hb = hblk[topo.origin].astype(complex)
+    on_blk = jnp.einsum("nsa,nstu->natu", onsite.astype(complex), proj)
+    hb = hblk.astype(complex)
 
-    def apply_h(w):  # w: (S, M, norb, 2, norb_start, 2)
-        hop = jnp.einsum("mkab,smkbtcu->smatcu", hb, w[:, topo.nbr_super])
-        return hop + jnp.einsum("matv,smavcu->smatcu", on_blk, w)
+    def hop(origins, w_nbr, w_self):  # w_nbr: (C, K, norb, 2, norb_start, 2)
+        return (jnp.einsum("ckab,ckbtdu->catdu", hb[origins], w_nbr)
+                + jnp.einsum("catv,cavdu->catdu", on_blk[origins], w_self))
 
-    w0 = jnp.zeros((n, topo.n_super, norb, 2, norb, 2), dtype=complex)
-    start = jnp.einsum("ac,tu->atcu", jnp.eye(norb), jnp.eye(2)).astype(complex)
-    w0 = w0.at[np.arange(n), np.arange(n)].set(start)
-    ws = [w0]
-    for _ in range((nmom + 1) // 2):
-        ws.append(apply_h(ws[-1]))
+    start = jnp.einsum("ad,tu->atdu", jnp.eye(norb), jnp.eye(2)).astype(complex)
+    walk = _walk(topo, nmom, start, hop)
 
-    mu = []
-    for k in range(nmom + 1):
-        # 2x2 spin matrix of the moment for each start orbital
-        m = jnp.einsum("smatcu,smatcv->scuv", jnp.conj(ws[k // 2]), ws[k - k // 2])
-        mu.append(jnp.real(jnp.einsum("nsvu,ncuv->nsc", proj, m)))
-    return jnp.stack(mu, axis=-1)
+    def one(origin, nbr, p):
+        ws = walk(origin, nbr)
+        mu = []
+        for k in range(nmom + 1):
+            a, b = k // 2, k - k // 2
+            # 2x2 spin matrix of the moment for each start orbital
+            m = jnp.einsum("catdu,catdv->duv", jnp.conj(ws[a]), ws[b][: sizes[a]])
+            mu.append(jnp.real(jnp.einsum("svu,duv->sd", p, m)))
+        return jnp.stack(mu, axis=-1)
+
+    xs = (jnp.asarray(topo.cluster_origin), jnp.asarray(topo.cluster_nbr), proj)
+    if topo.n_atoms <= batch:
+        return jax.vmap(one)(*xs)
+    return jax.lax.map(lambda x: one(*x), xs, batch_size=batch)
 
 
 def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw):
@@ -241,9 +277,9 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw):
         orb_levels = levels[:, :, orb_shell]  # (N, nspin, norb)
         if cfg.spin == "noncollinear":
             mu_orb = moments_noncollinear(hblk, orb_levels, params["spin_axes"],
-                                          topo, cfg.nmom)
+                                          topo, cfg.nmom, cfg.batch)
         else:
-            mu_orb = jax.vmap(lambda lev: moments(hblk, lev, topo, cfg.nmom),
+            mu_orb = jax.vmap(lambda lev: moments(hblk, lev, topo, cfg.nmom, cfg.batch),
                               in_axes=1, out_axes=1)(orb_levels)
         # average over the orbitals of each shell: (N, nspin, nshell, nmom+1)
         mu = jnp.stack([jnp.mean(mu_orb[:, :, a:b], axis=2) for a, b in slices], axis=2)

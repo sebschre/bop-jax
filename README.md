@@ -7,7 +7,7 @@ hand-derived chains.
 
 ```bash
 uv sync                 # add --extra md for the JAX-MD interface
-uv run pytest           # about 7 minutes: every configuration is compiled once
+uv run pytest           # about 3 minutes: every configuration is compiled once
 uv run python examples/fcc_distorted.py
 ```
 
@@ -50,14 +50,38 @@ electron count.
 
 | File | Content |
 |---|---|
-| `src/bopjax/geometry.py` | neighbour lists and supercell index map (NumPy), bond vectors (JAX) |
+| `src/bopjax/geometry.py` | neighbour lists and per-atom local clusters (NumPy), bond vectors (JAX) |
 | `src/bopjax/hamiltonian.py` | Slater-Koster blocks for s, p, d; radial functions; cutoff |
 | `src/bopjax/expansion.py` | moments -> recursion coefficients -> band estimate, terminator, sigma |
 | `src/bopjax/pairwise.py` | repulsion, embedding and Coulomb functions |
 | `src/bopjax/bop.py` | moments (scalar and spinor), Fermi level, total energy |
-| `src/bopjax/scf.py` | Newton self-consistency, compiled potential, forces, stress |
+| `src/bopjax/scf.py` | Newton self-consistency (dense or Hessian-free), compiled potential, forces, stress |
 | `src/bopjax/md.py` | JAX-MD interface |
 | `src/bopjax/models.py` | canonical d-band and tungsten `v0` parameters |
+
+## Performance
+
+Moments are evaluated on a local cluster around each atom (the atoms within
+half the path length), so the cost is linear in the number of atoms. For more
+than 16 unknowns the Newton step is solved with GMRES on Hessian-vector
+products instead of a dense Hessian; the Hessian is well conditioned, so about
+ten products per step are enough.
+
+Distorted fcc supercells, canonical d-band, 9 moments, Apple M1 Pro. Times
+exclude compilation. Reproduce with `benchmarks/scaling.py`.
+
+| Atoms | bopjax, one energy + force | bopjax, self-consistent energy + force |
+|---|---|---|
+| 4 | 0.005 s | 0.06 s |
+| 32 | 0.03 s | 1.2 s |
+| 108 | 0.09 s | 3.6 s |
+| 256 | 0.31 s | 14.9 s |
+
+The self-consistent column starts from zero shifts and converges to 1e-12 in
+three Newton steps.
+
+Compilation takes 10 to 30 s per configuration, and building the clusters is
+done in Python (1.5 s for 256 atoms).
 
 ## Molecular dynamics
 
@@ -121,8 +145,8 @@ to 1e-9, so the remaining force difference is on the BOPfox side.
 - constrained-moment options of BOPfox (`scfFixMagCom`, `scfFixMagDiff`)
 - bond integral and repulsion forms other than those listed; reading BOPfox
   `atoms.bx` / `bonds.bx` / structure files
-- linear scaling: start vectors span the whole supercell and the Hessian is
-  dense, so cost grows quickly with the number of atoms
+- warm-starting self-consistency from the previous MD step (each step starts
+  from zero shifts)
 - dynamic neighbour lists inside a compiled MD loop (rebuilt from Python)
 
 ## Caveats
@@ -133,4 +157,4 @@ to 1e-9, so the remaining force difference is on the BOPfox side.
 - A strong ferromagnet with a completely filled spin-up band has extra flat
   directions; the solver handles them, but the onsite levels are then not
   unique. Non-collinear cases close to saturation can fail to converge.
-- Speed against BOPfox has not been benchmarked.
+- Timings are for one machine and one model; GPUs have not been tried.
