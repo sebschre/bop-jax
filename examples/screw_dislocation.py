@@ -33,7 +33,8 @@ from bopjax.models import tungsten_v0
 RADIUS = 18.0  # cylinder radius (Angstrom)
 FIXED = 7.6  # thickness of the fixed outer shell, two bond cutoffs
 LAYERS = 3  # periodic length along the line, in Burgers vectors
-RELAX_STEPS, MD_STEPS = 60, 100
+RELAX_STEPS, FMAX = 100, 0.01  # quick-min steps (5 fs each) and force tolerance (eV/A)
+MD_STEPS = 100
 DT = 2.0 / md.TIME_UNIT_FS  # 2 fs
 T_START = 600.0  # K; about half goes into the potential energy
 GPA = 160.21766208  # eV / A^3 in GPa
@@ -225,10 +226,11 @@ def report_core(pos, label):
     print(f"{label}: core triangle(s) relative to the initial site: {desc or 'none'}")
 
 
-def build(pos):
+def build(pos, dt=DT):
+    # third neighbours are at 4.57 A, so a skin of 0.6 A adds no neighbours
     topo = bj.build_topology(np.asarray(pos), [0] * len(pos), cfg.rcut, cfg.nmom, cell,
-                             rcut2=cfg.rcut2, skin=0.4)
-    init, apply = md.nve(bj.make_energy_fn(topo, cfg, radial=v0_bond), cell, params, DT,
+                             rcut2=cfg.rcut2, skin=0.6)
+    init, apply = md.nve(bj.make_energy_fn(topo, cfg, radial=v0_bond), cell, params, dt,
                          mobile=mobile)
     return topo, init, jax.jit(apply)
 
@@ -238,7 +240,7 @@ traj = open(sys.argv[1], "w") if len(sys.argv) > 1 else None
 if traj:
     write_xyz(traj, ref, cell, mobile, "perfect")
     write_xyz(traj, positions, cell, mobile, "elastic")
-topo, init, apply = build(positions)
+topo, init, apply = build(positions, dt=5.0 / md.TIME_UNIT_FS)
 
 # quick-min: velocity Verlet, keeping only the velocity along the force
 print("\nrelaxation (quick-min)\n step   E_pot (eV)    max |F| (eV/A)  Newton steps")
@@ -251,12 +253,12 @@ for step in range(1, RELAX_STEPS + 1):
     momentum = jnp.where(power > 0, power * f / jnp.dot(f, f), 0.0).reshape(f.shape[0] // 3, 3)
     state = state._replace(momentum=momentum)
     if bj.needs_rebuild(state.position, topo):
-        topo, init, apply = build(state.position)
+        topo, init, apply = build(state.position, dt=5.0 / md.TIME_UNIT_FS)
     fmax = float(jnp.max(jnp.linalg.norm(state.force, axis=1)))
-    if step % 10 == 0 or fmax < 0.01:
+    if step % 10 == 0 or fmax < FMAX:
         print(f"{step:5d}  {float(state.energy):12.5f}  {fmax:12.4f}  "
               f"{int(state.scf_iterations):10d}")
-    if fmax < 0.01:
+    if fmax < FMAX:
         break
 print(f"core relaxation energy: {float(state.energy) - e_elastic:.4f} eV "
       f"({(float(state.energy) - e_elastic) / LAYERS:.4f} eV per b)")
@@ -265,7 +267,8 @@ relaxed = np.asarray(state.position)
 if traj:
     write_xyz(traj, relaxed, cell, mobile, "relaxed")
 
-# constant-energy molecular dynamics from the relaxed core
+# constant-energy molecular dynamics from the relaxed core, with fresh lists
+topo, init, apply = build(relaxed)
 state = init(jax.random.PRNGKey(1), state.position, mass=183.84, kT=T_START * md.KB_EV)
 e0 = float(state.energy + md.kinetic_energy(state))
 print(f"\nNVE, dt = {DT * md.TIME_UNIT_FS:.0f} fs\n"
