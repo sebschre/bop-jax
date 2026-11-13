@@ -169,7 +169,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jax", specifier = ">=0.4.30" },
+    { name = "jax", specifier = ">=0.4.34" },
     { name = "jax-md", marker = "extra == 'md'", specifier = ">=0.2.29" },
     { name = "numpy", specifier = ">=1.26" },
 ]

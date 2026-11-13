@@ -5,6 +5,27 @@ one differentiable function; forces, stress, magnetic torques and the
 self-consistency Jacobian come from automatic differentiation instead of
 hand-derived chains.
 
+## Install
+
+As a dependency of another project, from a tagged release:
+
+```bash
+pip install "bopjax @ git+https://github.com/sebschre/bop-jax@v0.4.0"
+# with the JAX-MD interface
+pip install "bopjax[md] @ git+https://github.com/sebschre/bop-jax@v0.4.0"
+```
+
+or in `pyproject.toml`:
+
+```toml
+dependencies = ["bopjax @ git+https://github.com/sebschre/bop-jax@v0.4.0"]
+```
+
+Each [release](https://github.com/sebschre/bop-jax/releases) also carries a
+wheel that `pip install <url>` accepts. Python 3.11 to 3.13.
+
+To work on the code:
+
 ```bash
 uv sync                 # add --extra md for the JAX-MD interface
 uv run pytest           # about 3 minutes: every configuration is compiled once
@@ -174,4 +195,18 @@ to 1e-9, so the remaining force difference is on the BOPfox side.
 - A strong ferromagnet with a completely filled spin-up band has extra flat
   directions; the solver handles them, but the onsite levels are then not
   unique. Non-collinear cases close to saturation can fail to converge.
-- Timings are for one machine and one model; GPUs have not been tried.
+- Timings are for one machine and one model.
+
+## GPUs
+
+- **Apple Silicon (Metal):** tried with `jax-metal` 0.1.1 on an M1 Pro. It
+  runs and gives correct results, but it is about 200 times slower than the
+  CPU (6.3 s against 0.03 s for one energy + force evaluation of 32 atoms) and
+  needs the tensor contractions rewritten, because the backend cannot lower
+  them. The plugin was last released in October 2024, requires JAX 0.4.34 and
+  has no double precision. Not supported here.
+- **Single precision** itself costs little for the 9-moment d-band case:
+  about 1e-6 eV per atom in the energy and 4e-5 eV/A in the forces (set
+  `jax_enable_x64` to False after importing bopjax and pass float32 arrays).
+- **CUDA:** not tried. The original Jetson Nano is limited to CUDA 10.2,
+  while current JAX needs CUDA 12.
