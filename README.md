@@ -99,6 +99,23 @@ the shift from `jaxmd_space()`. Neighbour lists are static; build the topology
 with a `skin` and rebuild when `bj.needs_rebuild(positions, topo)` is true (see
 `examples/md_tungsten.py`).
 
+**Warm start.** Onsite levels change little between MD steps, so starting the
+solver from the previous ones saves most of its work. A JAX-MD integrator
+cannot carry them in its state, so `bopjax.md.nve` is a velocity-Verlet
+integrator that does, and extrapolates them quadratically to the next step:
+
+```python
+init, apply = md.nve(energy_fn, cell, params, dt=1.0 / md.TIME_UNIT_FS)
+state = init(key, positions, mass=183.84, kT=600 * md.KB_EV)
+state = apply(state)          # state.scf_iterations: Newton steps taken
+```
+
+For 54 tungsten atoms this takes one Newton step per MD step instead of two
+to three, 183 ms against 440 ms, with the same trajectory and energy
+conservation (`examples/md_warm_start.py`). With JAX-MD's own integrators,
+pass `shifts0=` to `apply_fn` and obtain it from `md.jaxmd_shifts_fn`, at the
+price of a second, already converged solve.
+
 ## Validation against BOPfox
 
 Distorted fcc cell, canonical d-band integrals, see `tests/`. "Energy" is the
@@ -145,8 +162,8 @@ to 1e-9, so the remaining force difference is on the BOPfox side.
 - constrained-moment options of BOPfox (`scfFixMagCom`, `scfFixMagDiff`)
 - bond integral and repulsion forms other than those listed; reading BOPfox
   `atoms.bx` / `bonds.bx` / structure files
-- warm-starting self-consistency from the previous MD step (each step starts
-  from zero shifts)
+- thermostats and barostats with warm start (only constant-energy dynamics
+  carries the onsite levels; use JAX-MD's integrators otherwise)
 - dynamic neighbour lists inside a compiled MD loop (rebuilt from Python)
 
 ## Caveats

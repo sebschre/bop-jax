@@ -39,7 +39,7 @@ def _newton_step(hess, g):
     return -jnp.linalg.pinv(hess, rtol=1e-10, hermitian=True) @ g
 
 
-def _krylov_step(grad, x, g, rtol=1e-6, restart=12, maxiter=2):
+def _krylov_step(grad, x, g, atol=0.0, rtol=1e-6, restart=4, maxiter=6):
     """Newton step from GMRES with Hessian-vector products.
 
     Each product costs about two gradient evaluations and no Hessian is ever
@@ -50,8 +50,10 @@ def _krylov_step(grad, x, g, rtol=1e-6, restart=12, maxiter=2):
 
     The Hessian is well conditioned in practice (eigenvalues within a factor of
     about three of each other for the d-band test cells), so about ten products
-    reach ``rtol``.  JAX's GMRES always completes a restart cycle, hence the
-    short cycle.
+    reduce the linear residual by 1e-6.  The solve stops once that residual is
+    below ``atol``: from a good starting guess (molecular dynamics) a handful
+    of products is then enough.  JAX's GMRES only checks between restart
+    cycles, hence the short cycle.
     """
     def hvp(v):
         return jax.jvp(grad, (x,), (v,))[1]
@@ -59,7 +61,7 @@ def _krylov_step(grad, x, g, rtol=1e-6, restart=12, maxiter=2):
     # keep the Krylov space smaller than the rank of the Hessian, which is at
     # most size - 1 when a uniform shift is a null mode
     restart = max(1, min(restart, g.shape[0] - 1))
-    step, _ = jax.scipy.sparse.linalg.gmres(hvp, -g, tol=rtol, atol=0.0, restart=restart,
+    step, _ = jax.scipy.sparse.linalg.gmres(hvp, -g, tol=rtol, atol=atol, restart=restart,
                                             maxiter=maxiter)
     return jnp.where(jnp.all(jnp.isfinite(step)), step, jnp.zeros_like(step))
 
@@ -86,8 +88,8 @@ def make_scf(energy_fn, method="auto"):
     val_grad = jax.jit(jax.value_and_grad(flat_energy, has_aux=True))
     plain_grad = jax.grad(lambda *a: flat_energy(*a)[0])
     hessian = jax.jit(jax.jacfwd(plain_grad))
-    krylov_step = jax.jit(lambda x, g, positions, cell, params: _krylov_step(
-        lambda y: plain_grad(y, positions, cell, params), x, g))
+    krylov_step = jax.jit(lambda x, g, positions, cell, params, atol: _krylov_step(
+        lambda y: plain_grad(y, positions, cell, params), x, g, atol))
 
     def solve(positions, cell, params, shifts0=None, tol=1e-10, max_iter=30,
               verbose=False):
@@ -102,7 +104,7 @@ def make_scf(energy_fn, method="auto"):
             norm = float(jnp.linalg.norm(g))
             if krylov:
                 # Newton direction, shortened if the residual does not drop
-                step = krylov_step(x, g, positions, cell, params)
+                step = krylov_step(x, g, positions, cell, params, 0.3 * tol)
                 for _ in range(8):
                     x_new = x + step
                     (e_new, aux_new), g_new = val_grad(x_new, positions, cell, params)
@@ -152,7 +154,10 @@ def make_potential(energy_fn, tol=1e-10, max_iter=20, self_consistent=True,
     The converged shifts enter through ``stop_gradient``: because the energy is
     stationary in them, ``jax.grad`` of the result with respect to positions,
     cell or parameters is the exact total derivative.  ``aux["shifts"]`` holds
-    the converged shifts and ``aux["scf_residual"]`` the final max |dE/dshift|.
+    the converged shifts, ``aux["scf_residual"]`` the final max |dE/dshift| and
+    ``aux["scf_iterations"]`` the number of Newton steps taken.  ``shifts0`` is
+    the starting guess; passing the shifts of a nearby configuration (the
+    previous molecular dynamics step) saves most of the iterations.
     ``method`` selects the linear solver as in ``make_scf``.
     """
     shape = energy_fn.shift_shape
@@ -173,23 +178,27 @@ def make_potential(energy_fn, tol=1e-10, max_iter=20, self_consistent=True,
         def body(state):
             x, g, it = state
             if krylov:
-                x = x + _krylov_step(lambda y: grad(y, positions, cell, params), x, g)
+                x = x + _krylov_step(lambda y: grad(y, positions, cell, params), x, g,
+                                     0.3 * tol)
             else:
                 x = x + _newton_step(hessian(x, positions, cell, params), g)
             return x, grad(x, positions, cell, params), it + 1
 
-        x, g, _ = jax.lax.while_loop(cond, body, (x0, grad(x0, positions, cell, params), 0))
-        return x, jnp.max(jnp.abs(g))
+        x, g, it = jax.lax.while_loop(cond, body, (x0, grad(x0, positions, cell, params), 0))
+        return x, jnp.max(jnp.abs(g)), it
 
     def potential(positions, cell, params, shifts0=None):
         x = jnp.zeros(size, dtype=positions.dtype) if shifts0 is None else jnp.ravel(shifts0)
-        residual = jnp.max(jnp.abs(grad(x, positions, cell, params)))
+        iterations = jnp.zeros((), dtype=jnp.int32)
         if self_consistent:
             frozen = jax.lax.stop_gradient((x, positions, cell, params))
-            x, residual = converge(*frozen)
+            x, residual, iterations = converge(*frozen)
+        else:
+            residual = jnp.max(jnp.abs(grad(x, positions, cell, params)))
         x = jax.lax.stop_gradient(x)
         e, aux = energy_fn(x.reshape(shape), positions, cell, params)
-        aux = dict(aux, shifts=x.reshape(shape), scf_residual=jax.lax.stop_gradient(residual))
+        aux = dict(aux, shifts=x.reshape(shape), scf_iterations=iterations,
+                   scf_residual=jax.lax.stop_gradient(residual))
         return e, aux
 
     return potential

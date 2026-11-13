@@ -340,3 +340,40 @@ def test_jaxmd_conserves_energy():
         state = apply(state)
     assert total(state) == pytest.approx(e0, abs=1e-6)
     assert not bj.needs_rebuild(state.position, topo)
+
+
+def test_warm_started_md_matches_cold_start():
+    """Starting each solve from extrapolated onsite levels changes the cost,
+    not the trajectory."""
+    from bopjax import md
+
+    # four inequivalent atoms, so that the onsite levels actually differ
+    cell = np.array(CELL) * 4.0 / A
+    pos = POS_NP * 4.0 / A
+    cfg = bj.BOPConfig(nmom=6, rcut=3.6, dcut=0.5, rcut2=3.6, dcut2=0.5, repulsion=pw.V0)
+    topo = bj.build_topology(pos, [0] * 4, cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2, skin=0.3)
+    energy = bj.make_energy_fn(topo, cfg, radial=v0_bond)
+    init, apply = md.nve(energy, cell, tungsten_v0(), 1.0 / md.TIME_UNIT_FS)
+    warm = jax.jit(apply)
+    cold = jax.jit(lambda s: apply(s._replace(
+        shifts=jnp.zeros_like(s.shifts), shifts_history=jnp.zeros_like(s.shifts_history))))
+
+    start = init(jax.random.PRNGKey(3), jnp.array(pos), 183.84, 300 * md.KB_EV)
+    e_start = float(start.energy + md.kinetic_energy(start))
+    state_w = state_c = start
+    iterations_w, iterations_c = [], []
+    for _ in range(15):
+        state_w, state_c = warm(state_w), cold(state_c)
+        iterations_w.append(int(state_w.scf_iterations))
+        iterations_c.append(int(state_c.scf_iterations))
+
+    np.testing.assert_allclose(state_w.position, state_c.position, atol=1e-7)
+    e_warm = float(state_w.energy + md.kinetic_energy(state_w))
+    e_cold = float(state_c.energy + md.kinetic_energy(state_c))
+    assert e_warm == pytest.approx(e_cold, abs=1e-8)
+    # conservation is limited by the 1 fs step in this strongly distorted cell
+    assert e_warm == pytest.approx(e_start, abs=1e-4)
+    assert float(md.temperature(start)) > 0.0
+    # after the history has filled, the warm start needs fewer Newton steps
+    assert np.mean(iterations_w[3:]) < np.mean(iterations_c[3:])
+    assert max(iterations_w[3:]) <= 1

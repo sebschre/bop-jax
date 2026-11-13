@@ -1,6 +1,6 @@
 [project]
 name = "bopjax"
-version = "0.0.1"
+version = "0.4.0"
 description = "Analytic bond-order potentials in JAX: energies, forces and self-consistency from automatic differentiation"
 requires-python = ">=3.11,<3.14"
 dependencies = [
