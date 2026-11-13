@@ -91,9 +91,11 @@ class NVEState(NamedTuple):
     shifts_history: jnp.ndarray  # (2, ...) those of the two steps before
     energy: jnp.ndarray  # potential energy at ``position``
     scf_iterations: jnp.ndarray  # Newton steps the last force evaluation took
+    mobile: jnp.ndarray  # (N, 1), 1.0 for atoms that move, 0.0 for fixed ones
 
 
-def nve(energy_fn, cell, params, dt, tol=1e-7, max_iter=20, extrapolate=True):
+def nve(energy_fn, cell, params, dt, tol=1e-7, max_iter=20, extrapolate=True,
+        mobile=None):
     """Velocity-Verlet integrator with warm-started self-consistency.
 
     Returns ``(init_fn, apply_fn)`` in the style of JAX-MD:
@@ -118,13 +120,17 @@ def nve(energy_fn, cell, params, dt, tol=1e-7, max_iter=20, extrapolate=True):
 
     def init_fn(key, positions, mass=1.0, kT=0.0):
         positions = jnp.asarray(positions)
-        mass = jnp.broadcast_to(jnp.asarray(mass, dtype=positions.dtype).reshape(-1, 1),
-                                (positions.shape[0], 1))
+        n = positions.shape[0]
+        mask = (jnp.ones((n, 1), positions.dtype) if mobile is None
+                else jnp.asarray(mobile, dtype=positions.dtype).reshape(n, 1))
+        mass = jnp.broadcast_to(jnp.asarray(mass, dtype=positions.dtype).reshape(-1, 1), (n, 1))
         momentum = jnp.sqrt(mass * kT) * jax.random.normal(key, positions.shape, positions.dtype)
-        momentum = momentum - jnp.mean(momentum, axis=0, keepdims=True)  # no drift
+        # no drift of the moving atoms
+        momentum = momentum - jnp.sum(mask * momentum, axis=0) / jnp.sum(mask)
+        momentum = mask * momentum
         energy, force, shifts, iterations = evaluate(positions, None)
-        return NVEState(positions, momentum, force, mass, shifts,
-                        jnp.stack([shifts, shifts]), energy, iterations)
+        return NVEState(positions, momentum, mask * force, mass, shifts,
+                        jnp.stack([shifts, shifts]), energy, iterations, mask)
 
     def apply_fn(state):
         momentum = state.momentum + 0.5 * dt * state.force
@@ -132,9 +138,10 @@ def nve(energy_fn, cell, params, dt, tol=1e-7, max_iter=20, extrapolate=True):
         s0, (s1, s2) = state.shifts, state.shifts_history
         guess = 3.0 * s0 - 3.0 * s1 + s2 if extrapolate else s0
         energy, force, shifts, iterations = evaluate(position, guess)
+        force = state.mobile * force
         momentum = momentum + 0.5 * dt * force
         return NVEState(position, momentum, force, state.mass, shifts,
-                        jnp.stack([s0, s1]), energy, iterations)
+                        jnp.stack([s0, s1]), energy, iterations, state.mobile)
 
     return init_fn, apply_fn
 
@@ -144,5 +151,6 @@ def kinetic_energy(state: NVEState):
 
 
 def temperature(state: NVEState):
-    """Instantaneous temperature in Kelvin (three degrees of freedom per atom)."""
-    return 2.0 * kinetic_energy(state) / (3.0 * state.position.shape[0] * KB_EV)
+    """Instantaneous temperature in Kelvin (three degrees of freedom per
+    moving atom)."""
+    return 2.0 * kinetic_energy(state) / (3.0 * jnp.sum(state.mobile) * KB_EV)

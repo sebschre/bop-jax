@@ -152,6 +152,15 @@ conservation (`examples/md_warm_start.py`). With JAX-MD's own integrators,
 pass `shifts0=` to `apply_fn` and obtain it from `md.jaxmd_shifts_fn`, at the
 price of a second, already converged solve.
 
+**Fixed atoms.** `md.nve(..., mobile=mask)` holds the atoms outside the mask
+in place (zero momentum, force ignored) while their onsite levels stay
+self-consistent. `examples/screw_dislocation.py` uses it for a 1/2[111] screw
+dislocation in a cylinder that is periodic along the line, with the outer
+12 A fixed at the anisotropic (Stroh) elastic solution for the model's own
+elastic constants. It relaxes the core and runs NVE dynamics, following the
+core through the differential displacements. The fixed shell must be thick:
+the free surface still exerts 0.2 eV/A on atoms 8 to 10 A below it.
+
 ## Validation against BOPfox
 
 Distorted fcc cell, canonical d-band integrals, see `tests/`. "Energy" is the
