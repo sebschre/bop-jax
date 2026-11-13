@@ -10,6 +10,17 @@ constant-energy molecular dynamics, with the onsite levels warm-started.
 The core position is the triangle of [111] atomic columns that the
 differential displacements enclose a Burgers vector in.
 
+What to expect with this parameter set (a0 = 3.232 A, C11 = 337, C12 = 257,
+C44 = 121 GPa, so C' is soft and the anisotropy ratio is 3): the core starts
+compact, relaxes by about 0.73 eV per b into a core spread on the (-110)
+plane, and keeps that structure, in its initial site, through the molecular
+dynamics; the total energy stays within a few meV with 2 fs steps.  Real
+tungsten (DFT, and the BOP of Mrovec et al.) has a compact core; the
+parameters in ``bopjax.models.tungsten_v0`` are not fitted to it.
+
+705 atoms, 126 of them mobile.  About an hour on a 4-core cloud machine,
+most of it in the relaxation.
+
 Needs nothing beyond bopjax.  Run with:
     uv run python examples/screw_dislocation.py [trajectory.xyz]
 The optional file receives extended-XYZ frames (for OVITO, ASE, ...): the
@@ -36,7 +47,9 @@ RADIUS = 21.0  # cylinder radius (Angstrom)
 # hops, and self-consistency further), and less than 0.01 eV/A beyond 12 A.
 FIXED = 12.0
 LAYERS = 3  # periodic length along the line, in Burgers vectors
-RELAX_STEPS, FMAX = 100, 0.01  # quick-min steps (5 fs each) and force tolerance (eV/A)
+# The core first sits near a compact configuration (max |F| ~0.02 eV/A after
+# 30 steps) and then spreads slowly on the (-110) plane, so do not stop early.
+RELAX_STEPS, FMAX = 200, 0.005  # quick-min steps (5 fs each) and force tolerance (eV/A)
 MD_STEPS = 100
 DT = 2.0 / md.TIME_UNIT_FS  # 2 fs
 T_START = 600.0  # K; about half goes into the potential energy
