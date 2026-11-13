@@ -78,6 +78,7 @@ reference program and its contributors.
 | Terminator | `none`/`constantabn`, `oscillation`, `weighted`; Jackson kernel |
 | Magnetism | `collinear`, `noncollinear` (fixed local spin axes, torques from the gradient) |
 | Coulomb | onsite `J_ii`; intersite `frauenheim` with taper |
+| Screening | environment-dependent d-d bond integrals (`BOPConfig(screening=True)`), not yet compared with BOPfox |
 | Repulsion | pair term plus embedding (`pairwise.V0`, `pairwise.POWERLAW`, or your own) |
 | Stress | `make_stress`, strain derivative of the self-consistent energy |
 | Molecular dynamics | `bopjax.md` for [JAX-MD](https://github.com/jax-md/jax-md) |
@@ -87,7 +88,7 @@ reference program and its contributors.
 | File | Content |
 |---|---|
 | `src/bopjax/geometry.py` | neighbour lists and per-atom local clusters (NumPy), bond vectors (JAX) |
-| `src/bopjax/hamiltonian.py` | Slater-Koster blocks for s, p, d; radial functions; cutoff |
+| `src/bopjax/hamiltonian.py` | Slater-Koster blocks for s, p, d; radial functions; cutoff; screening |
 | `src/bopjax/expansion.py` | moments -> recursion coefficients -> band estimate, terminator, sigma |
 | `src/bopjax/pairwise.py` | repulsion, embedding and Coulomb functions |
 | `src/bopjax/bop.py` | moments (scalar and spinor), Fermi level, total energy |
@@ -201,9 +202,45 @@ to 1e-9, so the remaining force difference is on the BOPfox side.
   shell; BOPfox uses the summed integrals times the total moment squared. The
   two agree for a single shell, which is all that was compared.
 
+## Screening
+
+With `BOPConfig(screening=True)` the d-d bond integrals depend on the
+environment of the bond (Nguyen-Manh, Pettifor and Vitek, PRL 85, 4136
+(2000); Mrovec et al., PRB 69, 094115 (2004)): a valence s orbital on every
+atom k around the bond i-j screens it,
+
+    beta~_tau = beta_tau (1 - S_tau),    tau = sigma, pi, delta
+    S_tau = (c1 - mu2 + mu3) / (1 + O_tau^2 - 2 mu2)
+
+where `c1` is the interference of the sd-sigma bond integral and overlap
+through k, and `mu2`, `mu3` are moments of the overlap matrix
+(`hamiltonian.screening_terms` has the expressions). The functions go in
+`params["screening"]`:
+
+```python
+params["screening"] = {
+    "sds": ...,            # sd-sigma bond integral, [s species, d species]
+    "sds_overlap": ...,    # sd-sigma overlap
+    "dds_overlap": ..., "ddp_overlap": ..., "ddd_overlap": ...,
+}                          # each (nspecies, nspecies, npar)
+energy = bj.make_energy_fn(topo, cfg, radial=..., screening_radial=...)
+```
+
+They share the cutoff of the bond integrals, so no further neighbour list is
+needed and the cost is small next to the moments. Forces and stress, which
+now contain three-body terms, come from the same automatic differentiation.
+
+**Not yet validated against BOPfox.** The angular factors and weights are
+checked against explicit Slater-Koster matrices of a trimer, the dimer limit
+`beta / (1 - O^2)`, hermiticity, and forces and stress against finite
+differences (`tests/test_screening.py`). The prefactors of `mu3` and the
+exact form BOPfox evaluates were not available when this was written and may
+differ.
+
 ## Not implemented
 
-- screening
+- environment-dependent (screened Yukawa) repulsion; screening of integrals
+  other than d-d
 - constrained-moment options of BOPfox (`scfFixMagCom`, `scfFixMagDiff`)
 - bond integral and repulsion forms other than those listed; reading BOPfox
   `atoms.bx` / `bonds.bx` / structure files
