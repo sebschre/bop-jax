@@ -26,3 +26,24 @@ def canonical_d(n_electrons=4.8, onsite=0.0, hubbard=0.0):
         "hubbard": hub,
         "bond": {"dds": channel(-1.458), "ddp": channel(0.972), "ddd": channel(-0.243)},
     }
+
+
+def tungsten_v0():
+    """d-band tungsten with pair repulsion and embedding (BOPfox "v0" W_LIM_I,
+    after Lim).  Use with ``radial=bopjax.hamiltonian.v0_bond`` and
+    ``BOPConfig(repulsion=bopjax.pairwise.V0, rcut2=...)``."""
+
+    def channel(prefactor):
+        return jnp.array([[[prefactor, 4.2, 100.0, 1.0, 2.73664]]])
+
+    return {
+        "onsite": jnp.zeros((1, 1)),
+        "n0": jnp.array([[4.8]]),
+        "hubbard": jnp.array([8.0]),
+        "bond": {"dds": channel(-1.458), "ddp": channel(0.972), "ddd": channel(-0.243)},
+        "repulsion": {
+            "pair": jnp.array([[[7.94383, 6.43110, 2.73664]]]),
+            "density": jnp.array([[[3.39726, 5.66484, 2.73664]]]),
+            "embed": jnp.array([[-1.0, 1.0]]),
+        },
+    }

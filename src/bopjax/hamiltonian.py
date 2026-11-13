@@ -127,3 +127,9 @@ def bond_blocks(rij, mask, species_i, species_j, bond_params, basis, rcut, dcut,
         return fc * jnp.block(rows)
 
     return jax.vmap(jax.vmap(one))(rij, mask.astype(rij.dtype), species_i, species_j)
+
+
+def v0_bond(p, r):
+    """BOPfox "v0" bond integral (Lim): p = [prefactor, decay, mu, power, r0]."""
+    x = r / p[4]
+    return p[0] * jnp.exp(-p[1] * (x - 1.0)) * (1.0 - jnp.exp(-p[2] * x ** p[3]))
