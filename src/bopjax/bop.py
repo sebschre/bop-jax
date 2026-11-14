@@ -24,8 +24,9 @@ import numpy as np
 
 from . import expansion as ex
 from . import pairwise as pw
-from .geometry import Topology, bond_vectors, pair_vectors
-from .hamiltonian import L_OF, bond_blocks, cosine_cutoff, powerlaw, shell_slices
+from .geometry import Topology, bond_vectors, pair_vectors, reverse_slots
+from .hamiltonian import (L_OF, bond_blocks, cosine_cutoff, powerlaw,
+                          screening_factors, shell_slices)
 
 SPIN_MODES = ("none", "collinear", "noncollinear")
 
@@ -47,6 +48,7 @@ class BOPConfig:
     spin: str = "none"  # see SPIN_MODES
     repulsion: pw.Repulsion | None = None
     coulomb: str = "diagonal"  # "diagonal" (onsite only) or "frauenheim"
+    screening: bool = False  # environment-dependent d-d bond integrals
     batch: int = 64  # atoms whose moments are evaluated at once (memory)
 
     @property
@@ -164,7 +166,8 @@ def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: i
     return jax.lax.map(lambda x: one(*x), xs, batch_size=batch)
 
 
-def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw):
+def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
+                   screening_radial=None):
     """Return ``energy(shifts, positions, cell, params) -> (E, aux)``.
 
     params is a dict of arrays:
@@ -177,6 +180,15 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw):
       "repulsion" {"pair", "density": (nspecies, nspecies, npar),
                    "embed": (nspecies, npar)}                  [cfg.repulsion]
       "taper"     (nspecies, nspecies, 2)   R1, R2             [cfg.coulomb]
+      "screening" {"sds", "sds_overlap", "dds_overlap", "ddp_overlap",
+                   "ddd_overlap": (nspecies, nspecies, npar)}  [cfg.screening]
+
+    With ``cfg.screening`` the d-d bond integrals are screened by a valence s
+    orbital on the surrounding atoms (see ``hamiltonian.screening_factors``).
+    "sds" is the sd-sigma bond integral and the other entries are overlaps;
+    for "sds*" the entry [a, b] has the s orbital on species a.  They are
+    evaluated with ``screening_radial`` (default: ``radial``) and share the
+    cutoff of the bond integrals.
 
     ``shifts`` has shape ``energy.shift_shape``: (N, nshell), or (N, 2, nshell)
     for magnetic calculations (spin up, spin down).
@@ -192,6 +204,10 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw):
     degeneracy = np.array([(2.0 / nspin) * (2 * L_OF[s] + 1) for s in cfg.basis])
     species = topo.species
     orb_shell = np.concatenate([[k] * (b - a) for k, (a, b) in enumerate(slices)])
+    if cfg.screening and "d" not in cfg.basis:
+        raise ValueError("screening acts on d-d bond integrals; the basis has no d shell")
+    nbr_reverse = reverse_slots(topo) if cfg.screening else None
+    screening_radial = radial if screening_radial is None else screening_radial
     needs_pairs = cfg.repulsion is not None or cfg.coulomb != "diagonal"
     if needs_pairs and topo.nbr2_mask is None:
         raise ValueError("build the topology with rcut2 for repulsion or Coulomb terms")
@@ -269,9 +285,14 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw):
     def energy(shifts, positions, cell, params):
         rij = bond_vectors(positions, cell, topo)
         species_i = np.broadcast_to(species[:, None], topo.nbr_origin.shape)
+        dd_screen = None
+        if cfg.screening:
+            dd_screen = screening_factors(
+                rij, topo.nbr_mask, species, topo.nbr_origin, nbr_reverse,
+                params["screening"], cfg.rcut, cfg.dcut, screening_radial)
         hblk = bond_blocks(rij, topo.nbr_mask, species_i,
                            species[topo.nbr_origin], params["bond"], cfg.basis,
-                           cfg.rcut, cfg.dcut, radial)
+                           cfg.rcut, cfg.dcut, radial, dd_screen)
         e0 = params["onsite"][species]  # (N, nshell)
         levels = e0[:, None, :] + shifts.reshape(topo.n_atoms, nspin, nshell)
         orb_levels = levels[:, :, orb_shell]  # (N, nspin, norb)

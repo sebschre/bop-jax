@@ -164,6 +164,24 @@ def needs_rebuild(positions, topo: Topology) -> bool:
     return bool(moved.max() > 0.5 * topo.skin)
 
 
+def reverse_slots(topo: Topology) -> np.ndarray:
+    """For bond slot [i, a] to neighbour j, the slot of j that points back at i.
+
+    Shape (N, K); padded slots get 0.  The neighbour lists are symmetric, so
+    every real bond has a reverse.
+    """
+    origin, trans, mask = topo.nbr_origin, topo.nbr_cell, topo.nbr_mask
+    rev = np.zeros(origin.shape, dtype=np.int32)
+    for i in range(topo.n_atoms):
+        j = origin[i]  # (K,)
+        back = (origin[j] == i) & mask[j] & np.all(
+            trans[j] == -trans[i][:, None, :], axis=-1)  # (K, K)
+        if not np.all(back.any(axis=1) | ~mask[i]):
+            raise ValueError("neighbour list is not symmetric")
+        rev[i] = np.where(mask[i], back.argmax(axis=1), 0)
+    return rev
+
+
 def _vectors(positions, cell, origin, trans, mask):
     rij = positions[origin] - positions[:, None, :]
     if cell is not None:
