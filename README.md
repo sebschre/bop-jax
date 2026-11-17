@@ -125,6 +125,7 @@ This prints -6.0112485448437 eV per atom, the BOPfox value to all 13 digits.
 | [Visualisation](docs/visualisation.md) | trajectories and animations with OVITO |
 | [Validation](docs/validation.md) | agreement with BOPfox, and where the two codes differ |
 | [Screening](docs/screening.md) | environment-dependent d-d bond integrals |
+| [Iron](docs/iron.md) | magnetic d-band iron model: fit, phase stability, elastic constants, magnetism |
 | [Limitations](docs/limitations.md) | what is not implemented, caveats |
 
 ## References
