@@ -1,0 +1,66 @@
+name: Release
+
+# Push a tag vX.Y.Z whose version matches pyproject.toml. The tests run, the
+# wheel and source archive are built, and a GitHub release is created with
+# both attached. If a release for the tag already exists (for instance one
+# written by hand), the archives are attached to it and its notes are kept.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches pyproject.toml
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Tag v$tag does not match pyproject.toml version $version"
+            exit 1
+          fi
+
+  ci:
+    needs: check-version
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Create or update the GitHub release
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            version="${TAG#v}"
+            cat > notes.md <<NOTES
+          ## Install
+
+          \`\`\`bash
+          pip install "bopjax @ git+https://github.com/${GITHUB_REPOSITORY}@${TAG}"
+          # or the wheel attached below
+          pip install https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/bopjax-${version}-py3-none-any.whl
+          \`\`\`
+
+          Add \`[md]\` for the JAX-MD interface and \`[viz]\` for OVITO rendering. Python 3.11 to 3.13.
+
+          NOTES
+            gh release create "$TAG" dist/* --title "$TAG" --notes-file notes.md --generate-notes --verify-tag
+          fi
