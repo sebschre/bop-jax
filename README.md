@@ -82,6 +82,7 @@ reference program and its contributors.
 | Repulsion | pair term plus embedding (`pairwise.V0`, `pairwise.POWERLAW`, or your own) |
 | Stress | `make_stress`, strain derivative of the self-consistent energy |
 | Molecular dynamics | `bopjax.md` for [JAX-MD](https://github.com/jax-md/jax-md) |
+| Spin dynamics | `bopjax.spin`: Landau-Lifshitz-Gilbert precession, damping and thermal torques for the non-collinear spin axes |
 
 ## Layout
 
@@ -94,6 +95,7 @@ reference program and its contributors.
 | `src/bopjax/bop.py` | moments (scalar and spinor), Fermi level, total energy |
 | `src/bopjax/scf.py` | Newton self-consistency (dense or Hessian-free), compiled potential, forces, stress |
 | `src/bopjax/md.py` | JAX-MD interface |
+| `src/bopjax/spin.py` | spin dynamics of the non-collinear spin axes |
 | `src/bopjax/models.py` | canonical d-band and tungsten `v0` parameters |
 
 ## Performance
@@ -161,6 +163,74 @@ dislocation in a cylinder that is periodic along the line, with the outer
 elastic constants. It relaxes the core and runs NVE dynamics, following the
 core through the differential displacements. The fixed shell must be thick:
 the free surface still exerts 0.2 eV/A on atoms 8 to 10 A below it.
+
+## Spin dynamics
+
+In a non-collinear calculation the spin axes `e_i` play the role positions
+play in molecular dynamics: the self-consistent energy is a function of them,
+and its gradient gives the torque `-e_i x dE/de_i`. `bopjax.spin` moves the
+axes with the Landau-Lifshitz-Gilbert equation while the atoms stay fixed,
+
+    S_i de_i/dt = -e_i x dE/de_i - alpha |S_i| e_i x de_i/dt,    S_i = hbar m_i / 2
+
+where `m_i` is the self-consistent moment along the axis. The onsite levels,
+and with them the lengths of the moments, are made self-consistent at every
+step (adiabatic spin dynamics, Antropov et al., PRB 54, 1019 (1996)).
+
+```python
+from bopjax import md, spin
+
+init, apply = spin.llg(energy_fn, cell, params, dt=0.2 / md.TIME_UNIT_FS,
+                       alpha=0.0, kT=0.0)
+state = init(positions, axes, shifts0=bj.stoner_shifts(moments, stoner))
+state = jax.jit(apply)(state)
+state.axes, state.moment, state.energy, spin.torque(state)
+```
+
+| Setting | Dynamics | Counterpart in MD |
+|---|---|---|
+| `alpha = 0` | precession, energy conserved | NVE |
+| `alpha > 0` | Gilbert damping, energy falls until the torques vanish | damped relaxation |
+| `alpha > 0, kT > 0` | random torques obeying fluctuation-dissipation (stochastic LLG), directions sample `exp(-E / kT)` | Langevin thermostat |
+
+The integrator is Heun's predictor-corrector scheme with each update applied
+as a rotation, so the axes keep unit length to machine precision. It is of
+second order and takes two self-consistent gradient evaluations per step, both
+warm-started from the onsite levels in the state. `free=mask` holds some axes
+fixed. `shifts0` selects the magnetic solution: from zero the solver finds the
+non-magnetic one. `spin.integrator` runs the same scheme on any function that
+returns an energy gradient and moments, for example a Heisenberg model.
+
+Precession is fast (0.15 rad/fs for a gradient of 0.1 eV on a moment of
+2 Bohr magnetons), so steps are a fraction of a femtosecond without damping.
+
+`examples/spin_dynamics.py` runs the 4-atom non-collinear cell of the
+validation. Without damping the energy drifts by 1e-7 eV per 0.2 fs step
+against torques of 0.1 eV, with two Newton steps per evaluation. With
+`alpha = 1` it falls by 0.40 eV in 8 fs, equal to the integral of
+`spin.damping_power` to 1e-4 eV. The cost is that of the non-collinear energy:
+a step is two self-consistent solves on spinor moments (about 5 s for the 4
+atoms on a 4-core cloud machine, most of it in the dense Hessian).
+
+That damped run is stopped early. The model relaxes towards a ferromagnet
+with a full spin-up band, and close to saturation `make_potential`'s Newton
+solver fails and the state becomes NaN (see Caveats). Relaxing to vanishing
+torques needs a model whose minimum is not saturated, or a safeguarded solver.
+
+What is checked (`tests/test_spin.py`): precession and damping of a moment in
+a field against the analytic solutions, for both signs of the moment; second
+order convergence; conservation of energy and total spin for a Heisenberg
+ring; the thermal average of the direction against the Langevin function; and
+for the BOP energy, conservation of the energy, its loss to damping and
+the equivalence of `(e, m)` and `(-e, -m)`. Thermal torques are tested on
+the model energy only.
+
+Limits: the atoms do not move (no coupled spin-lattice dynamics yet); the
+lengths of the moments follow adiabatically and have no fluctuations of their
+own; atoms whose moment vanishes have no direction to integrate (`min_moment`
+bounds |m| in the equation of motion); there is no spin-orbit coupling in the
+model, so no magnetic anisotropy and no transfer of angular momentum to the
+lattice.
 
 ## Validation against BOPfox
 
@@ -250,6 +320,8 @@ differ.
 - constrained-moment options of BOPfox (`scfFixMagCom`, `scfFixMagDiff`)
 - bond integral and repulsion forms other than those listed; reading BOPfox
   `atoms.bx` / `bonds.bx` / structure files
+- spin dynamics coupled to moving atoms (spin-lattice dynamics); longitudinal
+  fluctuations of the moments; an external magnetic field
 - thermostats and barostats with warm start (only constant-energy dynamics
   carries the onsite levels; use JAX-MD's integrators otherwise)
 - dynamic neighbour lists inside a compiled MD loop (rebuilt from Python)
