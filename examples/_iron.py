@@ -72,9 +72,10 @@ class Calculator:
     parameters within about +-6 % of ``phase.a_guess`` need no rebuild.
     """
 
-    def __init__(self, phase: Phase, skin=0.5, **config):
+    def __init__(self, phase: Phase, skin=0.5, basis=("d",), **config):
         self.phase = phase
-        cfg_kw = dict(IRON_CONFIG, **config)
+        self.basis = tuple(basis)
+        cfg_kw = dict(IRON_CONFIG, basis=self.basis, **config)
         radial = v0_bond
         spin = "none" if phase.moments is None else "collinear"
         self.cfg = bj.BOPConfig(spin=spin, **cfg_kw)
@@ -93,8 +94,9 @@ class Calculator:
     def _start(self, params):
         if self.phase.moments is None:
             return None
-        m = np.asarray(self.phase.moments, float)[:, None]
-        return bj.stoner_shifts(m, params["stoner"][0, 0])
+        m = np.asarray(self.phase.moments, float)[:, None] * (
+            np.array(self.basis) == "d")[None, :]  # the moment sits on the d shell
+        return bj.stoner_shifts(m, params["stoner"][0])
 
     def _geometry(self, a, strain=None):
         cell, pos = self.phase.lattice(a, *self.extra)
