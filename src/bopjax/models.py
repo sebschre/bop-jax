@@ -51,12 +51,11 @@ def tungsten_v0():
     }
 
 
-# parameters of the iron model: best point of an unfinished fit (examples/fit_iron.py,
-# docs/iron.md)
+# fitted parameters of the iron model (examples/fit_iron.py, docs/iron.md)
 IRON_FIT = {
-    "dds": -1.1291, "ddp": 0.4985, "ddd": -0.0114, "decay": 4.2312, "n_d": 6.8659,
-    "stoner": 1.1662, "pair": 0.6442, "pair_decay": 9.8284, "embed": 1.5104,
-    "density_decay": 3.1980, "r0": 2.48,
+    "dds": -1.14744, "ddp": 0.51229, "ddd": -0.03851, "decay": 4.38348, "n_d": 6.88178,
+    "stoner": 1.16487, "pair": 0.64199, "pair_decay": 9.98837, "embed": 1.51835,
+    "density_decay": 2.79649, "r0": 2.48,
 }
 
 
