@@ -60,10 +60,12 @@ def eos(calc, a, span=0.05, n=11):
                     abs(np.linalg.det(calc.phase.lattice(s * a, *calc.extra)[0])) / 2)
         ens.append(e)
         moms.append(mean_abs_moment(aux))
-    vols, ens = np.array(vols), np.array(ens)
+    vols, ens, moms = np.array(vols), np.array(ens), np.array(moms)
+    ok = np.isfinite(ens)  # a point whose self-consistency failed is left out
+    vols, ens, moms = vols[ok], ens[ok], moms[ok]
     i = np.argmin(ens)
     fit, _ = curve_fit(birch_murnaghan, vols, ens, p0=(ens[i], vols[i], 1.0, 5.0))
-    return vols, ens, np.array(moms), fit
+    return vols, ens, moms, fit
 
 
 def volume(calc, a):
