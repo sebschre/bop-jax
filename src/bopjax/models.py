@@ -5,6 +5,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from . import pairwise as pw
+from .hamiltonian import CHANNELS
 
 
 def canonical_d(n_electrons=4.8, onsite=0.0, hubbard=0.0):
@@ -59,35 +60,77 @@ IRON_FIT = {
 }
 
 
-def iron(**values):
-    """Magnetic d-band iron: collinear Stoner magnetism, exponential bond
-    integrals, pair repulsion and square-root embedding.
+# defaults of the s and p parameters of the iron model with an sp shell
+# (``iron(basis=...)``); IRON_SD_FIT overrides them for basis ("s", "d")
+IRON_SP_DEFAULTS = {
+    "e_s": 0.5, "e_p": 7.0, "n_el": 8.0, "decay_sp": 3.0,
+    "sss": -0.5, "sps": 1.0, "pps": 1.5, "ppp": -0.3, "sds": -0.2, "pds": -0.3, "pdp": 0.15,
+}
 
-    Use with ``BOPConfig(**IRON_CONFIG, spin=...)`` and
+
+def iron(basis=("d",), **values):
+    """Magnetic iron: collinear Stoner magnetism on the d shell, exponential
+    bond integrals, pair repulsion and square-root embedding.
+
+    Use with ``BOPConfig(**IRON_CONFIG, basis=basis, spin=...)`` and
     ``radial=hamiltonian.v0_bond``.  Keyword arguments override entries of
-    ``IRON_FIT``:
+    ``IRON_FIT`` (d basis), ``IRON_SD_FIT`` (s and d basis) or
+    ``IRON_SP_DEFAULTS``:
 
       dds, ddp, ddd   bond integrals dd(sigma, pi, delta) at r0 (eV); each is
                       ``dd_tau * exp(-decay (r / r0 - 1))`` (the v0 form with
                       its short-range factor switched off)
-      n_d             d electrons per atom
-      stoner          Stoner integral I (eV); E_mag = -I m^2 / 4
+      n_d             d electrons per atom (d basis only)
+      stoner          Stoner integral I of the d shell (eV); E_mag = -I m^2 / 4
       pair, pair_decay           pair term ``pair * exp(-pair_decay (r / r0 - 1))``
       embed, density_decay       embedding ``-embed * sqrt(rho)``,
                                  ``rho = sum_j exp(-density_decay (r_ij / r0 - 1))``
-    """
-    v = dict(IRON_FIT, **values)
-    r0, decay = v["r0"], v["decay"]
 
-    def channel(prefactor):
+    With an s and/or p shell in ``basis`` (onsite d level 0):
+
+      e_s, e_p        onsite levels of the s and p shells (eV)
+      n_el            valence electrons per atom (8 for 3d6 4s2), shared
+                      between the shells by the common Fermi level
+      sss, sps, pps, ppp, sds, pds, pdp
+                      bond integrals at r0 of the channels with an s or p
+                      shell, all decaying as ``exp(-decay_sp (r / r0 - 1))``
+    """
+    basis = tuple(basis)
+    if "d" not in basis:
+        raise ValueError("the iron model needs a d shell")
+    v = dict(IRON_FIT)
+    if basis != ("d",):
+        v.update(IRON_SP_DEFAULTS)
+        if basis == ("s", "d"):
+            v.update(IRON_SD_FIT)
+    v.update(values)
+    r0 = v["r0"]
+
+    def channel(prefactor, decay):
         return jnp.array([[[prefactor, decay, 100.0, 1.0, r0]]])
 
+    bond = {c: channel(v[c], v["decay"]) for c in ("dds", "ddp", "ddd")}
+    if basis == ("d",):
+        onsite, n0 = [0.0], [v["n_d"]]
+    else:
+        for i, la in enumerate(basis):
+            for lb in basis[i:]:
+                if (la, lb) != ("d", "d"):
+                    for c in CHANNELS[(la, lb)]:
+                        bond[c] = channel(v[c], v["decay_sp"])
+        level = {"s": v["e_s"], "p": v["e_p"], "d": 0.0}
+        # free-atom reference 3d(n-1) 4s1: only fixes the zero of the energy
+        ref = {"s": 1.0, "p": 0.0, "d": v["n_el"] - 1.0}
+        if "s" not in basis:
+            ref = {"p": 1.0, "d": v["n_el"] - 1.0}
+        onsite, n0 = [level[sh] for sh in basis], [ref[sh] for sh in basis]
+    stoner = [v["stoner"] if sh == "d" else 0.0 for sh in basis]
     return {
-        "onsite": jnp.zeros((1, 1)),
-        "n0": jnp.array([[v["n_d"]]]),
+        "onsite": jnp.array([onsite]),
+        "n0": jnp.array([n0]),
         "hubbard": jnp.array([8.0]),
-        "stoner": jnp.array([[v["stoner"]]]),
-        "bond": {"dds": channel(v["dds"]), "ddp": channel(v["ddp"]), "ddd": channel(v["ddd"])},
+        "stoner": jnp.array([stoner]),
+        "bond": bond,
         "repulsion": {
             "pair": jnp.array([[[v["pair"], v["pair_decay"], r0]]]),
             "density": jnp.array([[[1.0, v["density_decay"], r0]]]),
@@ -95,6 +138,13 @@ def iron(**values):
         },
     }
 
+
+# fitted parameters of the sd iron model (examples/fit_iron.py --basis sd)
+IRON_SD_FIT = {
+    "dds": -1.12595, "ddp": 0.5211, "ddd": -0.04472, "decay": 4.6483, "stoner": 1.1603,
+    "pair": 0.62759, "pair_decay": 11.17315, "embed": 1.39903, "density_decay": 2.16347,
+    "e_s": 0.74816, "decay_sp": 2.85527, "sss": -0.29816, "sds": -0.26058,
+}
 
 # BOPConfig settings of the iron model (pass radial=hamiltonian.v0_bond)
 IRON_CONFIG = dict(nmom=9, bandwidth="averaged", rcut=3.4, dcut=0.4, rcut2=3.4, dcut2=0.4,

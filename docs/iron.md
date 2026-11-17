@@ -55,6 +55,47 @@ bcc NM, hcp NM and fcc NM).
 
 ![Energy-volume curves and moments of the iron model](figures/iron_eos.png)
 
+## s and p shells (`iron(basis=...)`, `IRON_SD_FIT`)
+
+`iron(basis=("s", "d"))` adds a 4s shell (onsite level `e_s` above the d
+level, bond integrals `sss` and `sds` decaying with `decay_sp`); the Stoner
+term acts on the d shell only and the 8 valence electrons (3d6 4s2) share one
+Fermi level, so `n_d` is no longer a parameter. `pd` and `spd` bases are
+supported by the model and `examples/fit_iron.py --basis` but were not fitted.
+
+Which basis: with starting parameters the pd and spd models lost the bcc
+moment and spd cost about 5-30 times more per equilibrium than d; sd kept the
+moment and adds only three parameters, so sd was fitted. Starting from weak
+s-d coupling and the d parameters (strong starting coupling collapses all
+phases), `fit_iron.py --basis sd` was run twice (10 and 15 steps, 110 + 130
+evaluations, about 12 hours on 4 cores). Same targets and tolerances as the
+d model:
+
+| Property | d (`IRON_FIT`) | sd (`IRON_SD_FIT`) | target |
+|---|---|---|---|
+| a bcc FM (A) | 2.854 | 2.855 | 2.855 |
+| m bcc FM (muB) | 2.43 | **2.29** | 2.2 |
+| C11, C12, C44 (GPa) | 251, 130, 120 | 253, 125, 125 | 243, 138, 122 |
+| E hcp NM (meV) | 69 | 89 | 65 |
+| E fcc AFM (meV) | 107 (collapses to NM) | **94, 1.47 muB** | 100 |
+| E fcc NM (meV) | 107 | 101 | 130 |
+| E bcc NM (meV) | 309 | 334 | 480 |
+| V/V0 hcp NM, fcc NM | 0.899, 0.900 | 0.912, 0.911 | 0.90, 0.91 |
+| cost (sum of squared residuals) | 59.4 | **43.5** | |
+
+The sd model fits better (cost 43.5 against 59.4) and removes two limits of
+the d model: the bcc moment comes down to 2.29 muB with a larger magnetic
+energy of bcc (334 against 309 meV), so the two no longer pull against each
+other as strongly, and fcc AFM is a stable antiferromagnet with a moment of
+1.47 muB (DFT about 1-1.5) instead of collapsing. The s shell holds 1.18
+electrons and carries -0.07 muB, antiparallel to the d moment (2.36 muB):
+the sp polarisation of DFT (about -0.05 to -0.1 muB), induced through s-d
+hybridisation without an s Stoner term and not fitted. The price is the
+hcp energy (89 meV, target 65; the order bcc FM < hcp NM < fcc is kept) and
+C12. The s-d coupling is moderate (`sds` = -0.26, `sss` = -0.30 eV at r0).
+Each sd evaluation costs about 3 times a d evaluation. `iron_properties.py`
+has not been run for the sd model.
+
 ## Targets (`examples/fit_iron.py`)
 
 | Property | Target | Tolerance | Source |
