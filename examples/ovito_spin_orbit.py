@@ -1,6 +1,6 @@
 """Animation of spin precession driven by spin-orbit coupling, with OVITO.
 
-    uv run --extra viz python examples/ovito_spin_orbit.py     (about 2 minutes)
+    uv run --extra viz python examples/ovito_spin_orbit.py     (about 3 minutes)
 
 Two ferromagnetic chains of the canonical d-band model of
 ``examples/spin_orbit_anisotropy.py`` (7 electrons, Stoner integral 0.6 eV,
