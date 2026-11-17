@@ -10,15 +10,15 @@ automatic differentiation instead of hand-derived chains.
 As a dependency of another project, from a tagged release:
 
 ```bash
-pip install "bopjax @ git+https://github.com/sebschre/bop-jax@v0.4.0"
+pip install "bopjax @ git+https://github.com/sebschre/bop-jax@v0.5.0"
 # with the JAX-MD interface
-pip install "bopjax[md] @ git+https://github.com/sebschre/bop-jax@v0.4.0"
+pip install "bopjax[md] @ git+https://github.com/sebschre/bop-jax@v0.5.0"
 ```
 
 or in `pyproject.toml`:
 
 ```toml
-dependencies = ["bopjax @ git+https://github.com/sebschre/bop-jax@v0.4.0"]
+dependencies = ["bopjax @ git+https://github.com/sebschre/bop-jax@v0.5.0"]
 ```
 
 Each [release](https://github.com/sebschre/bop-jax/releases) also carries a
@@ -452,9 +452,10 @@ for further modifiers. The GIFs below are made by OVITO's Tachyon renderer
 (`renderer="opengl"` is about fifteen times faster) and assembled with Pillow. On a
 machine without a display OVITO needs a Vulkan driver; Mesa's software
 driver is enough (`apt install mesa-vulkan-drivers`). `--from-xyz` renders an
-example again from its saved trajectory.
+example again from its saved trajectory. The times below are for a 4-core
+cloud machine, rendering included (about one minute each).
 
-**Spin-orbit coupling** (`examples/ovito_spin_orbit.py`, 2 minutes). Two
+**Spin-orbit coupling** (`examples/ovito_spin_orbit.py`, 3 minutes). Two
 ferromagnetic chains of the anisotropy model above (canonical d band,
 7 electrons, `xi` = 0.1 eV in the upper chain, none in the lower), one atom
 per periodic cell, start with the moments 60 degrees from the chain. With
@@ -467,7 +468,7 @@ there is no torque and no orbital moment, and nothing moves.
 
 ![Spin and orbital moments of a chain precessing into its easy axis](docs/animations/spin_orbit.gif)
 
-**Spin-lattice coupling** (`examples/ovito_spin_lattice.py`, 3 minutes). The
+**Spin-lattice coupling** (`examples/ovito_spin_lattice.py`, 10 minutes). The
 constant-energy run of `examples/spin_lattice.py`: four (001) planes of a bcc
 ferromagnet, canted in pairs by +20 and -20 degrees, on a perfect lattice at
 rest. The two groups of spins precess about their sum (16 fs per turn), and
