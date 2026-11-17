@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from . import pairwise as pw
+
 
 def canonical_d(n_electrons=4.8, onsite=0.0, hubbard=0.0):
     """Canonical d-band model, dd(sigma:pi:delta) = -6:4:-1 with (r0/r)^5.
@@ -47,3 +49,52 @@ def tungsten_v0():
             "embed": jnp.array([[-1.0, 1.0]]),
         },
     }
+
+
+# fitted parameters of the iron model (examples/fit_iron.py, docs/iron.md)
+IRON_FIT = {
+    "dds": -1.0, "ddp": 0.6, "ddd": -0.1, "decay": 4.0, "n_d": 7.0, "stoner": 1.1,
+    "pair": 0.75, "pair_decay": 8.0, "embed": 1.0, "density_decay": 6.0, "r0": 2.48,
+}
+
+
+def iron(**values):
+    """Magnetic d-band iron: collinear Stoner magnetism, exponential bond
+    integrals, pair repulsion and square-root embedding.
+
+    Use with ``BOPConfig(**IRON_CONFIG, spin=...)`` and
+    ``radial=hamiltonian.v0_bond``.  Keyword arguments override entries of
+    ``IRON_FIT``:
+
+      dds, ddp, ddd   bond integrals dd(sigma, pi, delta) at r0 (eV); each is
+                      ``dd_tau * exp(-decay (r / r0 - 1))`` (the v0 form with
+                      its short-range factor switched off)
+      n_d             d electrons per atom
+      stoner          Stoner integral I (eV); E_mag = -I m^2 / 4
+      pair, pair_decay           pair term ``pair * exp(-pair_decay (r / r0 - 1))``
+      embed, density_decay       embedding ``-embed * sqrt(rho)``,
+                                 ``rho = sum_j exp(-density_decay (r_ij / r0 - 1))``
+    """
+    v = dict(IRON_FIT, **values)
+    r0, decay = v["r0"], v["decay"]
+
+    def channel(prefactor):
+        return jnp.array([[[prefactor, decay, 100.0, 1.0, r0]]])
+
+    return {
+        "onsite": jnp.zeros((1, 1)),
+        "n0": jnp.array([[v["n_d"]]]),
+        "hubbard": jnp.array([8.0]),
+        "stoner": jnp.array([[v["stoner"]]]),
+        "bond": {"dds": channel(v["dds"]), "ddp": channel(v["ddp"]), "ddd": channel(v["ddd"])},
+        "repulsion": {
+            "pair": jnp.array([[[v["pair"], v["pair_decay"], r0]]]),
+            "density": jnp.array([[[1.0, v["density_decay"], r0]]]),
+            "embed": jnp.array([[-v["embed"], 0.5]]),
+        },
+    }
+
+
+# BOPConfig settings of the iron model (pass radial=hamiltonian.v0_bond)
+IRON_CONFIG = dict(nmom=9, bandwidth="averaged", rcut=3.4, dcut=0.4, rcut2=3.4, dcut2=0.4,
+                   repulsion=pw.V0)
