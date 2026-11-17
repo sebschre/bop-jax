@@ -65,32 +65,36 @@ supported by the model and `examples/fit_iron.py --basis` but were not fitted.
 
 Which basis: with starting parameters the pd and spd models lost the bcc
 moment and spd cost about 5-30 times more per equilibrium than d; sd kept the
-moment and adds only three parameters, so sd was fitted
-(`fit_iron.py --basis sd --max-nfev 10`, 110 evaluations, about 5 hours on 4
-cores, from weak s-d coupling and the d parameters; strong starting coupling
-collapses all phases). Same targets and tolerances as the d model:
+moment and adds only three parameters, so sd was fitted. Starting from weak
+s-d coupling and the d parameters (strong starting coupling collapses all
+phases), `fit_iron.py --basis sd` was run twice (10 and 15 steps, 110 + 130
+evaluations, about 12 hours on 4 cores). Same targets and tolerances as the
+d model:
 
 | Property | d (`IRON_FIT`) | sd (`IRON_SD_FIT`) | target |
 |---|---|---|---|
-| a bcc FM (A) | 2.854 | 2.858 | 2.855 |
-| m bcc FM (muB) | 2.43 | 2.45 | 2.2 |
-| C11, C12, C44 (GPa) | 251, 130, 120 | 256, 135, 112 | 243, 138, 122 |
-| E hcp NM (meV) | 69 | 72 | 65 |
-| E fcc AFM (meV) | 107 (collapses to NM) | **93, 1.34 muB** | 100 |
+| a bcc FM (A) | 2.854 | 2.855 | 2.855 |
+| m bcc FM (muB) | 2.43 | **2.29** | 2.2 |
+| C11, C12, C44 (GPa) | 251, 130, 120 | 253, 125, 125 | 243, 138, 122 |
+| E hcp NM (meV) | 69 | 89 | 65 |
+| E fcc AFM (meV) | 107 (collapses to NM) | **94, 1.47 muB** | 100 |
 | E fcc NM (meV) | 107 | 101 | 130 |
-| E bcc NM (meV) | 309 | 336 | 480 |
-| V/V0 hcp NM, fcc NM | 0.899, 0.900 | 0.905, 0.905 | 0.90, 0.91 |
-| moment of fcc AFM (muB) | 0 | 1.34 | DFT about 1-1.5 |
-| cost (sum of squared residuals) | 59.4 | 60.2 | |
+| E bcc NM (meV) | 309 | 334 | 480 |
+| V/V0 hcp NM, fcc NM | 0.899, 0.900 | 0.912, 0.911 | 0.90, 0.91 |
+| cost (sum of squared residuals) | 59.4 | **43.5** | |
 
-The overall fit is no better: the cost is the same, and the s-d coupling
-stays weak (`sds` = -0.17 eV, about 0.6 electrons in the s shell). The sd
-model gains a stable fcc antiferromagnet with a DFT-like moment and
-improves the bcc magnetic energy (336 against 309 meV, target 480), at the
-price of C44 (112 GPa) and the fcc NM energy. The least-squares run stopped
-at its evaluation limit, not at convergence, and `sds` and `decay_sp`
-barely moved from their start. Each sd evaluation is about 3 times as
-expensive as a d evaluation.
+The sd model fits better (cost 43.5 against 59.4) and removes two limits of
+the d model: the bcc moment comes down to 2.29 muB with a larger magnetic
+energy of bcc (334 against 309 meV), so the two no longer pull against each
+other as strongly, and fcc AFM is a stable antiferromagnet with a moment of
+1.47 muB (DFT about 1-1.5) instead of collapsing. The s shell holds 1.18
+electrons and carries -0.07 muB, antiparallel to the d moment (2.36 muB):
+the sp polarisation of DFT (about -0.05 to -0.1 muB), induced through s-d
+hybridisation without an s Stoner term and not fitted. The price is the
+hcp energy (89 meV, target 65; the order bcc FM < hcp NM < fcc is kept) and
+C12. The s-d coupling is moderate (`sds` = -0.26, `sss` = -0.30 eV at r0).
+Each sd evaluation costs about 3 times a d evaluation. `iron_properties.py`
+has not been run for the sd model.
 
 ## Targets (`examples/fit_iron.py`)
 
