@@ -83,8 +83,9 @@ class Calculator:
         topo = bj.build_topology(pos, [0] * len(pos), self.cfg.rcut, self.cfg.nmom, cell,
                                  rcut2=self.cfg.rcut2, skin=skin)
         energy = bj.make_energy_fn(topo, self.cfg, radial=radial)
-        potential = bj.make_potential(energy, tol=1e-10, max_iter=60)
+        potential = bj.make_potential(energy, tol=1e-10, max_iter=25)
         self._potential = jax.jit(potential)
+        self._scf = bj.make_scf(energy)  # damped Newton, the fallback
         self._stress = jax.jit(bj.make_stress(potential))
         self._forces = jax.jit(lambda pos, cell, params, start: -jax.grad(
             lambda q: potential(q, cell, params, start)[0])(pos))
@@ -122,8 +123,16 @@ class Calculator:
                 good2 = float(aux2["scf_residual"]) < 1e-7
                 if good2 and (bad or float(e2) < float(e) - 1e-9):
                     e, aux = e2, aux2
+        if float(aux["scf_residual"]) > 1e-7:
+            # plain Newton can cycle (seen with an s shell): damped steps
+            res = self._scf(pos, cell, params, self._start(params), tol=1e-10, max_iter=60)
+            if res.converged:
+                e, aux = self._potential(pos, cell, params, res.shifts)
+        if self.phase.moments is not None:
             self._last = aux["shifts"]
         self.residual = float(aux["scf_residual"])
+        if self.residual > 1e-6:  # no self-consistent state: not a candidate
+            return 1e3, aux
         return float(e) / self.phase.n_atoms, aux
 
     def stress(self, params, a, strain=None):

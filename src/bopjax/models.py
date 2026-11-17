@@ -63,8 +63,8 @@ IRON_FIT = {
 # defaults of the s and p parameters of the iron model with an sp shell
 # (``iron(basis=...)``); IRON_SD_FIT overrides them for basis ("s", "d")
 IRON_SP_DEFAULTS = {
-    "e_s": 2.0, "e_p": 7.0, "n_el": 8.0, "decay_sp": 2.5,
-    "sss": -1.2, "sps": 1.6, "pps": 2.5, "ppp": -0.5, "sds": -0.7, "pds": -0.8, "pdp": 0.3,
+    "e_s": 0.5, "e_p": 7.0, "n_el": 8.0, "decay_sp": 3.0,
+    "sss": -0.5, "sps": 1.0, "pps": 1.5, "ppp": -0.3, "sds": -0.2, "pds": -0.3, "pdp": 0.15,
 }
 
 
