@@ -27,7 +27,7 @@ wheel that `pip install <url>` accepts. Python 3.11 to 3.13.
 To work on the code:
 
 ```bash
-uv sync                 # add --extra md for the JAX-MD interface
+uv sync                 # --extra md: JAX-MD interface, --extra viz: OVITO rendering
 uv run pytest           # about 3 minutes: every configuration is compiled once
 uv run python examples/fcc_distorted.py
 ```
@@ -85,6 +85,7 @@ reference program and its contributors.
 | Molecular dynamics | `bopjax.md` for [JAX-MD](https://github.com/jax-md/jax-md) |
 | Spin dynamics | `bopjax.spin`: Landau-Lifshitz-Gilbert precession, damping and thermal torques for the non-collinear spin axes |
 | Spin-lattice dynamics | `bopjax.spinlattice`: atoms and spin axes moving together under the forces and torques of one energy |
+| Visualisation | `bopjax.ovito`: trajectories with spin, orbital and other per-atom vectors as extended XYZ for [OVITO](https://www.ovito.org), and rendered pictures and animations through its Python module |
 
 ## Layout
 
@@ -99,6 +100,7 @@ reference program and its contributors.
 | `src/bopjax/md.py` | JAX-MD interface |
 | `src/bopjax/spin.py` | spin dynamics of the non-collinear spin axes |
 | `src/bopjax/spinlattice.py` | coupled dynamics of atoms and spin axes |
+| `src/bopjax/ovito.py` | trajectories for OVITO: extended XYZ and rendering |
 | `src/bopjax/models.py` | canonical d-band and tungsten `v0` parameters |
 
 ## Performance
@@ -233,7 +235,9 @@ lengths of the moments follow adiabatically and have no fluctuations of their
 own; atoms whose moment vanishes have no direction to integrate (`min_moment`
 bounds |m| in the equation of motion); without spin-orbit coupling there is
 no magnetic anisotropy and no transfer of angular momentum to the lattice.
-The integrator has not been run with the spin-orbit term of the next section.
+With the spin-orbit term of the next section the integrator has only been run
+for the uniform precession of a chain (`examples/ovito_spin_orbit.py`, see
+[Visualisation](#visualisation-with-ovito)).
 
 ## Spin-orbit coupling
 
@@ -250,6 +254,17 @@ The term ties the spin axes to the lattice. The energy is no longer invariant
 under a rotation of all axes, only under a common rotation of axes and
 positions, so the torques on the axes no longer sum to zero: their sum is
 minus the mechanical torque `sum r x F` on the atoms.
+
+**Orbital moment.** `bj.make_orbital_moment(energy_fn)` returns
+`orbital_moment(shifts, positions, cell, params)`, the expectation value
+`<L>` of each atom in units of hbar. It is the derivative of the energy with
+respect to a field `b_i` coupled by an onsite term `b_i.L`
+(`params["orbital_field"]`, normally absent) at `b = 0`. At self-consistent
+shifts this is the derivative of the self-consistent energy, as for the
+forces. It is an observable only: the energy does not depend on it. For the
+chain below at `xi` = 0.05 eV it is 0.195 hbar along the chain and 0.111 hbar
+across it, parallel to the spin for 7 electrons and antiparallel for 3 (Hund's
+third rule), first order in `xi`, and largest along the easy axis.
 
 BOPfox has no spin-orbit coupling, so the checks are internal
 (`tests/test_spin_orbit.py`):
@@ -273,6 +288,10 @@ BOPfox has no spin-orbit coupling, so the checks are internal
   `jax.grad` sum to 4e-3 eV (to 1e-12 without spin-orbit coupling), agree
   with finite differences of the self-consistent energy to 1e-8, and the sum
   is cancelled by `sum r x dE/dr` to 1e-11.
+- The orbital moment is zero without spin-orbit coupling, equals the
+  derivative of the self-consistent energy in a field `b.L` (finite
+  differences, to 1e-7), and turns with a common rotation of lattice and
+  spins.
 
 Limits, all from `examples/spin_orbit_anisotropy.py`:
 
@@ -300,9 +319,9 @@ Limits, all from `examples/spin_orbit_anisotropy.py`:
   with spin-orbit coupling to zeroth order in `xi`: the exchange field of an
   atom stays along its axis and the moment is the spin moment projected on
   it, while spin-orbit coupling induces a spin density perpendicular to the
-  axis and an orbital moment, both of first order in `xi`. Neither is
-  evaluated (the moments are diagonal in real orbitals and in the local
-  spin) or fed back, and the Stoner energy uses the projected moment only.
+  axis and an orbital moment, both of first order in `xi`. Neither is fed
+  back, and the Stoner energy uses the projected moment only. The orbital
+  moment can be evaluated as an observable (below).
   The axis is therefore a constrained direction of the exchange field, not
   the direction of the self-consistent magnetisation.
 - For the same reason the angular momentum balance of a spin-lattice run
@@ -349,12 +368,8 @@ spins. The energy does not change when all axes are rotated together, so:
   reaches the spins only through the lengths of the moments. Transverse
   dynamics needs a non-collinear start or a spin bath (`kT > 0`).
 
-Spin-orbit coupling could be added: the non-collinear moments already walk on
-spinors, and an onsite term `xi L.S` would make the onsite block a matrix in
-orbital and spin instead of a spin matrix per orbital. That is not done. The
-anisotropy of a cubic bulk (micro-eV per atom, fourth order in `xi`) is
-unlikely to be resolved by a handful of moments; the second-order anisotropy
-of chains, surfaces or strained cells should be.
+The spin-orbit term of the previous section lifts these restrictions, but the
+coupled integrator has not been run with it.
 
 **Integrator.** Half kick, half drift, spin step, half drift, half kick: the
 atoms follow velocity Verlet and the axes take one midpoint step at the
@@ -409,6 +424,58 @@ adiabatically; the repulsion of a model must be steeper than the square of its
 bond integrals or the lattice can be unstable (with the canonical r^-5 bond
 integrals and a repulsion ~ r^-10 the bcc planes paired up spontaneously; in
 the second-moment picture that case is exactly marginal).
+
+## Visualisation with OVITO
+
+`bopjax.ovito.Trajectory` collects the frames of an `md`, `spin` or
+`spinlattice` run and writes them as extended XYZ, which
+[OVITO](https://www.ovito.org) opens directly. Spin moments (`moment * axes`),
+forces, velocities and any further per-atom array become particle properties
+that OVITO can draw as arrows. With the `ovito` Python module (the `viz`
+extra) it also renders pictures and animations with the arrows set up:
+
+```python
+from bopjax import ovito as bov
+
+traj = bov.Trajectory(cell, names=("Fe",))
+for step in range(steps):
+    state = apply(state)
+    traj.append(state, time=step * dt_fs, orbital_moment=L)   # extra per-atom data
+traj.write("run.xyz")                                          # NumPy only
+traj.render("run.gif", arrows={"spin_moment": bov.SPIN, "orbital_moment": bov.ORBITAL},
+            label="t = {time:.1f} fs", replicate=(2, 2, 2), exaggerate=10.0)
+```
+
+`exaggerate` scales the displacements from the first frame, `label` fills in
+global quantities of each frame, and `pipeline()` returns the OVITO pipeline
+for further modifiers. The GIFs below are made by OVITO's Tachyon renderer
+(`renderer="opengl"` is about fifteen times faster) and assembled with Pillow. On a
+machine without a display OVITO needs a Vulkan driver; Mesa's software
+driver is enough (`apt install mesa-vulkan-drivers`). `--from-xyz` renders an
+example again from its saved trajectory.
+
+**Spin-orbit coupling** (`examples/ovito_spin_orbit.py`, 2 minutes). Two
+ferromagnetic chains of the anisotropy model above (canonical d band,
+7 electrons, `xi` = 0.1 eV in the upper chain, none in the lower), one atom
+per periodic cell, start with the moments 60 degrees from the chain. With
+spin-orbit coupling the chain is the easy axis: the spin moments precess
+about it and, with Gilbert damping `alpha = 0.1`, spiral into it, releasing
+0.85 meV per atom in 6 ps (`K sin^2 60` with `K` = 1.13 meV). The orbital
+moment (blue, drawn three times longer) follows the spin but is larger along
+the chain (0.37 hbar) than across it (0.21 hbar). Without spin-orbit coupling
+there is no torque and no orbital moment, and nothing moves.
+
+![Spin and orbital moments of a chain precessing into its easy axis](docs/animations/spin_orbit.gif)
+
+**Spin-lattice coupling** (`examples/ovito_spin_lattice.py`, 3 minutes). The
+constant-energy run of `examples/spin_lattice.py`: four (001) planes of a bcc
+ferromagnet, canted in pairs by +20 and -20 degrees, on a perfect lattice at
+rest. The two groups of spins precess about their sum (16 fs per turn), and
+exchange striction pairs the planes: they oscillate by 0.011 A peak to peak with a period
+of 105 fs, drawn 40 times larger. There is no spin-orbit coupling in this
+model.
+
+![Precessing spins pulling the planes of a bcc lattice together](docs/animations/spin_lattice.gif)
 
 ## Validation against BOPfox
 

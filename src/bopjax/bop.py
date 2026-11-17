@@ -141,6 +141,16 @@ def spin_orbit_blocks(basis) -> np.ndarray:
     return out
 
 
+def orbital_blocks(basis) -> np.ndarray:
+    """``L`` of all shells in the orbitals of the atom, times the unit matrix
+    in spin: (3, norb, 2, norb, 2)."""
+    slices, norb = shell_slices(basis)
+    out = np.zeros((3, norb, 2, norb, 2), dtype=complex)
+    for sh, (a, b) in zip(basis, slices):
+        out[:, a:b, :, a:b, :] = np.einsum("xab,tu->xatbu", angular_momentum(sh), np.eye(2))
+    return out
+
+
 def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: int = 64,
                          spin_orbit=None):
     """Moments of the spinor Hamiltonian projected on each atom's local spin
@@ -207,6 +217,8 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
       "stoner"    (nspecies, nshell)   Stoner integrals        [magnetic]
       "spin_axes" (N, 3)               local spin directions   [noncollinear]
       "spin_orbit" (nspecies, nshell)  spin-orbit constants xi [cfg.spin_orbit]
+      "orbital_field" (N, 3)           optional source b_i of a term b_i.L on
+                                       each atom (eV)          [cfg.spin_orbit]
       "repulsion" {"pair", "density": (nspecies, nspecies, npar),
                    "embed": (nspecies, npar)}                  [cfg.repulsion]
       "taper"     (nspecies, nspecies, 2)   R1, R2             [cfg.coulomb]
@@ -229,7 +241,9 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     functional can describe: the exchange field of each atom stays along its
     axis, the moment is the spin moment projected on the axis, and the
     orbital moment and the spin density perpendicular to the axis, both of
-    first order in xi, are neither evaluated nor fed back.
+    first order in xi, are not fed back.  The orbital moment can be evaluated
+    as the derivative of the energy with respect to ``params["orbital_field"]``
+    (see ``make_orbital_moment``).
 
     ``shifts`` has shape ``energy.shift_shape``: (N, nshell), or (N, 2, nshell)
     for magnetic calculations (spin up, spin down).
@@ -248,6 +262,7 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     species = topo.species
     orb_shell = np.concatenate([[k] * (b - a) for k, (a, b) in enumerate(slices)])
     ls_blocks = spin_orbit_blocks(cfg.basis) if cfg.spin_orbit else None
+    l_blocks = orbital_blocks(cfg.basis) if cfg.spin_orbit else None
     if cfg.screening and "d" not in cfg.basis:
         raise ValueError("screening acts on d-d bond integrals; the basis has no d shell")
     nbr_reverse = reverse_slots(topo) if cfg.screening else None
@@ -345,6 +360,9 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
             if cfg.spin_orbit:
                 spin_orbit = jnp.einsum("nk,katbu->natbu", params["spin_orbit"][species],
                                         ls_blocks)
+                if "orbital_field" in params:
+                    spin_orbit = spin_orbit + jnp.einsum(
+                        "nx,xatbu->natbu", params["orbital_field"], l_blocks)
             mu_orb = moments_noncollinear(hblk, orb_levels, params["spin_axes"],
                                           topo, cfg.nmom, cfg.batch, spin_orbit)
         else:
@@ -384,6 +402,34 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     energy.config = cfg
     energy.topology = topo
     return energy
+
+
+def make_orbital_moment(energy_fn):
+    """Return ``orbital_moment(shifts, positions, cell, params) -> (N, 3)``, the
+    orbital angular momentum ``<L>`` of each atom in units of hbar.
+
+    It is the derivative of the energy with respect to a field ``b_i`` that
+    couples to the orbital angular momentum of atom i through an onsite term
+    ``b_i.L`` (Hellmann-Feynman), taken at ``b = 0``.  At self-consistent
+    ``shifts`` the partial derivative is the total one.  ``<L>`` is in the same
+    convention as the spin moment ``m e = 2 <S>``: for a d shell that is more
+    than half full it is parallel to ``m e`` when ``xi > 0`` (Hund's third
+    rule), and the orbital magnetic moment in Bohr magnetons is ``<L>`` where
+    the spin magnetic moment is ``m e``.
+
+    Without spin-orbit coupling the orbital moment is quenched and the result
+    is zero.  It is an observable only: nothing in the energy depends on it.
+    """
+    if not energy_fn.config.spin_orbit:
+        raise ValueError("the orbital moment needs BOPConfig(spin_orbit=True)")
+    n = energy_fn.topology.n_atoms
+
+    def orbital_moment(shifts, positions, cell, params):
+        def with_field(field):
+            return energy_fn(shifts, positions, cell, dict(params, orbital_field=field))[0]
+        return jax.grad(with_field)(jnp.zeros((n, 3), dtype=jnp.asarray(positions).dtype))
+
+    return orbital_moment
 
 
 def stoner_shifts(moments, stoner):

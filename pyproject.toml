@@ -24,6 +24,8 @@ Issues = "https://github.com/sebschre/bop-jax/issues"
 
 [project.optional-dependencies]
 md = ["jax-md>=0.2.29"]
+# rendering of trajectories with OVITO (bopjax.ovito); writing them needs nothing
+viz = ["ovito>=3.10", "pillow>=10"]
 
 [dependency-groups]
 dev = ["pytest>=8"]
