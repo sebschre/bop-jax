@@ -140,7 +140,11 @@ def iron(basis=("d",), **values):
 
 
 # fitted parameters of the sd iron model (examples/fit_iron.py --basis sd)
-IRON_SD_FIT = {}
+IRON_SD_FIT = {
+    "dds": -1.13348, "ddp": 0.50817, "ddd": -0.04507, "decay": 4.29143, "stoner": 1.17117,
+    "pair": 0.66145, "pair_decay": 10.27381, "embed": 1.53967, "density_decay": 2.39319,
+    "e_s": 0.62708, "decay_sp": 2.87598, "sss": -0.4278, "sds": -0.16862,
+}
 
 # BOPConfig settings of the iron model (pass radial=hamiltonian.v0_bond)
 IRON_CONFIG = dict(nmom=9, bandwidth="averaged", rcut=3.4, dcut=0.4, rcut2=3.4, dcut2=0.4,
