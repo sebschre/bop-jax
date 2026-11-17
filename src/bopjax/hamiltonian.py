@@ -44,6 +44,30 @@ def _d_tensors() -> np.ndarray:
 D_TENSORS = _d_tensors()
 
 
+def angular_momentum(shell) -> np.ndarray:
+    """Orbital angular momentum (3, 2l+1, 2l+1) in units of hbar, in the real
+    orbitals and the order of the Slater-Koster blocks: p = (x, y, z), d = the
+    tensors ``D_TENSORS``.
+
+    A rotation by the angle ``phi`` about the axis ``k`` turns the orbitals
+    with ``exp(-i phi L_k)``.  On a vector that is ``(L_k)_ab = -i eps_kab``,
+    and on a tensor it acts on both indices.  The matrices are imaginary and
+    antisymmetric: real orbitals carry no orbital moment (``<a|L|a> = 0``).
+    """
+    eps = np.zeros((3, 3, 3))
+    eps[0, 1, 2] = eps[1, 2, 0] = eps[2, 0, 1] = 1.0
+    eps[0, 2, 1] = eps[2, 1, 0] = eps[1, 0, 2] = -1.0
+    if shell == "s":
+        return np.zeros((3, 1, 1), dtype=complex)
+    if shell == "p":
+        return -1j * eps
+    if shell == "d":
+        turned = (np.einsum("kil,nlj->knij", eps, D_TENSORS)
+                  + np.einsum("kjl,nil->knij", eps, D_TENSORS))
+        return -1j * np.einsum("mij,knij->kmn", D_TENSORS, turned)
+    raise ValueError(f"unsupported shell {shell!r}")
+
+
 def shell_slices(basis):
     """Orbital index range of each shell, and the total number of orbitals."""
     out, start = [], 0

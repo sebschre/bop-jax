@@ -77,6 +77,7 @@ reference program and its contributors.
 | Bandwidth | `azero`, `lowest`, `highest`, `avgan_maxbn`, `averaged`, `global`, `findeminemax`, `gershgorin`, `beerpettiforaoki` |
 | Terminator | `none`/`constantabn`, `oscillation`, `weighted`; Jackson kernel |
 | Magnetism | `collinear`, `noncollinear` (fixed local spin axes, torques from the gradient) |
+| Spin-orbit coupling | onsite `xi L.S` for p and d shells in non-collinear calculations (`BOPConfig(spin_orbit=True)`); no reference code to compare with |
 | Coulomb | onsite `J_ii`; intersite `frauenheim` with taper |
 | Screening | environment-dependent d-d bond integrals (`BOPConfig(screening=True)`), not yet compared with BOPfox |
 | Repulsion | pair term plus embedding (`pairwise.V0`, `pairwise.POWERLAW`, or your own) |
@@ -89,7 +90,7 @@ reference program and its contributors.
 | File | Content |
 |---|---|
 | `src/bopjax/geometry.py` | neighbour lists and per-atom local clusters (NumPy), bond vectors (JAX) |
-| `src/bopjax/hamiltonian.py` | Slater-Koster blocks for s, p, d; radial functions; cutoff; screening |
+| `src/bopjax/hamiltonian.py` | Slater-Koster blocks for s, p, d; angular momentum matrices; radial functions; cutoff; screening |
 | `src/bopjax/expansion.py` | moments -> recursion coefficients -> band estimate, terminator, sigma |
 | `src/bopjax/pairwise.py` | repulsion, embedding and Coulomb functions |
 | `src/bopjax/bop.py` | moments (scalar and spinor), Fermi level, total energy |
@@ -228,9 +229,87 @@ the model energy only.
 Limits: the atoms do not move (no coupled spin-lattice dynamics yet); the
 lengths of the moments follow adiabatically and have no fluctuations of their
 own; atoms whose moment vanishes have no direction to integrate (`min_moment`
-bounds |m| in the equation of motion); there is no spin-orbit coupling in the
-model, so no magnetic anisotropy and no transfer of angular momentum to the
-lattice.
+bounds |m| in the equation of motion); without spin-orbit coupling there is
+no magnetic anisotropy and no transfer of angular momentum to the lattice.
+The integrator has not been run with the spin-orbit term of the next section.
+
+## Spin-orbit coupling
+
+`BOPConfig(spin="noncollinear", spin_orbit=True)` adds the onsite term
+`xi L.S` to the spinor Hamiltonian, with `params["spin_orbit"]` of shape
+(nspecies, nshell) holding `xi` in eV (`L` in units of hbar, `S = sigma / 2`;
+the `j = l + 1/2` and `j = l - 1/2` levels of a free atom are
+`xi (2l + 1) / 2` apart). The onsite block of the moment walk becomes a
+matrix in (orbital, spin); the hopping stays diagonal in spin. With the flag
+off the code path is the previous one and the BOPfox comparisons are
+unchanged. The cost with the flag on was not measured.
+
+The term ties the spin axes to the lattice. The energy is no longer invariant
+under a rotation of all axes, only under a common rotation of axes and
+positions, so the torques on the axes no longer sum to zero: their sum is
+minus the mechanical torque `sum r x F` on the atoms.
+
+BOPfox has no spin-orbit coupling, so the checks are internal
+(`tests/test_spin_orbit.py`):
+
+- `[Lx, Ly] = i Lz` and `L^2 = l(l+1)` for p and d in the real orbitals of
+  the Slater-Koster blocks, and `exp(-i phi n.L)` carries the p-d hopping
+  block of a bond into that of the rotated bond, which fixes orbital order
+  and sign conventions.
+- The moments up to the seventh of a p-d trimer with tilted axes and
+  different `xi` on the two shells equal the diagonal elements of powers of
+  an explicitly built 48 x 48 spinor matrix to 1e-11.
+- A ferromagnetic chain (canonical d band, 7 electrons, Stoner integral
+  0.6 eV, spacing 2.2 A, 9 moments, moment 1.29) is isotropic without
+  spin-orbit coupling to 1e-11 eV. With it the self-consistent energy is
+  `K sin^2(theta)` in the angle to the chain (half the barrier at 45 degrees
+  to 0.5 %, no dependence on the direction normal to the chain), with
+  `K / xi^2` = 0.114, 0.115, 0.116 per eV at `xi` = 0.0125, 0.025, 0.05 eV:
+  second order. At `xi` = 0.05 eV, `K` = 0.29 meV per atom, easy axis along
+  the chain.
+- For a free trimer with tilted axes and `xi` = 0.1 eV the torques from
+  `jax.grad` sum to 4e-3 eV (to 1e-12 without spin-orbit coupling), agree
+  with finite differences of the self-consistent energy to 1e-8, and the sum
+  is cancelled by `sum r x dE/dr` to 1e-11.
+
+Limits, all from `examples/spin_orbit_anisotropy.py`:
+
+- **The anisotropy constants are not converged with the number of moments.**
+  For the chain, `K / xi^2` is zero at 4 moments (the first term that
+  depends on the direction is in the fifth moment), then -0.010, about 0,
+  +0.014, +0.003 and +0.115 per eV at 5 to 9 moments; at 6 to 8 moments it
+  does not follow `xi^2` between 0.025 and 0.1 eV. At 12 and 16 moments this
+  chain is saturated and the self-consistency with `xi > 0` mostly fails
+  (see Caveats). The tests therefore establish the symmetry and the order
+  in `xi`, not a value.
+- **Cubic bulk anisotropy is not resolved.** For bcc (a = 2.87 A, same
+  model, moment 2.6) the fourth-order constant `K1` is zero to round-off
+  (1e-13 eV) up to 8 moments. From 9 moments on it is non-zero and has the
+  cubic form exactly (`K1` from [110], [111] and a general direction agree
+  to four digits), but it is not converged: `K1 / xi^4` is -1e-2 per eV^3 at
+  9 moments, +6e-2 to +1e-1 at 10, and changes sign with `xi` at 11 and 12.
+  It follows `xi^4` only within a factor of two at 9 moments (-1.3e-2,
+  -1.0e-2, -5e-3 at `xi` = 0.025, 0.05, 0.1 eV) and not at all beyond, partly
+  because the self-consistent moment does not vary smoothly with `xi`
+  (2.68, 2.63, 2.70 at 0.05, 0.1, 0.2 eV). At `xi` = 0.05 eV these values
+  are 6e-8 to 2e-6 eV per atom. No cubic
+  anisotropy from this model should be used.
+- The local-axis (Stoner) ansatz is kept as it is, and it is only consistent
+  with spin-orbit coupling to zeroth order in `xi`: the exchange field of an
+  atom stays along its axis and the moment is the spin moment projected on
+  it, while spin-orbit coupling induces a spin density perpendicular to the
+  axis and an orbital moment, both of first order in `xi`. Neither is
+  evaluated (the moments are diagonal in real orbitals and in the local
+  spin) or fed back, and the Stoner energy uses the projected moment only.
+  The axis is therefore a constrained direction of the exchange field, not
+  the direction of the self-consistent magnetisation.
+- For the same reason the angular momentum balance of a spin-lattice run
+  would be between `hbar m e / 2` and the atoms only; the orbital angular
+  momentum of the electrons is not tracked.
+- The expansion is per shell and local spin channel, not per `j` multiplet:
+  the moments are averaged over the real orbitals of a shell. This keeps
+  the rotational invariance (the torque balance above) but is one more
+  reason for the slow convergence.
 
 ## Validation against BOPfox
 
@@ -333,7 +412,9 @@ differ.
   been compared with BOPfox.
 - A strong ferromagnet with a completely filled spin-up band has extra flat
   directions; the solver handles them, but the onsite levels are then not
-  unique. Non-collinear cases close to saturation can fail to converge.
+  unique. Non-collinear cases close to saturation can fail to converge, and
+  with spin-orbit coupling saturated ferromagnets (dimer, chain and fcc with
+  7 electrons were tried) mostly do not converge at all.
 - Timings are for one machine and one model.
 
 ## GPUs
