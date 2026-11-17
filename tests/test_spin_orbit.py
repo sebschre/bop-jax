@@ -278,3 +278,91 @@ def test_spin_torque_is_balanced_by_the_mechanical_torque(trimer):
             assert float(jnp.linalg.norm(lattice_part)) > 3e-3
         else:
             np.testing.assert_allclose(lattice_part, 0.0, atol=1e-11)
+
+
+# --- orbital moment ---------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def chain_orbital():
+    """Self-consistent orbital moment <L> of the chain for a spin direction,
+    xi and band filling, and the self-consistent energy in a field b.L."""
+    cfg = bj.BOPConfig(nmom=9, rcut=3.3, dcut=0.5, bandwidth="averaged", spin="noncollinear",
+                       spin_orbit=True)
+    pos, cell = jnp.zeros((1, 3)), jnp.diag(jnp.array([12.0, 12.0, 2.2]))
+    topo = bj.build_topology(pos, [0], cfg.rcut, cfg.nmom, cell)
+    energy = bj.make_energy_fn(topo, cfg)
+    scf = bj.make_scf(energy)
+    orbital = jax.jit(bj.make_orbital_moment(energy))
+    start = bj.stoner_shifts(np.full((1, 1), 2.0), CHAIN_STONER)
+
+    def solve(axis, xi, electrons=7.0, field=None):
+        params = dict(canonical_d(n_electrons=electrons, hubbard=3.0),
+                      stoner=jnp.array([[CHAIN_STONER]]),
+                      spin_axes=jnp.array([axis], dtype=float), spin_orbit=jnp.array([[xi]]))
+        if field is not None:
+            params["orbital_field"] = jnp.array([field], dtype=float)
+        res = scf(pos, cell, params, shifts0=start, tol=1e-12, max_iter=40)
+        assert res.converged
+        return res, np.asarray(orbital(res.shifts, pos, cell, params))[0]
+
+    return solve
+
+
+def test_orbital_moment_of_the_chain(chain_orbital):
+    # quenched without spin-orbit coupling
+    np.testing.assert_allclose(chain_orbital(ALONG, 0.0)[1], 0.0, atol=1e-12)
+    along = {xi: chain_orbital(ALONG, xi)[1] for xi in (0.025, 0.05)}
+    across = {xi: chain_orbital(ACROSS, xi)[1] for xi in (0.025, 0.05)}
+    for xi in along:
+        # along a symmetry axis the orbital moment is along the spin
+        np.testing.assert_allclose(along[xi][:2], 0.0, atol=1e-12)
+        np.testing.assert_allclose(across[xi][1:], 0.0, atol=1e-12)
+        # parallel for a d band more than half full, and larger along the
+        # easy axis (0.195 against 0.111 hbar at xi = 0.05 eV)
+        assert across[xi][0] > 0.0
+        assert along[xi][2] > 1.5 * across[xi][0]
+    assert along[0.05][2] == pytest.approx(0.1952, abs=2e-4)
+    # first order in xi
+    assert along[0.05][2] / along[0.025][2] == pytest.approx(2.0, rel=0.03)
+    # antiparallel for a d band less than half full
+    assert chain_orbital(ALONG, 0.05, electrons=3.0)[1][2] < -0.1
+
+
+def test_orbital_moment_is_the_field_derivative_of_the_energy(chain_orbital):
+    # <L> = dE/db at b = 0 for the self-consistent energy, although it is
+    # evaluated at fixed onsite levels: the energy is stationary in them
+    axis, xi, h = [1.0, 0.0, 1.0], 0.05, 1e-4
+    _, moment = chain_orbital(axis, xi)
+    for comp in range(3):
+        step = np.eye(3)[comp] * h
+        plus = chain_orbital(axis, xi, field=step)[0].energy
+        minus = chain_orbital(axis, xi, field=-step)[0].energy
+        assert (plus - minus) / (2 * h) == pytest.approx(moment[comp], abs=1e-7)
+    # tilted spins: the orbital moment is not parallel to the spin
+    assert abs(moment[0] - moment[2]) > 0.02
+
+
+def test_orbital_moment_turns_with_lattice_and_spins(trimer):
+    # a common rotation of positions and axes rotates the orbital moments
+    res, _ = trimer(0.1)
+    cfg = bj.BOPConfig(nmom=7, rcut=4.0, bandwidth="averaged", spin="noncollinear",
+                       spin_orbit=True)
+    rot = Rotation.from_rotvec([0.3, -1.1, 0.7]).as_matrix()
+    params = dict(canonical_d(n_electrons=7.0, hubbard=3.0),
+                  stoner=jnp.array([[TRIMER_STONER]]), spin_orbit=jnp.array([[0.1]]))
+    moments = []
+    for turn in (np.eye(3), rot):
+        pos = jnp.array(TRIMER @ turn.T)
+        topo = bj.build_topology(np.asarray(pos), [0] * 3, cfg.rcut, cfg.nmom, None)
+        energy = bj.make_energy_fn(topo, cfg)
+        here = dict(params, spin_axes=jnp.array(TRIMER_AXES @ turn.T))
+        # the onsite levels do not change under the common rotation
+        assert float(jnp.max(jnp.abs(jax.grad(lambda s: energy(s, pos, None, here)[0])(
+            res.shifts)))) < 1e-9
+        moments.append(np.asarray(bj.make_orbital_moment(energy)(res.shifts, pos, None, here)))
+    assert float(np.max(np.abs(moments[0]))) > 0.02
+    np.testing.assert_allclose(moments[1], moments[0] @ rot.T, atol=1e-10)
+    with pytest.raises(ValueError, match="spin_orbit"):
+        topo = bj.build_topology(TRIMER, [0] * 3, 4.0, 6, None)
+        bj.make_orbital_moment(bj.make_energy_fn(topo, bj.BOPConfig(
+            nmom=6, rcut=4.0, spin="noncollinear")))
