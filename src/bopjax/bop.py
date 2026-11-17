@@ -25,8 +25,8 @@ import numpy as np
 from . import expansion as ex
 from . import pairwise as pw
 from .geometry import Topology, bond_vectors, pair_vectors, reverse_slots
-from .hamiltonian import (L_OF, bond_blocks, cosine_cutoff, powerlaw,
-                          screening_factors, shell_slices)
+from .hamiltonian import (L_OF, angular_momentum, bond_blocks, cosine_cutoff,
+                          powerlaw, screening_factors, shell_slices)
 
 SPIN_MODES = ("none", "collinear", "noncollinear")
 
@@ -46,6 +46,7 @@ class BOPConfig:
     dcut2: float = 0.0
     basis: tuple[str, ...] = ("d",)
     spin: str = "none"  # see SPIN_MODES
+    spin_orbit: bool = False  # onsite xi L.S (spin = "noncollinear" only)
     repulsion: pw.Repulsion | None = None
     coulomb: str = "diagonal"  # "diagonal" (onsite only) or "frauenheim"
     screening: bool = False  # environment-dependent d-d bond integrals
@@ -129,12 +130,31 @@ def spin_projectors(axes):
     return jnp.stack([0.5 * (eye + e_sigma), 0.5 * (eye - e_sigma)], axis=1)
 
 
-def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: int = 64):
+def spin_orbit_blocks(basis) -> np.ndarray:
+    """``L.S`` of each shell as a matrix in (orbital, spin), embedded in the
+    orbitals of the atom: (nshell, norb, 2, norb, 2), with S = sigma / 2 in the
+    global spin frame.  Its eigenvalues are l/2 and -(l+1)/2."""
+    slices, norb = shell_slices(basis)
+    out = np.zeros((len(basis), norb, 2, norb, 2), dtype=complex)
+    for k, (sh, (a, b)) in enumerate(zip(basis, slices)):
+        out[k, a:b, :, a:b, :] = 0.5 * np.einsum("xab,xtu->atbu", angular_momentum(sh), PAULI)
+    return out
+
+
+def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: int = 64,
+                         spin_orbit=None):
     """Moments of the spinor Hamiltonian projected on each atom's local spin
     axis, shape (N, 2, norb, nmom+1).
 
-    onsite : (N, 2, norb) levels of the local spin-up and spin-down channels
-    axes   : (N, 3) local spin quantisation axes (need not be normalised)
+    onsite     : (N, 2, norb) levels of the local spin-up and spin-down channels
+    axes       : (N, 3) local spin quantisation axes (need not be normalised)
+    spin_orbit : None, or the onsite spin-orbit term (N, norb, 2, norb, 2) in
+                 the global spin frame, e.g. ``xi * spin_orbit_blocks(basis)``
+
+    The start states stay |real orbital a, spin up/down along the axis>.  With
+    spin-orbit coupling these are no longer eigenstates of the onsite block,
+    which then couples the orbitals of a shell; the hopping stays diagonal in
+    spin.
     """
     norb = onsite.shape[2]
     sizes = topo.cluster_sizes
@@ -143,9 +163,18 @@ def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: i
     on_blk = jnp.einsum("nsa,nstu->natu", onsite.astype(complex), proj)
     hb = hblk.astype(complex)
 
-    def hop(origins, w_nbr, w_self):  # w_nbr: (C, K, norb, 2, norb_start, 2)
-        return (jnp.einsum("ckab,ckbtdu->catdu", hb[origins], w_nbr)
-                + jnp.einsum("catv,cavdu->catdu", on_blk[origins], w_self))
+    if spin_orbit is None:
+        def hop(origins, w_nbr, w_self):  # w_nbr: (C, K, norb, 2, norb_start, 2)
+            return (jnp.einsum("ckab,ckbtdu->catdu", hb[origins], w_nbr)
+                    + jnp.einsum("catv,cavdu->catdu", on_blk[origins], w_self))
+    else:
+        # full onsite matrix in (orbital, spin): (N, norb, 2, norb, 2)
+        on_full = (jnp.einsum("natu,ab->natbu", on_blk, jnp.eye(norb))
+                   + spin_orbit.astype(complex))
+
+        def hop(origins, w_nbr, w_self):
+            return (jnp.einsum("ckab,ckbtdu->catdu", hb[origins], w_nbr)
+                    + jnp.einsum("catbv,cbvdu->catdu", on_full[origins], w_self))
 
     start = jnp.einsum("ad,tu->atdu", jnp.eye(norb), jnp.eye(2)).astype(complex)
     walk = _walk(topo, nmom, start, hop)
@@ -177,6 +206,7 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
       "bond"      {channel: (nspecies, nspecies, npar)}
       "stoner"    (nspecies, nshell)   Stoner integrals        [magnetic]
       "spin_axes" (N, 3)               local spin directions   [noncollinear]
+      "spin_orbit" (nspecies, nshell)  spin-orbit constants xi [cfg.spin_orbit]
       "repulsion" {"pair", "density": (nspecies, nspecies, npar),
                    "embed": (nspecies, npar)}                  [cfg.repulsion]
       "taper"     (nspecies, nspecies, 2)   R1, R2             [cfg.coulomb]
@@ -190,11 +220,24 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     evaluated with ``screening_radial`` (default: ``radial``) and share the
     cutoff of the bond integrals.
 
+    With ``cfg.spin_orbit`` the onsite term ``xi L.S`` is added to the spinor
+    Hamiltonian (``L`` in units of hbar, ``S = sigma / 2``, so the j = l + 1/2
+    and j = l - 1/2 levels of a free atom are ``xi (2l + 1) / 2`` apart).  It
+    ties the spin axes to the lattice: the energy is then invariant only under
+    a common rotation of positions and axes, and it acquires a magnetic
+    anisotropy.  The local-axis ansatz is unchanged, and with it what the
+    functional can describe: the exchange field of each atom stays along its
+    axis, the moment is the spin moment projected on the axis, and the
+    orbital moment and the spin density perpendicular to the axis, both of
+    first order in xi, are neither evaluated nor fed back.
+
     ``shifts`` has shape ``energy.shift_shape``: (N, nshell), or (N, 2, nshell)
     for magnetic calculations (spin up, spin down).
     """
     if cfg.spin not in SPIN_MODES:
         raise ValueError(f"unknown spin mode {cfg.spin!r}")
+    if cfg.spin_orbit and cfg.spin != "noncollinear":
+        raise ValueError('spin-orbit coupling needs spin="noncollinear"')
     slices, norb = shell_slices(cfg.basis)
     nshell = len(cfg.basis)
     nspin = 2 if cfg.magnetic else 1
@@ -204,6 +247,7 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     degeneracy = np.array([(2.0 / nspin) * (2 * L_OF[s] + 1) for s in cfg.basis])
     species = topo.species
     orb_shell = np.concatenate([[k] * (b - a) for k, (a, b) in enumerate(slices)])
+    ls_blocks = spin_orbit_blocks(cfg.basis) if cfg.spin_orbit else None
     if cfg.screening and "d" not in cfg.basis:
         raise ValueError("screening acts on d-d bond integrals; the basis has no d shell")
     nbr_reverse = reverse_slots(topo) if cfg.screening else None
@@ -297,8 +341,12 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
         levels = e0[:, None, :] + shifts.reshape(topo.n_atoms, nspin, nshell)
         orb_levels = levels[:, :, orb_shell]  # (N, nspin, norb)
         if cfg.spin == "noncollinear":
+            spin_orbit = None
+            if cfg.spin_orbit:
+                spin_orbit = jnp.einsum("nk,katbu->natbu", params["spin_orbit"][species],
+                                        ls_blocks)
             mu_orb = moments_noncollinear(hblk, orb_levels, params["spin_axes"],
-                                          topo, cfg.nmom, cfg.batch)
+                                          topo, cfg.nmom, cfg.batch, spin_orbit)
         else:
             mu_orb = jax.vmap(lambda lev: moments(hblk, lev, topo, cfg.nmom, cfg.batch),
                               in_axes=1, out_axes=1)(orb_levels)
