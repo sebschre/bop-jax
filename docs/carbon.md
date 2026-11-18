@@ -11,10 +11,13 @@ neighbours of every phase below, no second neighbours of diamond or graphene).
 
 Parameters: `CARBON_FIT`, fitted with `examples/fit_carbon.py` (bounded least
 squares, 10 parameters, about 10 s per evaluation on 4 cores). The first fit
-(two runs, 287 + 109 evaluations) used one shift per shell; the present
-parameters are a refit with atomic shifts started from it (172 evaluations,
-stalled at cost 45.8 after about 140), made for the
-[iron-carbon model](iron-carbon.md).
+(two runs, 287 + 109 evaluations) used one shift per shell and no bandwidth
+guard; the present parameters are refits for the
+[iron-carbon model](iron-carbon.md) with atomic shifts (172 evaluations,
+cost 45.8) and then with the bandwidth guard as well (165 evaluations,
+cost 16.9). Three parameters of the last fit are at or near their bounds:
+`sps` = 9.0 (upper bound), `density_decay` = 0.0005 (lower bound) and
+`ppp` = -0.23 (bound -0.2).
 
 ## Results
 
@@ -23,45 +26,41 @@ flat, the chain straight with equal bonds, lonsdaleite with ideal c/a and u).
 
 | Property | Model | Target | Tolerance | first fit (shell shifts) |
 |---|---|---|---|---|
-| a diamond (A) | 3.568 | 3.567 | 0.005 | 3.565 |
-| C11 diamond (GPa) | 970 | 1079 | 30 | 993 |
-| C12 diamond (GPa) | 156 | 124 | 15 | 165 |
-| C44 diamond (GPa), relaxed | 611 | 578 | 20 | 601 |
-| bond graphene (A) | 1.404 | 1.42 | 0.01 | 1.408 |
-| E graphene - E diamond (eV/atom) | +0.090 | +0.03 | 0.04 | +0.096 |
-| bond chain (A) | 1.229 | 1.28 | 0.03 | 1.234 |
-| E chain (eV/atom) | +0.69 | +1.2 | 0.2 | +0.77 |
-| E sc (eV/atom) | +2.82 (bond 1.92 A) | +2.6 | 0.4 | +2.87 |
-| E fcc (eV/atom) | **+5.45** (bond 2.08 A) | +4.0 | 0.5 | +3.92 |
-| E bcc (eV/atom) | +4.32 (bond 1.99 A) | +3.5 | 0.5 | +4.41 |
-| E lonsdaleite (eV/atom) | +0.012 | DFT about +0.025 | (not fitted) | +0.011 |
-| cost (sum of squared residuals) | 45.8 | | | 31.9 |
+| a diamond (A) | 3.565 | 3.567 | 0.005 | 3.565 |
+| C11 diamond (GPa) | 1008 | 1079 | 30 | 993 |
+| C12 diamond (GPa) | 155 | 124 | 15 | 165 |
+| C44 diamond (GPa), relaxed | 587 | 578 | 20 | 601 |
+| bond graphene (A) | 1.415 | 1.42 | 0.01 | 1.408 |
+| E graphene - E diamond (eV/atom) | +0.063 | +0.03 | 0.04 | +0.096 |
+| bond chain (A) | 1.236 | 1.28 | 0.03 | 1.234 |
+| E chain (eV/atom) | +0.84 | +1.2 | 0.2 | +0.77 |
+| E sc (eV/atom) | +2.70 (bond 1.94 A) | +2.6 | 0.4 | +2.87 |
+| E bcc (eV/atom) | +3.75 (bond 2.05 A) | +3.5 | 0.5 | +4.41 |
+| E fcc (eV/atom) | +4.07 (bond 2.11 A) | +4.0 | 0.5 | +3.92 |
+| E lonsdaleite (eV/atom) | +0.003 | DFT about +0.025 | (not fitted) | +0.011 |
+| cost (sum of squared residuals) | 16.9 | | | 31.9 |
 
 Diamond is the ground state, with the right lattice parameter, bulk modulus
-and C44 (with internal relaxation; the Kleinman relaxation is needed: the
-unrelaxed C44 is 1237 GPa). Graphene comes 96 meV/atom above diamond,
+(B = (C11 + 2 C12) / 3 = 439 GPa, experiment 443) and C44 (with internal
+relaxation; the Kleinman relaxation is needed: unrelaxed, C44 was
+1237 GPa in the first fit). Graphene comes 63 meV/atom above diamond,
 close to degenerate as it should be but on the wrong side of the
 experimental graphite-diamond difference: with a first-neighbour cutoff there
 is no interlayer binding, so this compares with graphene, which experiment
 puts about 30 meV above diamond. Lonsdaleite comes out slightly above diamond
-(11 meV) without being fitted: the two have identical first and second
+(3 meV; 11 meV in the first fit) without being fitted: the two have identical first and second
 neighbour shells, so the difference comes from the eclipsed bonds and the
 boat-shaped rings seen by the higher moments. The order of the dense phases,
-sc < bcc < fcc, now has the right order but fcc 1.45 eV too high: with
-atomic shifts the dense close-packed phase loses the s-p redistribution the
-first fit had, and the refit did not recover it.
+sc < bcc < fcc, now has the right order and sizes.
 
-Electrons: diamond 2s1.23 2p2.77, graphene 2s1.17 2p2.83, the chain
-2s1.12 2p2.88; sc, bcc and fcc fill the s shell more (1.56, 1.70, 1.96).
-
-The fitted bond integrals at r0 = 1.54 A are `sss` = -2.91, `sps` = 7.17,
-`pps` = 6.61, `ppp` = -0.78 eV, decaying as exp(-4.04 (r/r0 - 1)), with the
-2s level 8.09 eV below 2p. Starting from the orthogonal tight-binding
+The fitted bond integrals at r0 = 1.54 A are `sss` = -3.19, `sps` = 9.00,
+`pps` = 8.08, `ppp` = -0.23 eV, decaying as exp(-4.30 (r/r0 - 1)), with the
+2s level 11.90 eV below 2p. Starting from the orthogonal tight-binding
 integrals of Xu, Wang, Chan and Ho (J. Phys.: Condens. Matter 4, 6047
 (1992)), the fit made the sigma bonds stronger and halved the pi integral
-(`ppp`/`pps` = -0.12 against -0.28 there). The embedding density barely
-decays across the first-neighbour range (`density_decay` = 0.49), so it acts
-as a square root of the coordination: this is what lets three- and
+(`ppp`/`pps` = -0.03 against -0.28 there: the pi bond is almost gone).
+The embedding density does not decay across the first-neighbour range
+(`density_decay` = 0.0005), so it is the square root of the coordination: this is what lets three- and
 two-fold coordinated carbon compete with diamond.
 
 ## One shift per atom (`atomic_shifts`)
@@ -77,8 +76,22 @@ the s-p shift has no stationary point at all for moderate Fe-C coupling
 `BOPConfig(atomic_shifts=True)`: both shells of an atom move together and
 only its charge is made self-consistent, as in self-consistent-charge
 tight binding. With the first-fit parameters that raised diamond by
-5 meV/atom and graphene by 31 meV/atom and cost 1.7 eV in fcc; the refit
-above re-balances the rest.
+5 meV/atom and graphene by 31 meV/atom and cost 1.7 eV in fcc; the refits
+above re-balance it.
+
+## Bandwidth guard (`bandwidth_guard`)
+
+The expansion has 20 Chebyshev terms but only 10 moments; the terms beyond
+the moments follow the constant terminator on a chain scaled by the band
+estimate `b_inf`. When that estimate is too narrow (a deep, strongly split
+level next to a broad band: the 2s level of carbon beside iron), the
+scaled chain has eigenvalues outside [-1, 1], the Chebyshev moments grow
+exponentially, and a shell can hold more electrons than it has states
+(2s held 2.3 at the tetrahedral site in iron). The guard widens `b_inf`
+just enough to bring the chain back inside; where it fits, nothing
+changes. In carbon it acts on compressed and dense phases (diamond 0.7
+meV/atom, fcc 83 meV/atom with the earlier parameters) and on strained
+diamond, which is why the model was refitted with it.
 
 ## Targets (`examples/fit_carbon.py`)
 
@@ -123,11 +136,13 @@ Replace them with your own reference calculations where you have them.
 
 ## Known limits
 
-- Graphene 90 meV above diamond (target 30), and no interlayer binding: graphite
+- Graphene 63 meV above diamond (target 30), and no interlayer binding: graphite
   is graphene.
-- The chain is under-bound by 0.5 eV and its bond 0.05 A too short.
-- C11 is 10 % low, C12 26 % high.
-- fcc is 1.45 eV too high; fcc and bcc depend on the cutoff taper.
+- The chain is under-bound by 0.4 eV and its bond 0.04 A too short.
+- C11 is 7 % low, C12 25 % high.
+- Almost no pi bonding (`ppp` = -0.23 eV at r0) and lonsdaleite only 3 meV
+  above diamond; three parameters at or near their bounds.
+- fcc and bcc depend on the cutoff taper.
 - Fixed shapes only: no relaxation of c/a, buckling, dimerisation of the
   chain (polyyne) or the dimer; no surfaces, defects or amorphous carbon were
   checked.
