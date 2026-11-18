@@ -225,9 +225,18 @@ class Image:
             if self._careful is None:
                 self._careful = self._make(**self._careful_options)[1]
             first = float(aux["scf_residual"])
-            (e, aux), g = self._careful(jnp.asarray(positions), self.shifts, par)
-            print(f"   self-consistency residual {first:.1e}; retry with gentler mixing: "
-                  f"{float(aux['scf_residual']):.1e}", flush=True)
+            tries = [("warm", self.shifts),
+                     ("cold", jnp.tile(jnp.asarray(bulk_shifts)[None], (n_atoms, 1, 1)))]
+            best = None
+            for start_label, start in tries:
+                (e_t, aux_t), g_t = self._careful(jnp.asarray(positions), start, par)
+                print(f"   self-consistency residual {first:.1e}; retry ({start_label} start, "
+                      f"gentler mixing): {float(aux_t['scf_residual']):.1e}", flush=True)
+                if best is None or float(aux_t["scf_residual"]) < float(best[1]["scf_residual"]):
+                    best = (e_t, aux_t, g_t)
+                if float(aux_t["scf_residual"]) < 1e-6:
+                    break
+            e, aux, g = best
             if float(aux["scf_residual"]) > 1e-6 and args.out:
                 failed = os.path.splitext(args.out)[0] + "_failed_scf.npz"
                 np.savez(failed, positions=np.asarray(positions),
