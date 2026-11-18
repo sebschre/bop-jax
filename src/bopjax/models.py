@@ -229,9 +229,9 @@ TAPERED_V0 = pw.Repulsion(pair=tapered_exp, density=tapered_exp, embed=pw.V0.emb
 # fitted cross parameters of the iron-carbon model (examples/fit_iron_carbon.py,
 # docs/iron-carbon.md)
 IRON_CARBON_FIT = {
-    "e_c": 1.0, "sds": -0.5, "pds": -0.8, "pdp": 0.4, "decay": 3.0,
+    "e_c": 3.0, "sds": -0.5, "pds": -0.8, "pdp": 0.4, "decay": 3.0,
     "pair": 1.0, "pair_decay": 6.0, "rho_fe": 1.0, "rho_c": 1.0, "rho_decay": 3.0,
-    "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 8.0,
+    "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 2.0,
 }
 
 FE, C = 0, 1  # species indices of the iron-carbon model
