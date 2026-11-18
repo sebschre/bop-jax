@@ -149,3 +149,56 @@ IRON_SD_FIT = {
 # BOPConfig settings of the iron model (pass radial=hamiltonian.v0_bond)
 IRON_CONFIG = dict(nmom=9, bandwidth="averaged", rcut=3.4, dcut=0.4, rcut2=3.4, dcut2=0.4,
                    repulsion=pw.V0)
+
+
+# fitted parameters of the sp carbon model (examples/fit_carbon.py, docs/carbon.md)
+CARBON_FIT = {
+    "e_s": -7.8627, "sss": -2.87213, "sps": 7.17265, "pps": 6.62997, "ppp": -0.78207,
+    "decay": 4.03771, "pair": 19.44275, "pair_decay": 4.85353, "embed": 4.86397,
+    "density_decay": 0.50549, "r0": 1.54,
+}
+
+
+def carbon(**values):
+    """Non-magnetic sp-valent carbon: s and p shells, exponential bond
+    integrals, pair repulsion and square-root embedding.
+
+    Use with ``BOPConfig(**CARBON_CONFIG)`` and ``radial=hamiltonian.v0_bond``.
+    Keyword arguments override entries of ``CARBON_FIT``:
+
+      e_s                 onsite level of the 2s shell relative to 2p (eV)
+      sss, sps, pps, ppp  bond integrals at r0 (eV), each
+                          ``beta * exp(-decay (r / r0 - 1))``
+      pair, pair_decay    pair term ``pair * exp(-pair_decay (r / r0 - 1))``
+      embed, density_decay  embedding ``-embed * sqrt(rho)``,
+                          ``rho = sum_j exp(-density_decay (r_ij / r0 - 1))``
+
+    Four valence electrons share one Fermi level; the free-atom reference
+    2s2 2p2 only fixes the zero of the energy.
+    """
+    v = dict(CARBON_FIT)
+    v.update(values)
+    r0 = v["r0"]
+
+    def channel(prefactor):
+        return jnp.array([[[prefactor, v["decay"], 100.0, 1.0, r0]]])
+
+    return {
+        "onsite": jnp.array([[v["e_s"], 0.0]]),
+        "n0": jnp.array([[2.0, 2.0]]),
+        "hubbard": jnp.array([8.0]),
+        "bond": {c: channel(v[c]) for c in ("sss", "sps", "pps", "ppp")},
+        "repulsion": {
+            "pair": jnp.array([[[v["pair"], v["pair_decay"], r0]]]),
+            "density": jnp.array([[[1.0, v["density_decay"], r0]]]),
+            "embed": jnp.array([[-v["embed"], 0.5]]),
+        },
+    }
+
+
+# BOPConfig settings of the carbon model (pass radial=hamiltonian.v0_bond).  The
+# Jackson kernel keeps the density of states positive: without it the Fermi
+# level wanders in the gap of diamond and the energy is not smooth.
+CARBON_CONFIG = dict(nmom=10, nexp=20, kernel="jackson", bandwidth="averaged",
+                     basis=("s", "p"), rcut=2.2, dcut=0.3, rcut2=2.2, dcut2=0.3,
+                     repulsion=pw.V0)
