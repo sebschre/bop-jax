@@ -217,11 +217,11 @@ class Calculator:
     start from the non-magnetic levels plus a Stoner splitting on iron.
     """
 
-    def __init__(self, c: Cell, skin=0.4):
+    def __init__(self, c: Cell, skin=0.4, config=None):
         self.c = c
         self.species = np.asarray(c.species)
-        self.cfg = bj.BOPConfig(spin="collinear" if c.magnetic else "none",
-                                **IRON_CARBON_CONFIG)
+        self._config = IRON_CARBON_CONFIG if config is None else config
+        self.cfg = bj.BOPConfig(spin="collinear" if c.magnetic else "none", **self._config)
         topo = bj.build_topology(c.positions, c.species, self.cfg.rcut, self.cfg.nmom,
                                  c.cell, rcut2=self.cfg.rcut2, skin=skin)
         energy = bj.make_energy_fn(topo, self.cfg, radial=tapered_exp)
@@ -318,7 +318,7 @@ class Calculator:
         Stoner splitting of the starting moment on iron."""
         if self._nm is None:
             self._nm = Calculator(Cell(self.c.name + " NM", self.c.cell, self.c.positions,
-                                       self.c.species, magnetic=False))
+                                       self.c.species, magnetic=False), config=self._config)
         self._nm.positions = jnp.asarray(pos)
         self._nm._x = None
         self._nm.solve(params, verbose=verbose)

@@ -188,7 +188,7 @@ def terminated_chain(a, b, ainf, binf, nmom: int, nrec: int, terminator: str = "
 
 
 def guarded_width(a, b, ainf, binf, nmom: int, nexp: int, terminator: str = "none",
-                  alpha_weight: float = 1.0, passes: int = 3):
+                  alpha_weight: float = 1.0, passes: int = 3, smooth: float = 0.02):
     """b_inf, widened where needed so that the scaled recursion chain of the
     expansion has its spectrum inside [-1, 1].
 
@@ -196,8 +196,10 @@ def guarded_width(a, b, ainf, binf, nmom: int, nexp: int, terminator: str = "non
     [-1, 1] makes them grow exponentially with n, and the filling of the
     shell can then exceed its capacity.  This happens when a few strongly
     split levels (a deep bonding state and a broad band, say) make the
-    estimate of the band too narrow.  Where the chain already fits, b_inf is
-    unchanged.
+    estimate of the band too narrow.  The widening factor is a smooth
+    version of max(1, reach) (width ``smooth``), so that forces stay
+    continuous where the guard switches on; where the chain fits with room
+    to spare, b_inf is unchanged to within (smooth / 2)^2 / (1 - reach).
     """
     _, nrec = n_recursion(nexp)
     nrec = max(nrec, 1)
@@ -207,7 +209,8 @@ def guarded_width(a, b, ainf, binf, nmom: int, nexp: int, terminator: str = "non
         chain = jnp.diag(a_hat) + jnp.diag(b_hat[1:], 1) + jnp.diag(b_hat[1:], -1)
         ev = jnp.linalg.eigvalsh(chain)
         reach = jnp.maximum(jnp.abs(ev[0]), jnp.abs(ev[-1]))
-        binf = binf * jnp.maximum(1.0, reach)
+        over = reach - 1.0
+        binf = binf * (1.0 + 0.5 * (over + jnp.sqrt(over**2 + smooth**2)))
     return binf
 
 
