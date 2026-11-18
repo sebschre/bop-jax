@@ -2,7 +2,7 @@
 
 Needs scipy (installed with the md extra:  uv sync --extra md); the figure
 needs matplotlib.
-Run with:  uv run python examples/iron_properties.py [--figure iron.png]
+Run with:  uv run python examples/iron_properties.py [--figure iron.png] [--basis d|sd]
 
 Prints
   1. the phases ordered by energy, with lattice parameters, volume, moment
@@ -19,6 +19,8 @@ import numpy as np
 from _iron import EV_A3_TO_GPA, PHASES, Calculator, atomic_volume, iron, mean_abs_moment
 from scipy.optimize import brentq, curve_fit, minimize_scalar
 
+BASES = {"d": ("d",), "sd": ("s", "d")}
+BASIS = BASES["d"]
 PARAMS = iron()
 
 
@@ -26,7 +28,7 @@ def calculator(name, a_guess=None):
     phase = PHASES[name]
     if a_guess is not None:
         phase = dataclasses.replace(phase, a_guess=a_guess)
-    return Calculator(phase)
+    return Calculator(phase, basis=BASIS)
 
 
 def equilibrium(name):
@@ -95,7 +97,13 @@ def print_elastic(name, calc, a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--figure", help="write energy-volume and moment curves to this file")
+    ap.add_argument("--basis", choices=BASES, default="d",
+                    help="d (IRON_FIT) or sd (IRON_SD_FIT)")
     args = ap.parse_args()
+    global BASIS, PARAMS
+    BASIS = BASES[args.basis]
+    PARAMS = iron(basis=BASIS)
+    print(f"basis {args.basis}")
 
     print("1. Phases, ordered by energy (equilibrium of each; E relative to the lowest)")
     results = {}
