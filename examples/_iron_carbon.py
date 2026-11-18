@@ -144,8 +144,10 @@ class Calculator:
 
     def _new_hessian(self, x, pos, params):
         h = self._hess(x, pos, self.cell, params)
-        # soft modes (|eigenvalue| < 1e-3 of the largest) make the step blow up
-        self._hinv = jnp.linalg.pinv(0.5 * (h + h.T), rtol=1e-3, hermitian=True)
+        h = 0.5 * (h + h.T)
+        self._h = h
+        self._hinv = jnp.linalg.pinv(h, rtol=1e-10, hermitian=True)
+        self._normal = h @ h
         self.n_hessian += 1
 
     def solve(self, params, positions=None, tol=1e-8, max_iter=60, verbose=False):
@@ -163,16 +165,24 @@ class Calculator:
             if stale and not fresh:
                 self._new_hessian(x, pos, params)
                 fresh = True
-            step = -(self._hinv @ g)
-            accepted = False
-            for _ in range(8):  # backtracking: far from the solution Newton overshoots
+            # Newton first; if the residual does not drop (far from the
+            # solution, or soft modes of the indefinite Hessian), Levenberg-
+            # Marquardt steps on |g|^2 with growing damping, as in make_scf
+            accepted, damping = False, 0.0
+            scale = float(jnp.max(jnp.diag(self._normal)))
+            for _ in range(10):
+                if damping == 0.0:
+                    step = -(self._hinv @ g)
+                else:
+                    step = -jnp.linalg.solve(self._normal + damping * jnp.eye(len(x)),
+                                             self._h @ g)
                 x_new = x + step
                 (e_new, aux_new), g_new = self._vg(x_new, pos, self.cell, params)
                 norm_new = float(jnp.linalg.norm(g_new))
                 if np.isfinite(norm_new) and norm_new < 0.95 * norm:
                     accepted = True
                     break
-                step = 0.5 * step
+                damping = 1e-4 * scale if damping == 0.0 else 10.0 * damping
             if not accepted:
                 if fresh:
                     break  # Newton itself fails
