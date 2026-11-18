@@ -388,30 +388,39 @@ class Calculator:
             modes[k, sel] = d[sel] / r[sel, None]
         return modes
 
-    def relax_shells(self, params, n_shells=2, gtol=2e-3):
+    def relax_shells(self, params, n_shells=2, gtol=2e-3, max_step=0.05):
         """Relax only the breathing modes of the first Fe shells around C
         (amplitudes in A, positive outward), starting from the current
         amplitudes.  Much cheaper than a full relaxation, which needs fresh
         levels after every large step; returns energy and aux."""
-        from scipy.optimize import minimize
-
         if getattr(self, "_modes", None) is None:
             self._modes = jnp.asarray(self.shell_modes(n_shells))
             self._base = self.positions
             self.amplitudes = np.zeros(n_shells)
         modes, base = self._modes, self._base
 
-        def fun(u):
+        def grad(u):
             pos = base + jnp.tensordot(jnp.asarray(u), modes, 1)
             e, _ = self.solve(params, pos, tol=1e-7)
-            g = -np.asarray(jnp.tensordot(modes, self.forces(params, pos), 2))
-            return e, g
+            return e, -np.asarray(jnp.tensordot(modes, self.forces(params, pos), 2))
 
-        res = minimize(fun, self.amplitudes, jac=True, method="L-BFGS-B",
-                       bounds=[(-0.2, 0.6)] * len(self.amplitudes),
-                       options={"gtol": gtol, "maxiter": 40})
-        self.amplitudes = res.x
-        self.positions = base + jnp.tensordot(jnp.asarray(res.x), modes, 1)
+        # gradient descent with Barzilai-Borwein steps, at most max_step A
+        # per iteration: small moves keep every warm start close
+        u = np.array(self.amplitudes, float)
+        e, g = grad(u)
+        step = 0.01
+        for _ in range(60):
+            if np.max(np.abs(g)) < gtol:
+                break
+            du = -step * g
+            du *= min(1.0, max_step / max(np.max(np.abs(du)), 1e-12))
+            e_new, g_new = grad(u + du)
+            dg = g_new - g
+            curv = float(du @ dg)
+            step = float(du @ du) / curv if curv > 0 else 2.0 * step
+            u, e, g = u + du, e_new, g_new
+        self.amplitudes = u
+        self.positions = base + jnp.tensordot(jnp.asarray(u), modes, 1)
         return self.solve(params)
 
     def stress(self, params):
