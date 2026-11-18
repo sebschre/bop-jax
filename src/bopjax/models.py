@@ -231,7 +231,7 @@ TAPERED_V0 = pw.Repulsion(pair=tapered_exp, density=tapered_exp, embed=pw.V0.emb
 IRON_CARBON_FIT = {
     "e_c": 1.0, "sds": -0.5, "pds": -0.8, "pdp": 0.4, "decay": 3.0,
     "pair": 1.0, "pair_decay": 6.0, "rho_fe": 1.0, "rho_c": 1.0, "rho_decay": 3.0,
-    "r0": 1.95, "rcut": 3.0, "dcut": 0.5,
+    "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 8.0,
 }
 
 FE, C = 0, 1  # species indices of the iron-carbon model
@@ -257,6 +257,8 @@ def iron_carbon(iron_values=None, carbon_values=None, **values):
                           (``rho_fe``) and an Fe neighbour adds on C
                           (``rho_c``), both ``* exp(-rho_decay (r / r0 - 1))``
       rcut, dcut          range of every Fe-C term (taper from rcut - dcut)
+      hubbard_c           onsite Coulomb integral of carbon (eV); in pure
+                          carbon phases it does nothing (no charge transfer)
     """
     fe = dict(IRON_FIT, **(iron_values or {}))
     cv = dict(CARBON_FIT, **(carbon_values or {}))
@@ -290,7 +292,7 @@ def iron_carbon(iron_values=None, carbon_values=None, **values):
         # shells (s, p, d); iron has only d, carbon only s and p
         "onsite": jnp.array([[0.0, 0.0, 0.0], [cv["e_s"] + e_c, e_c, 0.0]]),
         "n0": jnp.array([[0.0, 0.0, fe["n_d"]], [2.0, 2.0, 0.0]]),
-        "hubbard": jnp.array([8.0, 8.0]),
+        "hubbard": jnp.array([8.0, v["hubbard_c"]]),
         "stoner": jnp.array([[0.0, 0.0, fe["stoner"]], [0.0, 0.0, 0.0]]),
         "bond": bond,
         "repulsion": {
