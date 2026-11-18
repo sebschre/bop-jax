@@ -69,11 +69,19 @@ class Model:
         self.n_eval = 0
         self.best = (np.inf, None)
 
-    def properties(self, values, relax_cementite=True):
+    def properties(self, values, relax_cementite=True, full=False):
+        """Fit quantities.  During the fit (``full`` False) only the
+        breathing modes of the first two Fe shells around C are relaxed;
+        the report relaxes every atom."""
         p = iron_carbon(**values)
         out = {}
-        e_oct, aux_oct = self.oct.relax(p)
-        e_tet, _ = self.tet.relax(p, fixed=[16])  # the saddle: C stays on the site
+        if full:
+            e_oct, aux_oct = self.oct.relax(p)
+            e_tet, _ = self.tet.relax(p, fixed=[16])  # the saddle: C stays on the site
+        else:
+            e_oct, aux_oct = self.oct.relax_shells(p)
+            e_tet, _ = self.tet.relax_shells(p)
+            out["u oct"], out["u tet"] = self.oct.amplitudes, self.tet.amplitudes
         out["E_sol oct"] = e_oct - 16 * self.e_fe - self.e_c
         out["E tet - oct"] = e_tet - e_oct
         dp = -(self.oct.stress(p) - self.host_stress) * self.oct.volume() / 160.21766
@@ -114,7 +122,13 @@ class Model:
 
 
 def report(model, values):
-    out = model.properties(values)
+    out = model.properties(values, full=False)
+    print("shell relaxation (as fitted): u oct", np.round(out["u oct"], 3),
+          "u tet", np.round(out["u tet"], 3))
+    for k, (t, _) in TARGETS.items():
+        print(f"  {k:14s} {out[k]:9.4f} {t:9.4f}")
+    print("full relaxation:")
+    out = model.properties(values, full=True)
     print(f"{'property':14s} {'model':>9s} {'target':>9s}")
     for k, (t, _) in TARGETS.items():
         print(f"{k:14s} {out[k]:9.4f} {t:9.4f}")

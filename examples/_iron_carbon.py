@@ -369,6 +369,51 @@ class Calculator:
         self.max_force = float(jnp.max(jnp.abs(f)))
         return self.solve(params, pos)
 
+    def shell_modes(self, n_shells=2, centre=None):
+        """Breathing modes of the Fe shells around the carbon atom ``centre``
+        (default: the last atom): unit displacements of every Fe atom of a
+        shell along its direction from C.  Returns (k, N, 3)."""
+        centre = self.n_atoms - 1 if centre is None else centre
+        cell = np.asarray(self.cell)
+        d = np.asarray(self.positions) - np.asarray(self.positions[centre])
+        frac = d @ np.linalg.inv(cell)
+        d = (frac - np.round(frac)) @ cell
+        r = np.linalg.norm(d, axis=1)
+        r[centre] = np.inf
+        r[self.species == C] = np.inf
+        shells = np.unique(np.round(r[np.isfinite(r)], 2))[:n_shells]
+        modes = np.zeros((n_shells, self.n_atoms, 3))
+        for k, rs in enumerate(shells):
+            sel = np.abs(r - rs) < 0.01
+            modes[k, sel] = d[sel] / r[sel, None]
+        return modes
+
+    def relax_shells(self, params, n_shells=2, gtol=2e-3):
+        """Relax only the breathing modes of the first Fe shells around C
+        (amplitudes in A, positive outward), starting from the current
+        amplitudes.  Much cheaper than a full relaxation, which needs fresh
+        levels after every large step; returns energy and aux."""
+        from scipy.optimize import minimize
+
+        if getattr(self, "_modes", None) is None:
+            self._modes = jnp.asarray(self.shell_modes(n_shells))
+            self._base = self.positions
+            self.amplitudes = np.zeros(n_shells)
+        modes, base = self._modes, self._base
+
+        def fun(u):
+            pos = base + jnp.tensordot(jnp.asarray(u), modes, 1)
+            e, _ = self.solve(params, pos, tol=1e-7)
+            g = -np.asarray(jnp.tensordot(modes, self.forces(params, pos), 2))
+            return e, g
+
+        res = minimize(fun, self.amplitudes, jac=True, method="L-BFGS-B",
+                       bounds=[(-0.2, 0.6)] * len(self.amplitudes),
+                       options={"gtol": gtol, "maxiter": 40})
+        self.amplitudes = res.x
+        self.positions = base + jnp.tensordot(jnp.asarray(res.x), modes, 1)
+        return self.solve(params)
+
     def stress(self, params):
         """Stress (3, 3) in GPa at the current positions, positive tensile."""
         self.solve(params)
