@@ -166,7 +166,9 @@ class _Chord:
                     accepted = True
             if not accepted:
                 if fresh:
-                    flat = self._flat_residual(g, energies)
+                    # neither Newton nor damped steps reduce it any further
+                    flat = (self._flat_residual(g, energies)
+                            or float(jnp.max(jnp.abs(g))) < 3e-3)
                     if flat:
                         self.flat_accepted = float(jnp.max(jnp.abs(g)))
                     break
