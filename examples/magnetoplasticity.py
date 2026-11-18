@@ -78,6 +78,9 @@ parser.add_argument("--radius", type=float, default=20.0, help="cylinder radius 
 parser.add_argument("--fixed", type=float, default=10.0, help="fixed outer shell (A)")
 parser.add_argument("--condition", default="potential", choices=("potential", "stationary"),
                     help="self-consistency condition (scf.make_potential)")
+parser.add_argument("--adjoint-tol", type=float, default=1e-4,
+                    help="relative tolerance of the adjoint solve of the gradients "
+                         "(--condition potential); 1e-4 gives forces to about 1e-6 eV/A")
 parser.add_argument("--free-buffer", type=float, default=None,
                     help="freeze the onsite levels (at bulk values) of fixed atoms farther "
                          "than this from the mobile region (A); default: none frozen")
@@ -196,7 +199,7 @@ class Image:
         self.energy_fn = bj.make_energy_fn(self.topo, cfg, radial=v0_bond)
         potential = bj.make_potential(self.energy_fn, tol=1e-9, method=args.solver,
                                       free=None if free.all() else free,
-                                      condition=args.condition)
+                                      condition=args.condition, adjoint_tol=args.adjoint_tol)
         self._moment = jax.jit(zeeman.make_scf_magnetic_moment(potential, self.energy_fn))
         self._value_grad = jax.jit(jax.value_and_grad(
             lambda p, s0, par: potential(p, jnp.asarray(cell), par, s0), has_aux=True))

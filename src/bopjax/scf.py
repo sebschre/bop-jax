@@ -187,7 +187,7 @@ def _anderson(residual, y0, tol, max_iter, mixing, history):
 
 def make_potential(energy_fn, tol=1e-10, max_iter=None, self_consistent=True,
                    method="auto", free=None, condition="stationary", mixing=0.1,
-                   history=8):
+                   history=8, adjoint_tol=1e-8):
     """Return a jit-compatible ``potential(positions, cell, params, shifts0=None)``
     giving ``(E, aux)`` with the onsite levels made self-consistent inside.
 
@@ -227,7 +227,9 @@ def make_potential(energy_fn, tol=1e-10, max_iter=None, self_consistent=True,
       potential condition stays well conditioned.  The energy is then not
       stationary in the shifts, so gradients carry the response of the
       shifts: they are obtained by implicit differentiation of the
-      condition, one adjoint linear solve (GMRES) per gradient.
+      condition, one adjoint linear solve (GMRES) per gradient, to the
+      relative tolerance ``adjoint_tol``; each GMRES step costs about one
+      gradient evaluation, and the solve usually dominates the cost.
       ``aux["scf_residual"]`` is max |shifts - dE_dc/dN|.
     """
     if condition not in CONDITIONS:
@@ -292,8 +294,8 @@ def make_potential(energy_fn, tol=1e-10, max_iter=None, self_consistent=True,
         y, x0, positions, cell, params = res
         y_bar = cotangent[0]
         _, vjp_y = jax.vjp(lambda v: potential_residual(v, x0, positions, cell, params), y)
-        u, _ = jax.scipy.sparse.linalg.gmres(lambda v: vjp_y(v)[0], y_bar, tol=1e-10,
-                                             atol=0.0, restart=30, maxiter=10)
+        u, _ = jax.scipy.sparse.linalg.gmres(lambda v: vjp_y(v)[0], y_bar, tol=adjoint_tol,
+                                             atol=0.0, restart=5, maxiter=60)
         _, vjp_t = jax.vjp(lambda p, c, par: potential_residual(y, x0, p, c, par),
                            positions, cell, params)
         p_bar, c_bar, par_bar = vjp_t(-u)
