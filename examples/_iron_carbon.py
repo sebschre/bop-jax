@@ -196,12 +196,24 @@ class Calculator:
         energy = bj.make_energy_fn(topo, self.cfg, radial=tapered_exp)
         shape = energy.shift_shape  # (N, 1) or (N, 2, 1)
         size = int(np.prod(shape))
-        self._solver = _Chord(energy, np.eye(size), shape)
-        # which unknown belongs to a carbon atom (atom index is the leading axis)
-        self._is_c = np.repeat(self.species == C, size // len(self.species))
+        # unknowns: one shift per atom, per spin for iron only (carbon is not
+        # spin-polarized: its two spin shifts are one unknown)
+        cols = []
+        for i, sp in enumerate(self.species):
+            if c.magnetic and sp == FE:
+                cols += [[2 * i], [2 * i + 1]]
+            else:
+                cols.append([2 * i, 2 * i + 1] if c.magnetic else [i])
+        basis = np.zeros((size, len(cols)))
+        for k, rows in enumerate(cols):
+            basis[rows, k] = 1.0
+        self._basis = jnp.asarray(basis)
+        self._solver = _Chord(energy, basis, shape)
+        self._is_c = np.array([self.species[rows[0] // (2 if c.magnetic else 1)] == C
+                               for rows in cols])
 
         def e_x(x, pos, cell, params):
-            return energy(x.reshape(shape), pos, cell, params)[0]
+            return energy((self._basis @ x).reshape(shape), pos, cell, params)[0]
 
         def strained(strain, x, pos, cell, params):
             deform = jnp.eye(3) + 0.5 * (strain + strain.T)
@@ -253,9 +265,11 @@ class Calculator:
         self._nm.solve(params, verbose=verbose)
         x_nm = np.asarray(self._nm._x)
         split = 0.5 * float(params["stoner"][FE, 2]) * self.c.fe_moment
-        m = np.where(self.species == FE, split, 0.0)
+        x = []
+        for xi, sp in zip(x_nm, self.species):
+            x += [xi - split, xi + split] if sp == FE else [xi]
         self._solver.h = None
-        return jnp.asarray(np.stack([x_nm - m, x_nm + m], axis=1).ravel())
+        return jnp.asarray(x)
 
     @staticmethod
     def sane(aux):

@@ -318,7 +318,8 @@ def _iron_carbon_config():
     c = SpeciesSettings(basis=CARBON_CONFIG["basis"], nmom=CARBON_CONFIG["nmom"],
                         nexp=CARBON_CONFIG["nexp"], bandwidth=CARBON_CONFIG["bandwidth"],
                         kernel=CARBON_CONFIG["kernel"],
-                        bandwidth_guard=CARBON_CONFIG["bandwidth_guard"])
+                        bandwidth_guard=CARBON_CONFIG["bandwidth_guard"],
+                        spin_polarized=False)
     rmax = max(IRON_CONFIG["rcut"], CARBON_CONFIG["rcut"], 3.0)
     # the global cutoff is a hard step at the longest range; every pair is
     # tapered inside its own radial function

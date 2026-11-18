@@ -49,6 +49,10 @@ class SpeciesSettings:
     terminator: str | None = None
     kernel: str | None = None
     bandwidth_guard: bool | None = None
+    # in magnetic calculations: False gives the species one onsite shift for
+    # both spin channels (no exchange splitting of its own; a moment can
+    # still be induced through its neighbours)
+    spin_polarized: bool = True
 
 
 @dataclass(frozen=True)
@@ -363,6 +367,8 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     if needs_pairs and topo.nbr2_mask is None:
         raise ValueError("build the topology with rcut2 for repulsion or Coulomb terms")
     layout = None if cfg.species is None else _species_layout(cfg, np.asarray(species))
+    unpolarized = (np.array([not cfg.species[s_].spin_polarized for s_ in species])
+                   if layout is not None else np.zeros(len(species), bool))
     if layout is not None:
         nexp = max(st[1] for st in layout.settings)
 
@@ -482,7 +488,12 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
             starts = layout.starts
         e0 = params["onsite"][species]  # (N, nshell)
         nshift = 1 if cfg.atomic_shifts else nshell
-        levels = e0[:, None, :] + shifts.reshape(topo.n_atoms, nspin, nshift)
+        shifts = shifts.reshape(topo.n_atoms, nspin, nshift)
+        if layout is not None and cfg.magnetic and unpolarized.any():
+            # one shift for both spins: their mean, so the difference is idle
+            mean = jnp.mean(shifts, axis=1, keepdims=True)
+            shifts = jnp.where(unpolarized[:, None, None], mean, shifts)
+        levels = e0[:, None, :] + shifts
         orb_levels = levels[:, :, orb_shell]  # (N, nspin, norb)
         if cfg.spin == "noncollinear":
             spin_orbit = None
