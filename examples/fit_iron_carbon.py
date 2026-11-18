@@ -39,6 +39,10 @@ TARGETS = {
     "dH Fe3C": (0.03, 0.04),
     "p Fe3C": (0.0, 5.0),
     "m Fe3C": (1.95, 0.15),
+    # electrons carbon gains in the octahedral site: DFT (Bader) gives C in
+    # iron a gain of roughly half to one electron; this tight-binding charge
+    # is not a Bader charge, so the target only keeps the transfer moderate
+    "charge C oct": (0.3, 0.4),
 }
 
 # fitted parameters: name, lower and upper bound
@@ -52,6 +56,7 @@ FREE = {
     "pair_decay": (2.0, 14.0),
     "rho_fe": (0.0, 5.0),
     "rho_c": (0.0, 5.0),
+    "hubbard_c": (2.0, 12.0),
 }
 
 
@@ -132,7 +137,7 @@ def report(model, values):
     print(f"{'property':14s} {'model':>9s} {'target':>9s}")
     for k, (t, _) in TARGETS.items():
         print(f"{k:14s} {out[k]:9.4f} {t:9.4f}")
-    for k in ("m Fe nn oct", "charge C oct", "charge C Fe3C"):
+    for k in ("m Fe nn oct", "charge C Fe3C"):
         print(f"{k:14s} {out[k]:9.4f}")
     cost = sum(((out[k] - t) / tol) ** 2 for k, (t, tol) in TARGETS.items())
     print(f"cost {cost:.3f}")
