@@ -40,20 +40,10 @@ the magnetisation matters there.
 The onsite levels are self-consistent in the mobile region and a buffer
 around it (--free-buffer) and frozen at the bulk values further out.
 
-Status: no converged Peierls path yet (docs/magnetic-field.md); the old notes below  On a 4-core cloud
-machine (no GPU) the self-consistency of the 9-moment iron model in a
-cylinder that is one b long is the obstacle: one energy and force of 61
-atoms costs about 1 s at fixed levels, and the compiled Newton loop needs
-16-20 s per step with Krylov steps; those converge only linearly and stall
-near a residual of 1e-2 (without and with the frozen outer shell), while
-undamped dense Newton steps diverge, and the damped solver of ``make_scf``
-needs more than 15 GB for 122 unknowns.  Expect to need a GPU, a more robust
-(damped, preconditioned) solver inside ``make_potential``, or a fully
-periodic quadrupole cell without free surfaces.  The tools it uses
-(``bopjax.zeeman``, ``bopjax.neb``) are tested on small systems in
-tests/test_zeeman.py.
-
-    uv run python examples/magnetoplasticity.py [--basis sd] [--xi 0.05] [--out profile.npz]
+Status: no converged Peierls path yet; see docs/magnetic-field.md.  The end
+points relax (about 45 FIRE steps of about 60 s each for --radius 12 on 4 CPU
+cores), but along the band the moment of the central core atom reaches a
+Stoner fold where the self-consistency has no nearby solution.
 """
 
 import argparse
