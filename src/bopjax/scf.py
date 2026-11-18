@@ -147,7 +147,7 @@ def make_forces(energy_fn):
 
 
 def make_potential(energy_fn, tol=1e-10, max_iter=20, self_consistent=True,
-                   method="auto"):
+                   method="auto", free=None):
     """Return a jit-compatible ``potential(positions, cell, params, shifts0=None)``
     giving ``(E, aux)`` with the onsite levels made self-consistent inside.
 
@@ -159,33 +159,52 @@ def make_potential(energy_fn, tol=1e-10, max_iter=20, self_consistent=True,
     the starting guess; passing the shifts of a nearby configuration (the
     previous molecular dynamics step) saves most of the iterations.
     ``method`` selects the linear solver as in ``make_scf``.
+
+    ``free`` (bool, (N,)) restricts the self-consistency to the onsite levels
+    of those atoms; the others keep the levels passed in ``shifts0``, like
+    atoms held at fixed positions.  The energy is then stationary in the free
+    levels only, which is all the forces on atoms need as long as the frozen
+    levels do not depend on the positions.  Use it for the outer shell of a
+    cluster or cylinder, whose surface moments can come close to saturation
+    and leave the self-consistency with nearly flat directions.
+    ``aux["scf_residual"]`` is then the residual of the free levels.
     """
     shape = energy_fn.shift_shape
     size = int(np.prod(shape))
-    krylov = _use_krylov(method, size)
+    if free is None:
+        index = np.arange(size)
+    else:
+        mask = np.broadcast_to(np.asarray(free, bool).reshape((-1,) + (1,) * (len(shape) - 1)),
+                               shape)
+        index = np.flatnonzero(mask.ravel())
+    krylov = _use_krylov(method, len(index))
 
     def flat_energy(x, positions, cell, params):
         return energy_fn(x.reshape(shape), positions, cell, params)[0]
 
-    grad = jax.grad(flat_energy)
-    hessian = jax.jacfwd(grad)
+    full_grad = jax.grad(flat_energy)
 
     def converge(x0, positions, cell, params):
+        def grad(y):  # gradient with respect to the free levels
+            return full_grad(x0.at[index].set(y), positions, cell, params)[index]
+
+        hessian = jax.jacfwd(grad)
+
         def cond(state):
             _, g, it = state
             return (jnp.max(jnp.abs(g)) > tol) & (it < max_iter)
 
         def body(state):
-            x, g, it = state
+            y, g, it = state
             if krylov:
-                x = x + _krylov_step(lambda y: grad(y, positions, cell, params), x, g,
-                                     0.3 * tol)
+                y = y + _krylov_step(grad, y, g, 0.3 * tol)
             else:
-                x = x + _newton_step(hessian(x, positions, cell, params), g)
-            return x, grad(x, positions, cell, params), it + 1
+                y = y + _newton_step(hessian(y), g)
+            return y, grad(y), it + 1
 
-        x, g, it = jax.lax.while_loop(cond, body, (x0, grad(x0, positions, cell, params), 0))
-        return x, jnp.max(jnp.abs(g)), it
+        y0 = x0[index]
+        y, g, it = jax.lax.while_loop(cond, body, (y0, grad(y0), 0))
+        return x0.at[index].set(y), jnp.max(jnp.abs(g)), it
 
     def potential(positions, cell, params, shifts0=None):
         x = jnp.zeros(size, dtype=positions.dtype) if shifts0 is None else jnp.ravel(shifts0)
@@ -194,7 +213,7 @@ def make_potential(energy_fn, tol=1e-10, max_iter=20, self_consistent=True,
             frozen = jax.lax.stop_gradient((x, positions, cell, params))
             x, residual, iterations = converge(*frozen)
         else:
-            residual = jnp.max(jnp.abs(grad(x, positions, cell, params)))
+            residual = jnp.max(jnp.abs(full_grad(x, positions, cell, params)[index]))
         x = jax.lax.stop_gradient(x)
         e, aux = energy_fn(x.reshape(shape), positions, cell, params)
         aux = dict(aux, shifts=x.reshape(shape), scf_iterations=iterations,

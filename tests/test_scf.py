@@ -100,3 +100,36 @@ def test_clusters_grow_by_hop_shells():
     assert topo.cluster_sizes == (1, 13, 55, 147)
     # every listed neighbour of the central atom is in its first shell
     assert set(topo.cluster_nbr[0, 0]) == set(range(1, 13))
+
+
+def test_potential_with_frozen_levels():
+    # self-consistency on atoms 0 and 1 only; the levels of 2 and 3 stay as given
+    import jax
+
+    cfg = bj.BOPConfig(nmom=6, rcut=3.3, dcut=0.5, spin="collinear")
+    topo = bj.build_topology(POS, [0] * 4, cfg.rcut, cfg.nmom, np.array(CELL))
+    energy = bj.make_energy_fn(topo, cfg)
+    params = dict(canonical_d(n_electrons=7.0, hubbard=3.0), stoner=jnp.array([[0.6]]))
+    pos = jnp.array(POS)
+    start = bj.stoner_shifts(np.full((4, 1), 2.0), 0.6)
+    full = bj.make_scf(energy)(pos, CELL, params, shifts0=start, tol=1e-12)
+    assert full.converged
+    # frozen levels near, but not at, self-consistency (as for a fixed outer shell)
+    # (not a common shift of all levels: that only moves the Fermi level)
+    frozen = full.shifts.at[2, :, 0].add(jnp.array([0.03, -0.03])).at[3, 0, 0].add(0.05)
+    free = np.array([True, True, False, False])
+    potential = bj.make_potential(energy, tol=1e-12, free=free)
+    e, aux = potential(pos, CELL, params, frozen)
+    np.testing.assert_allclose(aux["shifts"][2:], frozen[2:], atol=0)
+    g = jax.grad(lambda s: energy(s, pos, CELL, params)[0])(aux["shifts"])
+    assert float(jnp.max(jnp.abs(g[:2]))) < 1e-12
+    assert float(jnp.max(jnp.abs(g[2:]))) > 1e-3  # not stationary in the frozen levels
+    # forces are still the total derivative: the energy is stationary in the free levels
+    force = -jax.grad(lambda x: potential(x, CELL, params, frozen)[0])(pos)
+    h = 1e-3
+    for i, d in ((0, 0), (3, 2)):
+        def e_at(delta):
+            return float(potential(pos.at[i, d].add(delta), CELL, params, frozen)[0])
+
+        fd = -(-e_at(2 * h) + 8 * e_at(h) - 8 * e_at(-h) + e_at(-2 * h)) / (12 * h)
+        assert float(force[i, d]) == pytest.approx(fd, abs=1e-8)
