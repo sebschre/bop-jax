@@ -242,6 +242,7 @@ class Calculator:
         self.positions = jnp.asarray(c.positions)
         self.n_atoms = len(c.positions)
         self._x = None  # last self-consistent levels (own subspace)
+        self._nm = None  # non-magnetic twin for cold starts of magnetic cells
 
     @property
     def n_hessian(self):
@@ -260,7 +261,8 @@ class Calculator:
         pos = self.positions if positions is None else positions
         x = self._x
         if x is None:
-            x = self._block_start(params, pos, verbose)
+            x = (self._from_nonmagnetic(params, pos, verbose) if self.c.magnetic
+                 else self._block_start(params, pos, verbose))
         x, e, aux, res = self._own(x, pos, self.cell, params, tol, max_iter, verbose)
         self.residual = res
         if res > 1e-6:
@@ -269,6 +271,28 @@ class Calculator:
         self._x = x
         self.aux = aux
         return float(e), aux
+
+    def _from_nonmagnetic(self, params, pos, verbose=False):
+        """Cold start of a magnetic cell: the non-magnetic levels (found by
+        blocks) plus the Stoner splitting of the starting moment on Fe d."""
+        if self._nm is None:
+            self._nm = Calculator(Cell(self.c.name + " NM", self.c.cell, self.c.positions,
+                                       self.c.species, magnetic=False))
+        self._nm.positions = jnp.asarray(pos)
+        self._nm._x = None
+        self._nm.solve(params, verbose=verbose)
+        x_nm = np.asarray(self._nm._x)
+        split = 0.5 * float(params["stoner"][FE, 2]) * self.c.fe_moment
+        x, k = [], 0
+        for sp in self.species:
+            if sp == FE:
+                x += [x_nm[k] - split, x_nm[k] + split]
+                k += 1
+            else:
+                x += [x_nm[k], x_nm[k + 1], x_nm[k], x_nm[k + 1]]  # s, p up; s, p down
+                k += 2
+        self._own.h = None
+        return jnp.asarray(x)
 
     def _block_start(self, params, pos, verbose=False, cap=0.5):
         """Levels from a cold start, by blocks.  Carbon can take or give most
