@@ -21,6 +21,12 @@
 
 ## Caveats
 
+- The iron-carbon model has no fitted cross terms: magnetic
+  self-consistency of carbon in iron is not robust enough to fit (see
+  [Iron-carbon](iron-carbon.md)). Pure iron and pure carbon are unaffected.
+- `bandwidth_guard` and `atomic_shifts` change a model's energies; a model
+  fitted without them needs a refit with them, as carbon had.
+
 - Bond integrals for mixed shells (sp, sd, pd) are checked against the
   Slater-Koster table, for hermiticity and rotation invariance, but have not
   been compared with BOPfox.
