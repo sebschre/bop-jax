@@ -29,6 +29,8 @@ from .hamiltonian import (L_OF, angular_momentum, bond_blocks, cosine_cutoff,
                           powerlaw, screening_factors, shell_slices)
 
 SPIN_MODES = ("none", "collinear", "noncollinear")
+MU_B = 5.7883818060e-5  # Bohr magneton in eV / T
+G_SPIN = 2.00231930436  # electron spin g-factor
 
 
 @dataclass(frozen=True)
@@ -151,6 +153,31 @@ def orbital_blocks(basis) -> np.ndarray:
     return out
 
 
+def spin_blocks(basis) -> np.ndarray:
+    """Pauli matrices times the unit matrix in the orbitals of the atom:
+    (3, norb, 2, norb, 2), in the global spin frame."""
+    _, norb = shell_slices(basis)
+    return np.einsum("xtu,ab->xatbu", PAULI, np.eye(norb))
+
+
+def _field_sources(params, n, dtype):
+    """Onsite sources ``h_i`` (coupling ``h_i.sigma``) and ``b_i`` (coupling
+    ``b_i.L``) in eV, each (N, 3) or None, from ``params``.
+
+    An external field B (Tesla) enters both:  h = -mu_B g/2 B,  b = -mu_B B,
+    so that the energy falls by mu_B B.M for a magnetic moment
+    M = g/2 <sigma> + <L> along B (to first order)."""
+    h = b = None
+    if "magnetic_field" in params:
+        field = jnp.broadcast_to(jnp.asarray(params["magnetic_field"], dtype), (n, 3))
+        h, b = -0.5 * G_SPIN * MU_B * field, -MU_B * field
+    if "spin_field" in params:
+        h = params["spin_field"] if h is None else h + params["spin_field"]
+    if "orbital_field" in params:
+        b = params["orbital_field"] if b is None else b + params["orbital_field"]
+    return h, b
+
+
 def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: int = 64,
                          spin_orbit=None):
     """Moments of the spinor Hamiltonian projected on each atom's local spin
@@ -158,8 +185,9 @@ def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: i
 
     onsite     : (N, 2, norb) levels of the local spin-up and spin-down channels
     axes       : (N, 3) local spin quantisation axes (need not be normalised)
-    spin_orbit : None, or the onsite spin-orbit term (N, norb, 2, norb, 2) in
-                 the global spin frame, e.g. ``xi * spin_orbit_blocks(basis)``
+    spin_orbit : None, or an extra onsite matrix (N, norb, 2, norb, 2) in the
+                 global spin frame, e.g. ``xi * spin_orbit_blocks(basis)``, plus
+                 any Zeeman terms
 
     The start states stay |real orbital a, spin up/down along the axis>.  With
     spin-orbit coupling these are no longer eigenstates of the onsite block,
@@ -217,8 +245,12 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
       "stoner"    (nspecies, nshell)   Stoner integrals        [magnetic]
       "spin_axes" (N, 3)               local spin directions   [noncollinear]
       "spin_orbit" (nspecies, nshell)  spin-orbit constants xi [cfg.spin_orbit]
+      "magnetic_field" (3,) or (N, 3)  optional external field B (Tesla)
+                                       [magnetic]
+      "spin_field"    (N, 3)           optional source h_i of a term h_i.sigma
+                                       on each atom (eV)       [magnetic]
       "orbital_field" (N, 3)           optional source b_i of a term b_i.L on
-                                       each atom (eV)          [cfg.spin_orbit]
+                                       each atom (eV)          [noncollinear]
       "repulsion" {"pair", "density": (nspecies, nspecies, npar),
                    "embed": (nspecies, npar)}                  [cfg.repulsion]
       "taper"     (nspecies, nspecies, 2)   R1, R2             [cfg.coulomb]
@@ -245,6 +277,18 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     as the derivative of the energy with respect to ``params["orbital_field"]``
     (see ``make_orbital_moment``).
 
+    An external field ``params["magnetic_field"]`` adds the Zeeman term
+    ``-mu_B B.(L + g/2 sigma)`` to the onsite Hamiltonian (see
+    ``bopjax.zeeman``).  Moments are counted as everywhere in bopjax, with the
+    magnetisation along ``m e``, so the field favours ``m e`` along B.  The
+    part of the spin term along each local axis acts like a free-atom level:
+    it splits the spin-up and spin-down levels by ``-/+ h.e`` and adds
+    ``(h.e) m`` to the energy (``aux["energy_zeeman"]``), so the shifts remain
+    the internal (Stoner and Coulomb) potentials.  The perpendicular part and
+    ``b.L`` enter the spinor Hamiltonian as matrices, like ``xi L.S``.  In
+    collinear calculations only the component along z couples, to the spin
+    only.
+
     ``shifts`` has shape ``energy.shift_shape``: (N, nshell), or (N, 2, nshell)
     for magnetic calculations (spin up, spin down).
     """
@@ -262,7 +306,9 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     species = topo.species
     orb_shell = np.concatenate([[k] * (b - a) for k, (a, b) in enumerate(slices)])
     ls_blocks = spin_orbit_blocks(cfg.basis) if cfg.spin_orbit else None
-    l_blocks = orbital_blocks(cfg.basis) if cfg.spin_orbit else None
+    noncollinear = cfg.spin == "noncollinear"
+    l_blocks = orbital_blocks(cfg.basis) if noncollinear else None
+    s_blocks = spin_blocks(cfg.basis) if noncollinear else None
     if cfg.screening and "d" not in cfg.basis:
         raise ValueError("screening acts on d-d bond integrals; the basis has no d shell")
     nbr_reverse = reverse_slots(topo) if cfg.screening else None
@@ -354,17 +400,36 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
                            cfg.rcut, cfg.dcut, radial, dd_screen)
         e0 = params["onsite"][species]  # (N, nshell)
         levels = e0[:, None, :] + shifts.reshape(topo.n_atoms, nspin, nshell)
+        h_field, b_field = _field_sources(params, topo.n_atoms, rij.dtype)
+        if (h_field is not None or b_field is not None) and not cfg.magnetic:
+            raise ValueError("a magnetic field needs a magnetic calculation (cfg.spin)")
+        if not noncollinear:
+            if "orbital_field" in params:
+                raise ValueError('an orbital field needs spin="noncollinear"')
+            b_field = None  # real orbitals and no spin-orbit coupling: quenched
+        h_par = None
+        if h_field is not None:
+            if noncollinear:
+                e_axis = params["spin_axes"] / jnp.linalg.norm(
+                    params["spin_axes"], axis=-1, keepdims=True)
+                h_par = jnp.sum(h_field * e_axis, axis=-1)
+            else:
+                h_par = h_field[:, 2]
+            levels = levels + jnp.stack([h_par, -h_par], axis=1)[:, :, None]
         orb_levels = levels[:, :, orb_shell]  # (N, nspin, norb)
-        if cfg.spin == "noncollinear":
-            spin_orbit = None
+        if noncollinear:
+            extra = []
             if cfg.spin_orbit:
-                spin_orbit = jnp.einsum("nk,katbu->natbu", params["spin_orbit"][species],
-                                        ls_blocks)
-                if "orbital_field" in params:
-                    spin_orbit = spin_orbit + jnp.einsum(
-                        "nx,xatbu->natbu", params["orbital_field"], l_blocks)
+                extra.append(jnp.einsum("nk,katbu->natbu", params["spin_orbit"][species],
+                                        ls_blocks))
+            if b_field is not None:
+                extra.append(jnp.einsum("nx,xatbu->natbu", b_field, l_blocks))
+            if h_field is not None:
+                h_perp = h_field - h_par[:, None] * e_axis
+                extra.append(jnp.einsum("nx,xatbu->natbu", h_perp, s_blocks))
+            onsite_matrix = sum(extra[1:], extra[0]) if extra else None
             mu_orb = moments_noncollinear(hblk, orb_levels, params["spin_axes"],
-                                          topo, cfg.nmom, cfg.batch, spin_orbit)
+                                          topo, cfg.nmom, cfg.batch, onsite_matrix)
         else:
             mu_orb = jax.vmap(lambda lev: moments(hblk, lev, topo, cfg.nmom, cfg.batch),
                               in_axes=1, out_axes=1)(orb_levels)
@@ -388,6 +453,10 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
             e_mag = -0.25 * jnp.sum(params["stoner"][species] * moment**2, axis=1)
             e_atom = e_atom + e_mag
             aux.update(n_spin=n_spin, moment=jnp.sum(moment, axis=1), energy_mag=e_mag)
+            if h_par is not None:
+                e_zeeman = h_par * jnp.sum(moment, axis=1)
+                e_atom = e_atom + e_zeeman
+                aux.update(energy_zeeman=e_zeeman)
         if needs_pairs:
             e_rep, e_coul = pair_terms(positions, cell, params, charge)
             e_atom = e_atom + e_rep + e_coul

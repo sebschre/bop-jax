@@ -13,8 +13,12 @@
   are not fed back into the energy (see [Spin-orbit coupling](spin-orbit.md));
   spin-lattice dynamics with spin-orbit coupling, and with it the exchange of
   angular momentum between spins and lattice, has not been run
-- longitudinal fluctuations of the moments; an external magnetic field; a
-  thermostat for the atoms in spin-lattice dynamics
+- longitudinal fluctuations of the moments; a thermostat for the atoms in
+  spin-lattice dynamics
+- an external field couples to the spin along each local axis self-consistently,
+  but its perpendicular part and the orbital term only through the spinor
+  Hamiltonian, within the local-axis ansatz ([Magnetic field](magnetic-field.md));
+  there is no vector potential (no orbital effect of the field on the hopping)
 - thermostats and barostats with warm start (only constant-energy dynamics
   carries the onsite levels; use JAX-MD's integrators otherwise)
 - dynamic neighbour lists inside a compiled MD loop (rebuilt from Python)

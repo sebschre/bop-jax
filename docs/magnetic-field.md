@@ -1,0 +1,120 @@
+# Magnetic field
+
+## Zeeman term
+
+`params["magnetic_field"]` (Tesla, shape (3,) or (N, 3)) adds
+
+    H_Z = -mu_B B.(L + g/2 sigma),   g = 2.00231930436
+
+to the onsite Hamiltonian of every atom, in collinear and non-collinear
+calculations. Moments are counted as everywhere in bopjax, with the
+magnetisation along `m e` (the orbital magnetic moment in Bohr magnetons is
+`<L>` where the spin one is `m e`), so the field favours a magnetic moment
+
+    M_i = g/2 <sigma>_i + <L>_i
+
+along B. Time reversal maps this onto the physical convention (electron
+moment antiparallel to its angular momentum) without changing any energy.
+
+How the term enters the functional:
+
+- **Spin, along the local axis.** It acts like a free-atom level: the spin-up
+  and spin-down levels of every shell move by `-/+ h.e` with
+  `h = -mu_B g/2 B`, and `(h.e) m` is added to the energy
+  (`aux["energy_zeeman"]`). The shifts therefore remain the internal Stoner
+  and Coulomb potentials, and zero-field shifts are a good starting guess.
+  This part is self-consistent: the moment grows in the field (paraprocess).
+- **Spin, perpendicular to the local axis** (non-collinear only). The matrix
+  `h_perp.sigma` enters the spinor Hamiltonian like `xi L.S`. Its first-order
+  energy is the transverse spin density that spin-orbit coupling or
+  non-collinear neighbours induce; it is not fed back into the Stoner term
+  (local-axis ansatz, see [Spin-orbit coupling](spin-orbit.md)). A field
+  across the axes exerts the torque of a rigid moment, `-mu_B g/2 m e x B`.
+- **Orbital** (non-collinear only). `b.L` with `b = -mu_B B` enters the
+  spinor Hamiltonian. With spin-orbit coupling it gives the first-order
+  energy `-mu_B B.<L>`; without, the orbital moment is quenched at B = 0 and
+  the term only adds a Van Vleck orbital moment linear in B. In collinear
+  calculations the orbital term is left out and only the z component of B
+  couples.
+
+There is no vector potential, so the field does not act on the hopping
+(no Landau levels, no orbital diamagnetism of itinerant electrons).
+
+Two lower-level sources are also accepted, in eV and per atom:
+`params["spin_field"]` (`h_i.sigma`) and `params["orbital_field"]`
+(`b_i.L`); `make_magnetic_moment` and `make_orbital_moment` differentiate
+with respect to them.
+
+## Magnetic moments
+
+`bj.make_magnetic_moment(energy_fn)` returns
+`magnetic_moment(shifts, positions, cell, params)`, a dict of (N, 3) arrays in
+Bohr magnetons: `"spin"` (`g/2 <sigma>`), `"orbital"` (`<L>`) and `"total"`,
+each `-(1/mu_B) dE/dB_i` through that part of the Zeeman term. At
+self-consistent shifts these are derivatives of the self-consistent energy
+(Hellmann-Feynman), as for the forces.
+
+Checks (`tests/test_zeeman.py`):
+
+- a zero field changes nothing; collinear `"spin"` is `g/2 m` along z, and
+  agrees with central differences of the self-consistent energy in
+  `B_z = +-5 T` to 1e-6 muB;
+- a non-collinear calculation with axes along z and a spin field along z is
+  the collinear one to 1e-11 eV; the full field adds a positive Van Vleck
+  orbital moment;
+- without spin-orbit coupling, a common rotation of axes and field changes
+  nothing, and a transverse field gives the rigid-moment torque;
+- for the ferromagnetic chain with spin-orbit coupling (`xi` = 0.05 eV, axis
+  tilted 45 degrees), all three components of `"total"` agree with
+  differences of the self-consistent energy in `+-2 T`, the orbital part is
+  `make_orbital_moment`, and the spin has a transverse component (zero
+  without spin-orbit coupling).
+
+For the d-band iron model (`IRON_FIT`, bcc, 2.43 muB), the self-consistent
+energy in 100 T along the moment is 0.3 % below the first-order value
+`-mu_B B.M`, and the moment grows by 1.3e-4 muB per Tesla per atom (the
+high-field susceptibility of the model).
+
+## First-order field effect on a barrier
+
+For any configuration X, `E(X, B) = E(X, 0) - mu_B B.M(X) + O(B^2)`. Minima
+and saddle points are stationary in the positions, so the barrier between
+them changes to first order by
+
+    dE_P / dB = -mu_B [M(saddle) - M(minimum)]
+
+with nothing relaxed in the field. `bopjax.zeeman` provides:
+
+| Function | Result |
+|---|---|
+| `first_order_energies(moments, field)` | `-mu_B B.(M_p - M_0)` for every image of a path |
+| `first_order_barrier(energies, moments)` | saddle index, barrier, `M(saddle) - M(minimum)` and `dE_P/dB` (eV/T) |
+| `peierls_stress(x, energies, b, length, slopes)` | largest slope of the profile over `b length` (cubic Hermite interpolation), i.e. the resolved shear stress the line can resist |
+
+The Peierls stress from the zero-stress profile is an estimate of the 0 K
+critical resolved shear stress; the profile is not recomputed under load.
+
+## Minimum energy paths
+
+`bopjax.neb.neb(force_fn, images, mobile, ...)` is a climbing-image nudged
+elastic band (improved tangents) relaxed with FIRE;
+`force_fn(index, positions) -> (energy, forces)` lets each image keep its
+own neighbour list and warm-started onsite levels. `bopjax.neb.relax` is the
+same FIRE minimiser for one configuration. The band returns arc lengths and
+the slopes `dE/ds` from the forces along the tangents, for interpolating the
+profile. Checked on an analytic curved valley (saddle position to 1e-3,
+energy to 1e-6).
+
+## Screw dislocation in iron
+
+`examples/magnetoplasticity.py` applies this to a 1/2[111] screw dislocation
+of the iron model: a cylinder periodic along the line with one Burgers vector
+and a fixed shell at the anisotropic elastic solution, two relaxed easy cores
+one `a sqrt(2/3)` apart on the (-110) glide plane, the NEB path between them,
+the moments of every image, the first-order barrier shift and Peierls stress
+change, and a self-consistent check of the first-order shift at +-100 T. With
+`--xi` the end point and saddle are recomputed non-collinearly with
+spin-orbit coupling for fields along the line, the glide direction and the
+plane normal (orbital moments and direction dependence; the anisotropy is
+not converged with the number of moments, see
+[Spin-orbit coupling](spin-orbit.md)).
