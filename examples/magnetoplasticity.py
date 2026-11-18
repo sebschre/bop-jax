@@ -200,12 +200,20 @@ class Image:
         self.topo = bj.build_topology(np.asarray(positions), [0] * n_atoms, cfg.rcut, cfg.nmom,
                                       cell, rcut2=cfg.rcut2, skin=0.6)
         self.energy_fn = bj.make_energy_fn(self.topo, cfg, radial=v0_bond)
-        potential = bj.make_potential(self.energy_fn, tol=1e-9, method=args.solver,
-                                      free=None if free.all() else free,
-                                      condition=args.condition, adjoint_tol=args.adjoint_tol)
+        def value_grad(**options):
+            potential = bj.make_potential(self.energy_fn, tol=1e-9, method=args.solver,
+                                          free=None if free.all() else free,
+                                          condition=args.condition,
+                                          adjoint_tol=args.adjoint_tol, **options)
+            return potential, jax.jit(jax.value_and_grad(
+                lambda p, s0, par: potential(p, jnp.asarray(cell), par, s0), has_aux=True))
+
+        potential, self._value_grad = value_grad()
+        self._careful = None  # gentler mixing for a retry, compiled when first needed
+        self._careful_options = (dict(mixing=0.03, max_iter=600)
+                                 if args.condition == "potential" else dict(max_iter=60))
+        self._make = value_grad
         self._moment = jax.jit(zeeman.make_scf_magnetic_moment(potential, self.energy_fn))
-        self._value_grad = jax.jit(jax.value_and_grad(
-            lambda p, s0, par: potential(p, jnp.asarray(cell), par, s0), has_aux=True))
 
     def __call__(self, positions, field=None):
         if bj.needs_rebuild(positions, self.topo, cell, cfg.rcut, cfg.rcut2):
@@ -214,10 +222,14 @@ class Image:
         par = params if field is None else dict(params, magnetic_field=jnp.asarray(field))
         (e, aux), g = self._value_grad(jnp.asarray(positions), self.shifts, par)
         if float(aux["scf_residual"]) > 1e-6:
-            print(f"   warning: self-consistency residual {float(aux['scf_residual']):.1e}",
-                  flush=True)
-        if field is None:
-            self.shifts = aux["shifts"]
+            if self._careful is None:
+                self._careful = self._make(**self._careful_options)[1]
+            first = float(aux["scf_residual"])
+            (e, aux), g = self._careful(jnp.asarray(positions), self.shifts, par)
+            print(f"   self-consistency residual {first:.1e}; retry with gentler mixing: "
+                  f"{float(aux['scf_residual']):.1e}", flush=True)
+        if field is None and float(aux["scf_residual"]) < 1e-6:
+            self.shifts = aux["shifts"]  # warm start only from converged levels
         self.aux = aux
         return float(e), np.asarray(-g)
 

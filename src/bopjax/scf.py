@@ -154,35 +154,51 @@ def _anderson(residual, y0, tol, max_iter, mixing, history):
     target(y) - y``, in a ``lax.while_loop``.  Returns ``(y, max|r|, iterations)``.
 
     The least-squares problem for the mixing coefficients is regularised
-    relative to its diagonal; a non-finite step restarts from simple mixing.
+    relative to its diagonal.  The best iterate is kept: when the residual
+    grows to ten times the best one, or is not finite, the iteration restarts
+    from the best iterate with an empty history and half the mixing.
     """
     k = y0.shape[0]
     dtype = y0.dtype
 
-    def mix(y, f, dy, df, count):
+    def mix(y, f, dy, df, count, beta):
         valid = (jnp.arange(history) < count).astype(dtype)
         a = (df @ df.T) * valid[:, None] * valid[None, :]
         a = a + jnp.diag(1e-10 * jnp.max(jnp.diag(a)) + (1.0 - valid) + 1e-300)
         gamma = jnp.linalg.solve(a, (df @ f) * valid) * valid
-        return y + mixing * f - (dy + mixing * df).T @ gamma
+        return y + beta * f - (dy + beta * df).T @ gamma
+
+    def norm(f):
+        return jnp.where(jnp.all(jnp.isfinite(f)), jnp.max(jnp.abs(f)), jnp.inf)
 
     def cond(state):
-        _, f, _, _, _, it = state
-        return (jnp.max(jnp.abs(f)) > tol) & (it < max_iter)
+        f = state[1]
+        return (norm(f) > tol) & (state[-1] < max_iter)
 
     def body(state):
-        y, f, dy, df, count, it = state
-        y_new = mix(y, f, dy, df, count)
-        y_new = jnp.where(jnp.all(jnp.isfinite(y_new)), y_new, y + mixing * f)
+        y, f, dy, df, count, beta, y_best, f_best, it = state
+        y_new = mix(y, f, dy, df, count, beta)
+        y_new = jnp.where(jnp.all(jnp.isfinite(y_new)), y_new, y + beta * f)
         f_new = residual(y_new)
+        better = norm(f_new) < norm(f_best)
+        y_best = jnp.where(better, y_new, y_best)
+        f_best = jnp.where(better, f_new, f_best)
+        restart = norm(f_new) > 10.0 * norm(f_best)
         dy = jnp.roll(dy, 1, axis=0).at[0].set(y_new - y)
         df = jnp.roll(df, 1, axis=0).at[0].set(f_new - f)
-        return y_new, f_new, dy, df, jnp.minimum(count + 1, history), it + 1
+        count = jnp.where(restart, 0, jnp.minimum(count + 1, history))
+        beta = jnp.where(restart, 0.5 * beta, beta)
+        y_new = jnp.where(restart, y_best, y_new)
+        f_new = jnp.where(restart, f_best, f_new)
+        return y_new, f_new, dy, df, count, beta, y_best, f_best, it + 1
 
     zeros = jnp.zeros((history, k), dtype=dtype)
-    state = (y0, residual(y0), zeros, zeros, 0, 0)
-    y, f, _, _, _, it = jax.lax.while_loop(cond, body, state)
-    return y, jnp.max(jnp.abs(f)), it
+    f0 = residual(y0)
+    state = (y0, f0, zeros, zeros, 0, jnp.asarray(mixing, dtype), y0, f0, 0)
+    state = jax.lax.while_loop(cond, body, state)
+    y, f, y_best, f_best, it = state[0], state[1], state[6], state[7], state[-1]
+    use_best = norm(f_best) < norm(f)
+    return jnp.where(use_best, y_best, y), jnp.minimum(norm(f), norm(f_best)), it
 
 
 def make_potential(energy_fn, tol=1e-10, max_iter=None, self_consistent=True,
