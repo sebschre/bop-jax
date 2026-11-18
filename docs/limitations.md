@@ -30,7 +30,10 @@
   been compared with BOPfox.
 - A strong ferromagnet with a completely filled spin-up band has extra flat
   directions; the solver handles them, but the onsite levels are then not
-  unique. Non-collinear cases close to saturation can fail to converge, and
+  unique. Where moments come close to saturation in inhomogeneous systems
+  (surfaces), the stationary point can be out of reach of Newton's method;
+  `make_potential(condition="potential")` converges there, to a slightly
+  different state (see [Formulation](formulation.md#potential-self-consistency)). Non-collinear cases close to saturation can fail to converge, and
   with spin-orbit coupling saturated ferromagnets (dimer, chain and fcc with
   7 electrons were tried) mostly do not converge at all.
 - Timings are for the machine named with them (an Apple M1 Pro or a 4-core

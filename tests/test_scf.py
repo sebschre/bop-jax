@@ -223,3 +223,23 @@ def test_potential_condition_with_frozen_levels():
     assert float(force[1, 2]) == pytest.approx(fd, abs=1e-7)
     with pytest.raises(ValueError, match="condition"):
         bj.make_potential(energy, condition="mixing")
+
+
+def test_scf_magnetic_moment_includes_the_response():
+    from bopjax import zeeman
+
+    pos = jnp.array(POS)
+    energy, params = _magnetic_cell(POS, CELL, DISTORTED_STONER)
+    start = bj.stoner_shifts(np.full((4, 1), 2.0), DISTORTED_STONER)
+    potential = bj.make_potential(energy, tol=1e-12, condition="potential")
+    _, aux = potential(pos, CELL, params, start)
+    total = zeeman.make_scf_magnetic_moment(potential, energy)(pos, CELL, params,
+                                                                aux["shifts"])["total"]
+    h = 2.0
+
+    def e_in(b):
+        return float(potential(pos, CELL, dict(params, magnetic_field=jnp.array([0, 0, b])),
+                               aux["shifts"])[0])
+
+    fd = -(e_in(h) - e_in(-h)) / (2 * h) / zeeman.MU_B
+    assert float(jnp.sum(total[:, 2])) == pytest.approx(fd, abs=1e-6)

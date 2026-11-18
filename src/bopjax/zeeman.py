@@ -56,7 +56,8 @@ import numpy as np
 
 from .bop import G_SPIN, MU_B
 
-__all__ = ["G_SPIN", "MU_B", "make_magnetic_moment", "first_order_energies",
+__all__ = ["G_SPIN", "MU_B", "make_magnetic_moment", "make_scf_magnetic_moment",
+           "first_order_energies",
            "first_order_barrier", "peierls_stress"]
 
 
@@ -94,6 +95,44 @@ def make_magnetic_moment(energy_fn):
 
         d_sigma, d_l = jax.grad(energy, argnums=(0, 1))(zero, zero)
         # h = -mu_B g/2 B and b = -mu_B B, so -(1/mu_B) dE/dB = g/2 dE/dh + dE/db
+        spin = 0.5 * G_SPIN * d_sigma
+        if not noncollinear:
+            spin = spin * jnp.array([0.0, 0.0, 1.0], dtype=dtype)
+        return {"spin": spin, "orbital": d_l, "total": spin + d_l}
+
+    return magnetic_moment
+
+
+def make_scf_magnetic_moment(potential, energy_fn):
+    """Like ``make_magnetic_moment``, but the derivative of a self-consistent
+    ``potential`` from ``scf.make_potential``:
+    ``magnetic_moment(positions, cell, params, shifts0=None) -> dict``.
+
+    With ``condition="stationary"`` this equals ``make_magnetic_moment`` at the
+    converged shifts.  With ``condition="potential"`` the energy is not
+    stationary in the shifts and the moment includes the response of the
+    shifts to the field (implicit differentiation), as the first-order field
+    dependence of the self-consistent energy requires.
+    """
+    cfg = energy_fn.config
+    if not cfg.magnetic:
+        raise ValueError("the magnetic moment needs a magnetic calculation (cfg.spin)")
+    n = energy_fn.topology.n_atoms
+    noncollinear = cfg.spin == "noncollinear"
+
+    def magnetic_moment(positions, cell, params, shifts0=None):
+        dtype = jnp.asarray(positions).dtype
+        zero = jnp.zeros((n, 3), dtype=dtype)
+
+        def energy(h, b):
+            here = dict(params)
+            here["spin_field"] = params["spin_field"] + h if "spin_field" in params else h
+            if noncollinear:
+                here["orbital_field"] = (params["orbital_field"] + b
+                                         if "orbital_field" in params else b)
+            return potential(positions, cell, here, shifts0)[0]
+
+        d_sigma, d_l = jax.grad(energy, argnums=(0, 1))(zero, zero)
         spin = 0.5 * G_SPIN * d_sigma
         if not noncollinear:
             spin = spin * jnp.array([0.0, 0.0, 1.0], dtype=dtype)

@@ -76,10 +76,13 @@ parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
 parser.add_argument("--basis", default="d", choices=("d", "sd"))
 parser.add_argument("--radius", type=float, default=20.0, help="cylinder radius (A)")
 parser.add_argument("--fixed", type=float, default=10.0, help="fixed outer shell (A)")
-parser.add_argument("--free-buffer", type=float, default=4.0,
-                    help="fixed atoms within this distance of the mobile region keep "
-                         "self-consistent onsite levels (A)")
-parser.add_argument("--solver", default="auto", choices=("auto", "dense", "krylov"))
+parser.add_argument("--condition", default="potential", choices=("potential", "stationary"),
+                    help="self-consistency condition (scf.make_potential)")
+parser.add_argument("--free-buffer", type=float, default=None,
+                    help="freeze the onsite levels (at bulk values) of fixed atoms farther "
+                         "than this from the mobile region (A); default: none frozen")
+parser.add_argument("--solver", default="auto", choices=("auto", "dense", "krylov"),
+                    help="linear solver of --condition stationary")
 parser.add_argument("--images", type=int, default=5, help="images between the end points")
 parser.add_argument("--fmax", type=float, default=0.02, help="NEB force tolerance (eV/A)")
 parser.add_argument("--steps", type=int, default=400, help="NEB steps")
@@ -152,10 +155,10 @@ site_b = site_a + np.array([hop, 0.0])
 mid = 0.5 * (site_a + site_b)
 rho = np.hypot(*(ref[:, :2] - mid).T)
 mobile = rho < args.radius - args.fixed
-# onsite levels: self-consistent inside, frozen at the bulk values in the outer
-# part of the fixed shell, whose surface moments would otherwise approach
-# saturation (nearly flat directions of the self-consistency)
-free = rho < args.radius - args.fixed + args.free_buffer
+# optionally, onsite levels frozen at the bulk values in the outer part of the
+# fixed shell
+free = (np.ones(len(ref), bool) if args.free_buffer is None
+        else rho < args.radius - args.fixed + args.free_buffer)
 side = 2 * args.radius + 2 * (cfg.rcut + 1.0)
 cell = np.diag([side, side, b])
 n_atoms = len(ref)
@@ -191,8 +194,10 @@ class Image:
         self.topo = bj.build_topology(np.asarray(positions), [0] * n_atoms, cfg.rcut, cfg.nmom,
                                       cell, rcut2=cfg.rcut2, skin=0.6)
         self.energy_fn = bj.make_energy_fn(self.topo, cfg, radial=v0_bond)
-        potential = bj.make_potential(self.energy_fn, max_iter=40, method=args.solver,
-                                      free=free)
+        potential = bj.make_potential(self.energy_fn, tol=1e-9, method=args.solver,
+                                      free=None if free.all() else free,
+                                      condition=args.condition)
+        self._moment = jax.jit(zeeman.make_scf_magnetic_moment(potential, self.energy_fn))
         self._value_grad = jax.jit(jax.value_and_grad(
             lambda p, s0, par: potential(p, jnp.asarray(cell), par, s0), has_aux=True))
 
@@ -208,6 +213,12 @@ class Image:
             self.shifts = aux["shifts"]
         self.aux = aux
         return float(e), np.asarray(-g)
+
+    def moment(self, positions):
+        """Total magnetic moment per atom (N, 3) at B = 0, the field derivative
+        of the self-consistent energy."""
+        return np.asarray(self._moment(jnp.asarray(positions), jnp.asarray(cell), params,
+                                       self.shifts)["total"])
 
 
 # --- end points and the Peierls path ----------------------------------------------
@@ -254,9 +265,7 @@ print(f"Peierls barrier {1e3 * e0.max():.2f} meV per b; Peierls stress from the 
 moments = np.zeros((p, n_atoms, 3))
 for i, c in enumerate(calcs):
     c(path.images[i])  # converged levels at the final band
-    mm = bj.make_magnetic_moment(c.energy_fn)(c.shifts, jnp.asarray(path.images[i]),
-                                              jnp.asarray(cell), params)
-    moments[i] = np.asarray(mm["total"])
+    moments[i] = c.moment(path.images[i])
 m_cell = moments.sum(axis=1)[:, 2]
 first = zeeman.first_order_barrier(path.energies, moments)
 saddle = first["saddle"]
@@ -315,16 +324,16 @@ if args.xi > 0:
                                      cell, rcut2=cfg_nc.rcut2, skin=0.6)
             energy_nc = bj.make_energy_fn(topo, cfg_nc, radial=v0_bond)
             par = dict(params, spin_orbit=xi, spin_axes=jnp.tile(jnp.asarray(n), (n_atoms, 1)))
-            res = bj.make_scf(energy_nc)(jnp.asarray(path.images[i]), jnp.asarray(cell), par,
-                                         shifts0=calcs[i].shifts, tol=1e-9, max_iter=40)
-            mm = bj.make_magnetic_moment(energy_nc)(res.shifts, jnp.asarray(path.images[i]),
-                                                    jnp.asarray(cell), par)
-            e_dir.append(res.energy)
+            pot_nc = bj.make_potential(energy_nc, tol=1e-9, condition=args.condition)
+            here = (jnp.asarray(path.images[i]), jnp.asarray(cell), par, calcs[i].shifts)
+            e_nc, aux_nc = jax.jit(pot_nc)(*here)
+            mm = jax.jit(zeeman.make_scf_magnetic_moment(pot_nc, energy_nc))(*here)
+            e_dir.append(float(e_nc))
             m_dir.append(float(np.sum(np.asarray(mm["total"]) @ n)))
             l_dir.append(float(np.sum(np.asarray(mm["orbital"]) @ n)))
-            if not res.converged:
+            if float(aux_nc["scf_residual"]) > 1e-6:
                 print(f"   ({name}, image {i}: self-consistency not converged, "
-                      f"residual {res.history[-1]:.1e})")
+                      f"residual {float(aux_nc['scf_residual']):.1e})")
         dm = m_dir[-1] - m_dir[0]
         soc[name] = dict(barrier=e_dir[-1] - e_dir[0], moment=m_dir, orbital=l_dir)
         print(f" {name:15s}  {1e3 * (e_dir[-1] - e_dir[0]):9.3f}  {m_dir[0]:9.3f}  "
