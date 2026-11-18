@@ -239,6 +239,8 @@ class Calculator:
             x = (self._from_nonmagnetic(params, pos, verbose) if self.c.magnetic
                  else self._block_start(params, pos, verbose))
         x, e, aux, res = self._solver(x, pos, self.cell, params, tol, max_iter, verbose)
+        if (res > 1e-6 or not self.sane(aux)) and cold and self.c.magnetic:
+            x, e, aux, res = self._stoner_ramp(params, pos, tol, max_iter, verbose)
         if (res > 1e-6 or not self.sane(aux)) and not cold:  # warm start failed
             if verbose or getattr(self, "trace", False):
                 print(f"  warm start failed ({res:.2e}), cold restart", flush=True)
@@ -253,6 +255,27 @@ class Calculator:
         self._x = x
         self.aux = aux
         return float(e), aux
+
+    def _stoner_ramp(self, params, pos, tol, max_iter, verbose=False,
+                     scales=(0.4, 0.55, 0.7, 0.8, 0.9, 1.0)):
+        """Continuation in the Stoner integral of iron from the non-magnetic
+        levels: the moments grow step by step, each step warm-started."""
+        x_nm = np.asarray(self._nm._x)
+        x = []
+        for xi, sp in zip(x_nm, self.species):  # a small seed moment on iron
+            x += [xi - 0.05, xi + 0.05] if sp == FE else [xi]
+        x = jnp.asarray(x)
+        stoner = params["stoner"]
+        for scale in scales:
+            p = dict(params, stoner=stoner * scale)
+            self._solver.h = None
+            x, e, aux, res = self._solver(x, pos, self.cell, p, tol, max_iter, verbose)
+            if verbose:
+                print(f"  Stoner x {scale}: |g| {res:.2e} "
+                      f"mean m {float(jnp.mean(jnp.abs(aux['moment']))):.2f}", flush=True)
+            if res > 1e-5:
+                break
+        return x, e, aux, res
 
     def _from_nonmagnetic(self, params, pos, verbose=False):
         """Cold start of a magnetic cell: the non-magnetic shifts plus the
