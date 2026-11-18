@@ -93,8 +93,38 @@ the sp polarisation of DFT (about -0.05 to -0.1 muB), induced through s-d
 hybridisation without an s Stoner term and not fitted. The price is the
 hcp energy (89 meV, target 65; the order bcc FM < hcp NM < fcc is kept) and
 C12. The s-d coupling is moderate (`sds` = -0.26, `sss` = -0.30 eV at r0).
-Each sd evaluation costs about 3 times a d evaluation. `iron_properties.py`
-has not been run for the sd model.
+Each sd evaluation costs about 3 times a d evaluation.
+
+### Energy-volume curves and moments of the sd model
+
+`uv run python examples/iron_properties.py --basis sd --figure iron_sd.png`
+(about an hour). Same phases and volume ranges as the d figure, except that
+the bcc FM curve stops at 13.1 A^3: above that the sd self-consistency has
+several solutions (for example a state with m = 4.0 muB, majority s and d
+both full, 200-400 meV above the saturated ferromagnet) and does not always
+find the lowest one. Each magnetic point is the lowest of several starting
+moments.
+
+![Energy-volume curves and moments of the sd iron model](figures/iron_sd_eos.png)
+
+- bcc FM moment (d + s) against volume: 1.66 muB at 9.4 A^3, 1.99 at 10.2,
+  2.14 at 11.1, 2.56 at 12.1 and 3.16 at 13.1, where the majority d band is
+  full; the same shape as the d model with a lower moment at equilibrium.
+- fcc AFM keeps a moment down to 10.5 A^3 (0.85 muB) and is non-magnetic
+  below 10.2 A^3; at its equilibrium (10.84 A^3) it has 1.47 muB and lies
+  6.6 meV below fcc NM. Above 11.5 A^3 its moment is close to that of
+  bcc FM.
+- bcc AFM is magnetic (2.36 muB, 110 meV above bcc FM, 224 meV below bcc
+  NM); hcp FM and AFM still collapse to hcp NM.
+- bcc FM -> hcp NM under pressure: **15.6 GPa** (common tangent), volume
+  11.11 -> 10.28 A^3 (d model 11.3 GPa, experiment 13 GPa). The
+  Birch-Murnaghan fit of bcc FM is poor because of the moment change across
+  the range (B0 = 216 GPa against the elastic B = 168 GPa), so this number
+  is approximate.
+- Elastic constants: bcc FM C11 = 253, C12 = 125, C44 = 125, B = 168 GPa;
+  hcp NM (relaxed) C11 = 839, C12 = 285, C13 = 320, C33 = 939, C44 = 152,
+  C66 = 278, B = 497 GPa, even stiffer than the d model (438). The
+  non-magnetic phases have Birch-Murnaghan B0 of 450-470 GPa.
 
 ## Targets (`examples/fit_iron.py`)
 
