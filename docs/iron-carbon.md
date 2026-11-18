@@ -102,12 +102,37 @@ so near-degenerate directions (saturated majority bands, the charge of a
 carbon atom whose 2p sits near the Fermi level) keep a residual that no
 choice of levels removes.
 
+### Expansion settings against exact tight binding
+
+`benchmarks/expansion_vs_exact.py` compares the band energy of the
+expansion (non-magnetic, zero shifts) with exact k-point diagonalisation of
+the same Hamiltonian, at the starting cross parameters. Errors, BOP minus
+exact (eV/atom, or eV per cell where marked):
+
+| Setting (iron / carbon) | bcc Fe | Fe16C oct | tet - oct (cell) | C in Fe, oct (cell) | graphene - diamond |
+|---|---|---|---|---|---|
+| current: 9 moments, no kernel / Jackson 20 + guard | -0.03 | -0.14 | -0.34 | -3.2 | -2.4 |
+| iron Jackson 20 + guard | -0.23 | -1.70 | -1.09 | -26.4 | -2.4 |
+| iron Jackson 20 + guard + oscillation terminator | -0.25 | -1.45 | -1.00 | -21.8 | -2.4 |
+| both Gershgorin bandwidth, Jackson 20 | -0.34 | -1.58 | -0.87 | -22.8 | -3.3 |
+| iron Jackson 20 + guard / carbon oscillation terminator | -0.23 | -1.70 | -1.09 | -26.4 | -2.3 |
+
+A kernel on iron, with or without the guard, the oscillation terminator or
+the Gershgorin bandwidth, makes iron next to carbon far worse: Fe16C is
+overbound by 1.5-1.7 eV/atom, the spurious overbinding the self-consistent
+runs with these settings showed (a non-magnetic state about 2 eV/atom too
+deep). Iron's present settings are the best of those tried; what is left
+with them (0.14 eV/atom in Fe16C, 0.34 eV in tet - oct) is the truncation at
+9-10 moments. Carbon's expansion is far from its own exact tight binding in
+graphene - diamond (2.4 eV/atom) with the strong sigma integrals of the
+refit; as a fitted BOP it still reproduces its targets.
+
 Possible ways on, none tried yet:
 
 - fit the cross terms with non-magnetic iron and use them as a starting
   point (the targets are ferromagnetic quantities, so only approximately);
-- a kernel or bandwidth guard for iron next to carbon, as carbon needed;
-  this changes the iron model and needs a refit of it;
+- more moments for both species (the remaining error is truncation), at a
+  cost that grows with the cluster of the 3.4 A iron cutoff;
 - a larger cell (Fe54C), where fewer iron atoms are near carbon;
 - local charge neutrality (a large Hubbard term on iron and carbon) with
   the moments constrained, as some transition-metal BOPs do.
