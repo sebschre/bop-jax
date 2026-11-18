@@ -229,7 +229,7 @@ TAPERED_V0 = pw.Repulsion(pair=tapered_exp, density=tapered_exp, embed=pw.V0.emb
 # fitted cross parameters of the iron-carbon model (examples/fit_iron_carbon.py,
 # docs/iron-carbon.md)
 IRON_CARBON_FIT = {
-    "e_c": 3.0, "sds": -0.5, "pds": -0.8, "pdp": 0.4, "decay": 3.0,
+    "e_c": 3.0, "sss": -0.5, "sps": 1.0, "sds": -0.5, "pds": -0.8, "pdp": 0.4, "decay": 3.0,
     "pair": 1.0, "pair_decay": 6.0, "rho_fe": 1.0, "rho_c": 1.0, "rho_decay": 3.0,
     "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 2.0,
 }
@@ -238,19 +238,22 @@ FE, C = 0, 1  # species indices of the iron-carbon model
 
 
 def iron_carbon(iron_values=None, carbon_values=None, **values):
-    """Iron (species 0, the d model ``IRON_FIT``) and carbon (species 1, the
-    sp model ``CARBON_FIT``) with d-sp bonds between them.
+    """Iron (species 0, the sd model ``IRON_SD_FIT``: 3d and 4s, 8 valence
+    electrons) and carbon (species 1, the sp model ``CARBON_FIT``) with
+    bonds between them.
 
     Use with ``BOPConfig(**IRON_CARBON_CONFIG, spin=...)`` and
     ``radial=models.tapered_exp``.  Fe-Fe and C-C interactions are exactly
-    those of ``iron()`` and ``carbon()``, with their own cutoffs;
-    ``iron_values`` and ``carbon_values`` override their parameters.
-    Keyword arguments override entries of ``IRON_CARBON_FIT``, the Fe-C terms:
+    those of ``iron(basis=("s", "d"))`` and ``carbon()``, with their own
+    cutoffs; ``iron_values`` and ``carbon_values`` override their
+    parameters.  Keyword arguments override entries of ``IRON_CARBON_FIT``,
+    the Fe-C terms:
 
       e_c                 shift of the carbon levels (2s and 2p together)
-                          relative to the iron d level (eV)
-      sds, pds, pdp       bond integrals C(2s, 2p) - Fe(3d) at r0 (eV), each
-                          ``beta * exp(-decay (r / r0 - 1))``
+                          against the iron d level (eV)
+      sss, sps            Fe 4s - C 2s and Fe 4s - C 2p bond integrals at r0
+      sds, pds, pdp       C 2s - Fe 3d and C 2p - Fe 3d bond integrals at r0,
+                          all ``beta * exp(-decay (r / r0 - 1))`` (eV)
       pair, pair_decay    Fe-C pair term ``pair * exp(-pair_decay (r / r0 - 1))``
       rho_fe, rho_c, rho_decay
                           embedding density that a C neighbour adds on Fe
@@ -260,7 +263,9 @@ def iron_carbon(iron_values=None, carbon_values=None, **values):
       hubbard_c           onsite Coulomb integral of carbon (eV); in pure
                           carbon phases it does nothing (no charge transfer)
     """
-    fe = dict(IRON_FIT, **(iron_values or {}))
+    fe = dict(IRON_FIT, **IRON_SP_DEFAULTS)
+    fe.update(IRON_SD_FIT)
+    fe.update(iron_values or {})
     cv = dict(CARBON_FIT, **(carbon_values or {}))
     v = dict(IRON_CARBON_FIT, **values)
     fe_cut = (IRON_CONFIG["rcut"], IRON_CONFIG["dcut"])
@@ -279,19 +284,36 @@ def iron_carbon(iron_values=None, carbon_values=None, **values):
             t[a][b] = r
         return jnp.array(t)
 
-    bond = {}
-    for c in ("dds", "ddp", "ddd"):
-        bond[c] = table({(FE, FE): row(fe[c], fe["decay"], fe["r0"], fe_cut)})
-    for c in ("sss", "sps", "pps", "ppp"):
-        bond[c] = table({(C, C): row(cv[c], cv["decay"], cv["r0"], c_cut)})
-    # mixed channels: entry [a, b] has the lower shell (s or p) on a, d on b
-    for c in ("sds", "pds", "pdp"):
-        bond[c] = table({(C, FE): row(v[c], v["decay"], v["r0"], x_cut)})
+    def fe_fe(c):
+        decay = fe["decay"] if c in ("dds", "ddp", "ddd") else fe["decay_sp"]
+        return row(fe[c], decay, fe["r0"], fe_cut)
+
+    def c_c(c):
+        return row(cv[c], cv["decay"], cv["r0"], c_cut)
+
+    def x(c):
+        return row(v[c], v["decay"], v["r0"], x_cut)
+
+    # mixed channels: entry [a, b] has the lower shell on a, the higher on b
+    bond = {
+        "dds": table({(FE, FE): fe_fe("dds")}),
+        "ddp": table({(FE, FE): fe_fe("ddp")}),
+        "ddd": table({(FE, FE): fe_fe("ddd")}),
+        "sss": table({(FE, FE): fe_fe("sss"), (C, C): c_c("sss"),
+                      (FE, C): x("sss"), (C, FE): x("sss")}),
+        "sds": table({(FE, FE): fe_fe("sds"), (C, FE): x("sds")}),
+        "sps": table({(C, C): c_c("sps"), (FE, C): x("sps")}),
+        "pps": table({(C, C): c_c("pps")}),
+        "ppp": table({(C, C): c_c("ppp")}),
+        "pds": table({(C, FE): x("pds")}),
+        "pdp": table({(C, FE): x("pdp")}),
+    }
     e_c = v["e_c"]
     return {
-        # shells (s, p, d); iron has only d, carbon only s and p
-        "onsite": jnp.array([[0.0, 0.0, 0.0], [cv["e_s"] + e_c, e_c, 0.0]]),
-        "n0": jnp.array([[0.0, 0.0, fe["n_d"]], [2.0, 2.0, 0.0]]),
+        # shells (s, p, d); iron has s and d, carbon s and p
+        "onsite": jnp.array([[fe["e_s"], 0.0, 0.0], [cv["e_s"] + e_c, e_c, 0.0]]),
+        # free-atom references: 3d7 4s1 and 2s2 2p2 (fix the zero of energy)
+        "n0": jnp.array([[1.0, 0.0, fe["n_el"] - 1.0], [2.0, 2.0, 0.0]]),
         "hubbard": jnp.array([8.0, v["hubbard_c"]]),
         "stoner": jnp.array([[0.0, 0.0, fe["stoner"]], [0.0, 0.0, 0.0]]),
         "bond": bond,
@@ -315,20 +337,19 @@ def iron_carbon(iron_values=None, carbon_values=None, **values):
 def _iron_carbon_config():
     from .bop import SpeciesSettings
 
-    fe = SpeciesSettings(basis=("d",), nmom=IRON_CONFIG["nmom"],
+    fe = SpeciesSettings(basis=("s", "d"), nmom=IRON_CONFIG["nmom"],
                          bandwidth=IRON_CONFIG["bandwidth"], kernel="none")
     c = SpeciesSettings(basis=CARBON_CONFIG["basis"], nmom=CARBON_CONFIG["nmom"],
                         nexp=CARBON_CONFIG["nexp"], bandwidth=CARBON_CONFIG["bandwidth"],
                         kernel=CARBON_CONFIG["kernel"],
                         bandwidth_guard=CARBON_CONFIG["bandwidth_guard"],
-                        spin_polarized=False)
+                        spin_polarized=False, atomic_shifts=True)
     rmax = max(IRON_CONFIG["rcut"], CARBON_CONFIG["rcut"], 3.0)
     # the global cutoff is a hard step at the longest range; every pair is
     # tapered inside its own radial function
     return dict(basis=("s", "p", "d"), species=(fe, c),
                 nmom=max(IRON_CONFIG["nmom"], CARBON_CONFIG["nmom"]),
-                rcut=rmax, dcut=0.0, rcut2=rmax, dcut2=0.0, repulsion=TAPERED_V0,
-                atomic_shifts=True)
+                rcut=rmax, dcut=0.0, rcut2=rmax, dcut2=0.0, repulsion=TAPERED_V0)
 
 
 # BOPConfig settings of the iron-carbon model (pass radial=models.tapered_exp);

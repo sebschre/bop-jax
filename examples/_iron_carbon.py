@@ -1,7 +1,7 @@
 """Iron-carbon cells and the calculator the Fe-C cross terms are fitted with.
 
-Used by ``examples/fit_iron_carbon.py``.  Species 0 is Fe (the d model
-``IRON_FIT``), species 1 is C (the sp model ``CARBON_FIT``).  Lengths in
+Used by ``examples/fit_iron_carbon.py``.  Species 0 is Fe (the sd model
+``IRON_SD_FIT``), species 1 is C (the sp model ``CARBON_FIT``).  Lengths in
 Angstrom, energies in eV, stresses in GPa, moments in Bohr magnetons.
 """
 
@@ -17,7 +17,7 @@ import bopjax as bj
 from bopjax.models import FE, IRON_CARBON_CONFIG, C, iron_carbon, tapered_exp
 
 EV_A3_TO_GPA = 160.21766
-A_FE = 2.8540  # bcc FM equilibrium of IRON_FIT
+A_FE = 2.8550  # bcc FM equilibrium of the sd iron model (IRON_SD_FIT)
 A_DIAMOND = 3.5653  # diamond equilibrium of CARBON_FIT
 
 
@@ -223,20 +223,25 @@ class Calculator:
         energy = bj.make_energy_fn(topo, self.cfg, radial=tapered_exp)
         shape = energy.shift_shape  # (N, 1) or (N, 2, 1)
         size = int(np.prod(shape))
-        # unknowns: one shift per atom, per spin for iron only (carbon is not
-        # spin-polarized: its two spin shifts are one unknown)
+        # unknowns: iron has one shift per shell (s, d) and spin; carbon one
+        # shift for both its shells and both spins
+        idx = np.arange(size).reshape(shape)
         cols = []
         for i, sp in enumerate(self.species):
-            if c.magnetic and sp == FE:
-                cols += [[2 * i], [2 * i + 1]]
+            if sp == FE:
+                for sh in (0, 2):
+                    if c.magnetic:
+                        cols += [[idx[i, 0, sh]], [idx[i, 1, sh]]]
+                    else:
+                        cols.append([idx[i, sh]])
             else:
-                cols.append([2 * i, 2 * i + 1] if c.magnetic else [i])
+                cols.append(list(idx[i][..., :2].ravel()))
         basis = np.zeros((size, len(cols)))
         for k, rows in enumerate(cols):
             basis[rows, k] = 1.0
         self._basis = jnp.asarray(basis)
         self._solver = _Chord(energy, basis, shape)
-        self._is_c = np.array([self.species[rows[0] // (2 if c.magnetic else 1)] == C
+        self._is_c = np.array([self.species[np.unravel_index(rows[0], shape)[0]] == C
                                for rows in cols])
 
         def e_x(x, pos, cell, params):
@@ -293,11 +298,7 @@ class Calculator:
         for scale in scales:
             p = dict(params, stoner=stoner * scale)
             if not magnetic:  # the non-magnetic state is stationary too: seed a moment
-                split = 0.5 * float(p["stoner"][FE, 2]) * 1.5
-                x = []
-                for xi, sp in zip(x_nm, self.species):
-                    x += [xi - split, xi + split] if sp == FE else [xi]
-                x = jnp.asarray(x)
+                x = jnp.asarray(self._spread(x_nm, 0.5 * float(p["stoner"][FE, 2]) * 1.5))
             self._solver.h = None
             x, e, aux, res = self._solver(x, pos, self.cell, p, tol, max_iter, verbose)
             magnetic = float(jnp.mean(jnp.abs(aux["moment"]))) > 0.2
@@ -319,11 +320,22 @@ class Calculator:
         self._nm.solve(params, verbose=verbose)
         x_nm = np.asarray(self._nm._x)
         split = 0.5 * float(params["stoner"][FE, 2]) * self.c.fe_moment
-        x = []
-        for xi, sp in zip(x_nm, self.species):
-            x += [xi - split, xi + split] if sp == FE else [xi]
+        return jnp.asarray(self._spread(x_nm, split))
+
+    def _spread(self, x_nm, split):
+        """Magnetic unknowns from non-magnetic ones: iron s up and down
+        equal, iron d split by -/+ ``split``, carbon unchanged."""
+        x, k = [], 0
+        for sp in self.species:
+            if sp == FE:
+                xs, xd = x_nm[k], x_nm[k + 1]
+                x += [xs, xs, xd - split, xd + split]
+                k += 2
+            else:
+                x.append(x_nm[k])
+                k += 1
         self._solver.h = None
-        return jnp.asarray(x)
+        return x
 
     @staticmethod
     def sane(aux):

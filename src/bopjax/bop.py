@@ -53,6 +53,9 @@ class SpeciesSettings:
     # both spin channels (no exchange splitting of its own; a moment can
     # still be induced through its neighbours)
     spin_polarized: bool = True
+    # one onsite shift for all shells of the species (their mean), as
+    # BOPConfig.atomic_shifts does for every species
+    atomic_shifts: bool = False
 
 
 @dataclass(frozen=True)
@@ -369,6 +372,9 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     layout = None if cfg.species is None else _species_layout(cfg, np.asarray(species))
     unpolarized = (np.array([not cfg.species[s_].spin_polarized for s_ in species])
                    if layout is not None else np.zeros(len(species), bool))
+    tied_shells = (np.array([cfg.species[s_].atomic_shifts for s_ in species])
+                   if layout is not None and not cfg.atomic_shifts
+                   else np.zeros(len(species), bool))
     if layout is not None:
         nexp = max(st[1] for st in layout.settings)
 
@@ -489,6 +495,12 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
         e0 = params["onsite"][species]  # (N, nshell)
         nshift = 1 if cfg.atomic_shifts else nshell
         shifts = shifts.reshape(topo.n_atoms, nspin, nshift)
+        if layout is not None and tied_shells.any():
+            # one shift for the species' own shells: their mean
+            own = jnp.asarray(layout.shell_mask[species], shifts.dtype)  # (N, nshell)
+            mean = (jnp.sum(shifts * own[:, None, :], axis=2, keepdims=True)
+                    / jnp.sum(own, axis=1)[:, None, None])
+            shifts = jnp.where(tied_shells[:, None, None], mean, shifts)
         if layout is not None and cfg.magnetic and unpolarized.any():
             # one shift for both spins: their mean, so the difference is idle
             mean = jnp.mean(shifts, axis=1, keepdims=True)
