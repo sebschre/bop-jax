@@ -125,15 +125,33 @@ around it, and frozen at the bulk values in the rest of the fixed shell
 2.95-3.01 muB, close to the d-band limit, which leaves the self-consistency
 with nearly flat directions.
 
-**Status: not yet run to completion.** On a 4-core cloud machine without GPU
-the self-consistency of the 9-moment iron model in a cylinder one b long is
-the obstacle. For 61 atoms (clusters of 529 members, the periodic images
-along the short line included) one energy and force at fixed levels costs
-about 1 s, but the compiled Newton loop with Krylov steps needs 16-20 s per
-step and converges only linearly, stalling near a residual of 1e-2 with or
-without the frozen outer shell; undamped dense Newton steps diverge, and
-the damped solver of `make_scf` needs more than 15 GB for 122 unknowns. A
-Peierls path of 5 images and a few hundred NEB steps is out of reach there.
-Running it needs a GPU, a damped and preconditioned solver inside
-`make_potential`, or a fully periodic quadrupole cell without free surfaces.
-No result for iron is therefore quoted here.
+**Status: no converged Peierls path yet.** Run on a 4-core cloud machine
+without GPU, 12 A cylinder (91 atoms, 25 mobile), `--condition potential`:
+
+- The stationary self-consistency (`condition="stationary"`) does not
+  converge in the cylinder: near-saturated surface moments leave it with
+  nearly flat directions (Krylov and exact Newton steps stall near
+  max |dE/dshift| = 1e-2; see [Formulation](formulation.md#potential-self-consistency)).
+  The potential self-consistency converges there (37 Anderson steps for the
+  perfect 61-atom cylinder).
+- Both relaxed end points are easy cores at the expected sites (core at
+  x = -1.165 and +1.165 A, energies equal to 0.008 meV), about 45 FIRE steps
+  each at about 60 s per self-consistent energy and force.
+- Along the NEB band the barrier falls from 156 meV (linear interpolation) to
+  41 meV after 7 steps, but from step 7 on the self-consistency of the middle
+  image fails: the residual stalls at 9e-3 from warm, cold and
+  reduced-moment starts. It sits on the atom at the centre of the core,
+  whose moment has dropped to 1.42 muB (bulk 2.43), in its spin channel
+  only. Scanning that atom's exchange splitting, `I m(Delta) - Delta` stays
+  negative and touches its maximum near the current state with
+  `I dm/dDelta ~ 1`: the core moment is at a Stoner fold, where the
+  high-moment branch followed from the easy core ends. No other branch
+  was found from starts with 0 to 60 % of the moment. The configuration is
+  written to `<out>_failed_scf.npz` for analysis.
+
+A moment collapse of the core atoms along the Peierls path would itself be
+the largest first-order Zeeman effect (the moment change enters
+`dE_P/dB` directly), so this is worth resolving rather than smoothing over.
+Options: an electronic temperature (Fermi smearing) in the band filling;
+a constrained-moment calculation of the core atom to map E(m) through the
+fold; a quadrupole cell; or more moments.

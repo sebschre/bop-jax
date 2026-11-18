@@ -40,7 +40,7 @@ the magnetisation matters there.
 The onsite levels are self-consistent in the mobile region and a buffer
 around it (--free-buffer) and frozen at the bulk values further out.
 
-Status: this script has not been run to completion.  On a 4-core cloud
+Status: no converged Peierls path yet (docs/magnetic-field.md); the old notes below  On a 4-core cloud
 machine (no GPU) the self-consistency of the 9-moment iron model in a
 cylinder that is one b long is the obstacle: one energy and force of 61
 atoms costs about 1 s at fixed levels, and the compiled Newton loop needs
