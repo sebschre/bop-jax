@@ -18,7 +18,7 @@ from bopjax.models import FE, IRON_CARBON_CONFIG, C, iron_carbon, tapered_exp
 
 EV_A3_TO_GPA = 160.21766
 A_FE = 2.8540  # bcc FM equilibrium of IRON_FIT
-A_DIAMOND = 3.5679  # diamond equilibrium of CARBON_FIT
+A_DIAMOND = 3.5653  # diamond equilibrium of CARBON_FIT
 
 
 def bcc_supercell(n=2, a=A_FE):

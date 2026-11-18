@@ -154,9 +154,9 @@ IRON_CONFIG = dict(nmom=9, bandwidth="averaged", rcut=3.4, dcut=0.4, rcut2=3.4, 
 # fitted parameters of the sp carbon model with atomic shifts (examples/fit_carbon.py,
 # docs/carbon.md)
 CARBON_FIT = {
-    "e_s": -8.08885, "sss": -2.91351, "sps": 7.17174, "pps": 6.60702, "ppp": -0.77806,
-    "decay": 4.04441, "pair": 19.41433, "pair_decay": 4.85776, "embed": 4.80143,
-    "density_decay": 0.48509, "r0": 1.54,
+    "e_s": -11.89778, "sss": -3.19329, "sps": 8.999, "pps": 8.08017, "ppp": -0.2274,
+    "decay": 4.29598, "pair": 23.65792, "pair_decay": 5.11383, "embed": 4.44614,
+    "density_decay": 0.00046, "r0": 1.54,
 }
 
 
@@ -229,7 +229,7 @@ TAPERED_V0 = pw.Repulsion(pair=tapered_exp, density=tapered_exp, embed=pw.V0.emb
 # fitted cross parameters of the iron-carbon model (examples/fit_iron_carbon.py,
 # docs/iron-carbon.md)
 IRON_CARBON_FIT = {
-    "e_c": 2.15, "sds": -0.5, "pds": -0.8, "pdp": 0.4, "decay": 3.0,
+    "e_c": 1.60, "sds": -0.5, "pds": -0.8, "pdp": 0.4, "decay": 3.0,
     "pair": 1.0, "pair_decay": 6.0, "rho_fe": 1.0, "rho_c": 1.0, "rho_decay": 3.0,
     "r0": 1.95, "rcut": 3.0, "dcut": 0.5,
 }
