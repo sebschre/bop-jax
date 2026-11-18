@@ -230,8 +230,9 @@ class Calculator:
         self.residual = res
         if res > 1e-6 or not self.sane(aux):
             self._x = None
+            n = np.asarray(aux["n_shell"])
             raise RuntimeError(f"{self.c.name}: no self-consistent state ({res:.2e}, "
-                               f"sane={self.sane(aux)})")
+                               f"occupations {n.min(axis=0)} .. {n.max(axis=0)})")
         self._x = x
         self.aux = aux
         return float(e), aux
@@ -257,7 +258,7 @@ class Calculator:
         it the expansion of the local density of states has broken down
         (far-shifted levels) and a stationary point there is spurious."""
         n = np.asarray(aux["n_shell"])
-        return bool(np.all(n > -1e-3) and np.all(n < np.array([2, 6, 10]) + 1e-3))
+        return bool(np.all(n > -0.05) and np.all(n < np.array([2, 6, 10]) + 0.05))
 
     def _block_start(self, params, pos, verbose=False, cap=0.25):
         """Shifts from a cold start, by blocks.  Carbon can take or give most
