@@ -29,7 +29,15 @@ Prints
 
 Points whose self-consistency fails are left out (nan).  Each point keeps the
 lowest of a warm start from the previous c/a and fresh starts from the
-state's moments, as in examples/iron_properties.py.
+state's moments scaled by 1, 0.8, 0.6 and 0.3, as in examples/iron_properties.py.
+
+With an s shell the self-consistency also has unphysical solutions: an s spin
+channel almost full or empty, recursion coefficients b_inf two to five times
+those of the physical states and the Fermi level several eV away.  The moments
+expansion is outside its range there, and the energies can be hundreds of
+meV/atom *below* the physical states (about -870 meV for "AFM" at 12.2 A^3).
+Solutions with an s spin channel outside 0.05 to 0.9 electrons are rejected
+(physical states along the path have 0.4 to 0.85).
 """
 
 import argparse
@@ -42,6 +50,7 @@ from scipy.optimize import minimize_scalar
 BASES = {"d": ("d",), "sd": ("s", "d")}
 STATES = {"FM": (2.5, 2.5), "AFM": (2.0, -2.0), "NM": None}
 FCC = np.sqrt(2.0)
+S_MIN, S_MAX = 0.05, 0.9  # accepted electrons per s spin channel
 
 
 def bct(v, r=1.0):
@@ -81,13 +90,21 @@ class PathCalculator:
         self.calcs.append((cell, calc))
         return calc
 
+    def physical(self, aux):
+        """False for the spurious solutions with an s spin channel almost full
+        or empty (see the module docstring)."""
+        if "s" not in self.basis or "n_spin" not in aux:
+            return True
+        n_s = np.asarray(aux["n_spin"])[..., self.basis.index("s")]  # (atoms, spin)
+        return bool(np.all((n_s > S_MIN) & (n_s < S_MAX)))
+
     def energy(self, params, v, r):
         """(energy per atom, moments) of the lowest self-consistent state."""
         calc = self._calculator(v, r)
         calc.extra = (r,)
         phase = calc.phase
         best = None
-        starts = [None] if phase.moments is None else [self.last, 1.0, 0.6]
+        starts = [None] if phase.moments is None else [self.last, 1.0, 0.8, 0.6, 0.3]
         for start in starts:
             if phase.moments is not None:
                 if isinstance(start, float):
@@ -99,7 +116,8 @@ class PathCalculator:
                         continue
                     calc._last = start
             e, aux = calc.energy(params, v)
-            if calc.residual < 1e-6 and (best is None or e < best[0] - 1e-9):
+            if calc.residual < 1e-6 and self.physical(aux) and (
+                    best is None or e < best[0] - 1e-9):
                 best = (e, aux)
         calc.phase = phase
         if best is None:
