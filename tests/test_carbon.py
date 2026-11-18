@@ -45,7 +45,7 @@ def solve(structure, strain=None):
     topo = bj.build_topology(pos, [0] * len(pos), cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2)
     energy = bj.make_energy_fn(topo, cfg, radial=v0_bond)
     pot = bj.make_potential(energy)
-    e, aux = pot(jnp.asarray(pos), jnp.asarray(cell), carbon())
+    e, _ = pot(jnp.asarray(pos), jnp.asarray(cell), carbon())
     return float(e) / len(pos), pot, (jnp.asarray(pos), jnp.asarray(cell))
 
 

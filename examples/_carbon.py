@@ -187,5 +187,18 @@ def atomic_volume(phase: Phase, a):
     return abs(np.linalg.det(cell)) / len(pos)
 
 
-__all__ = ["PHASES", "Calculator", "Phase", "atomic_volume", "bond_length", "carbon",
-           "chain", "diamond", "graphene", "lonsdaleite", "sc", "bcc", "fcc"]
+__all__ = [
+    "PHASES",
+    "Calculator",
+    "Phase",
+    "atomic_volume",
+    "bcc",
+    "bond_length",
+    "carbon",
+    "chain",
+    "diamond",
+    "fcc",
+    "graphene",
+    "lonsdaleite",
+    "sc",
+]
