@@ -147,7 +147,7 @@ class Calculator:
         self._hinv = jnp.linalg.pinv(h, rtol=1e-10, hermitian=True)
         self.n_hessian += 1
 
-    def solve(self, params, positions=None, tol=1e-8, max_iter=60):
+    def solve(self, params, positions=None, tol=1e-8, max_iter=60, verbose=False):
         """(total energy, aux) at the given (default: current) positions."""
         pos = self.positions if positions is None else positions
         x = self._x if self._x is not None else self._start(params)
@@ -156,19 +156,19 @@ class Calculator:
             self._new_hessian(x, pos, params)
         fresh, stale = False, False
         for _ in range(max_iter):
-            norm = float(jnp.max(jnp.abs(g)))
-            if norm < tol:
+            if float(jnp.max(jnp.abs(g))) < tol:
                 break
+            norm = float(jnp.linalg.norm(g))
             if stale and not fresh:
                 self._new_hessian(x, pos, params)
                 fresh = True
             step = -(self._hinv @ g)
             accepted = False
-            for _ in range(6):  # backtracking: far from the solution Newton overshoots
+            for _ in range(8):  # backtracking: far from the solution Newton overshoots
                 x_new = x + step
                 (e_new, aux_new), g_new = self._vg(x_new, pos, self.cell, params)
-                norm_new = float(jnp.max(jnp.abs(g_new)))
-                if np.isfinite(norm_new) and norm_new < 0.9 * norm:
+                norm_new = float(jnp.linalg.norm(g_new))
+                if np.isfinite(norm_new) and norm_new < 0.95 * norm:
                     accepted = True
                     break
                 step = 0.5 * step
@@ -177,6 +177,8 @@ class Calculator:
                     break  # Newton itself fails
                 stale = True
                 continue
+            if verbose:
+                print(f"  scf |g| {norm:.3e} -> {norm_new:.3e}  fresh={fresh}", flush=True)
             # slow progress with an old Hessian: rebuild it at the next step
             stale = norm_new > 0.3 * norm
             fresh = False
