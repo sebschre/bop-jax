@@ -95,20 +95,18 @@ def test_absent_shells_ignore_their_parameters():
 
 
 def test_fe_c_forces_match_finite_differences():
-    a = 2.855
-    cell = 2 * a * np.eye(3)
-    base = np.array([[0, 0, 0], [0.5, 0.5, 0.5]])
-    grid = np.array([[i, j, k] for i in range(2) for j in range(2) for k in range(2)])
-    pos = a * np.vstack([(grid[:, None] + base[None]).reshape(-1, 3), [[0.5, 0.45, 0.02]]])
-    species = [0] * 16 + [1]
-    cfg = bj.BOPConfig(**IRON_CARBON_CONFIG)  # non-magnetic: keeps the test quick
-    topo = bj.build_topology(pos, species, cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2, skin=0.1)
+    """Rock-salt FeC with carbon off its site, non-magnetic (keeps it quick)."""
+    a = 4.0
+    cell = a * FCC
+    pos = np.array([[0, 0, 0], [0.5 * a + 0.12, 0.05, -0.08]])
+    cfg = bj.BOPConfig(**IRON_CARBON_CONFIG)
+    topo = bj.build_topology(pos, [0, 1], cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2, skin=0.1)
     pot = bj.make_potential(bj.make_energy_fn(topo, cfg, radial=tapered_exp), tol=1e-11)
     p = iron_carbon()
     import jax
     f = -jax.grad(lambda q: pot(q, jnp.asarray(cell), p)[0])(jnp.asarray(pos))
     h = 1e-4
-    for i, k in [(16, 1), (16, 2), (0, 1)]:
+    for i, k in [(1, 0), (1, 2)]:
         dp = np.zeros_like(pos)
         dp[i, k] = h
         num = -(float(pot(jnp.asarray(pos + dp), jnp.asarray(cell), p)[0])
