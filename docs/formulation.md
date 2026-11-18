@@ -49,6 +49,16 @@ Levenberg-Marquardt damping stalled at the same level, while Anderson mixing
 iterations (27 s including compilation), with interior moments 2.40-2.49 muB (bulk 2.43).
 At that point max |g| = 2.2e-2: the stationary point is not nearby.
 
+**Use it only close to a stationary point.** At a potential-condition
+state the energy is off from the stationary (BOPfox) energy to first order in
+`delta`, not second. In near-ferromagnetic states `delta` is small (2e-2 eV
+in the iron cylinder), but with antiparallel neighbours it is not: one
+reversed atom in 54-atom bcc iron (`IRON_FIT`) gives max |dE/dshift| = 0.85
+eV at the potential-condition state, whose energy is then 0.25 eV *below*
+the ferromagnet, an artefact (the stationary self-consistency of that state
+does not converge). Check `jax.grad` of the energy with respect to the
+shifts at the converged state before trusting energy differences.
+
 The energy is not stationary in the shifts under this condition, so
 gradients include the response of the shifts. They come from implicit
 differentiation: with `r(shifts, theta) = target - shifts = 0`, the

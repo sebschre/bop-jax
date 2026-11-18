@@ -149,9 +149,25 @@ without GPU, 12 A cylinder (91 atoms, 25 mobile), `--condition potential`:
   was found from starts with 0 to 60 % of the moment. The configuration is
   written to `<out>_failed_scf.npz` for analysis.
 
-A moment collapse of the core atoms along the Peierls path would itself be
-the largest first-order Zeeman effect (the moment change enters
-`dE_P/dB` directly), so this is worth resolving rather than smoothing over.
-Options: an electronic temperature (Fermi smearing) in the band filling;
-a constrained-moment calculation of the core atom to map E(m) through the
-fold; a quadrupole cell; or more moments.
+What was tried at that configuration:
+
+- An electronic temperature (`BOPConfig(kT=...)`, Fermi smearing with the
+  Mermin free energy) does not help: the residual stays at 9.5e-3, 1.1e-2
+  and 1.6e-2 for kT = 0.025, 0.05 and 0.1 eV. The local DOS of the core
+  atom is positive everywhere, so the expansion is not the cause.
+- Scanning the core atom's splitting from -2 to +2.4 eV, the environment
+  alone drives its moment antiparallel (-0.37 muB at zero splitting), and
+  started from a reversed moment the potential condition converges
+  (m = -2.19 muB) at an energy 0.58 eV lower. Flipping any core atom of
+  the relaxed easy core also "lowers" the energy by 0.36 eV, and one atom
+  in perfect bulk by 0.25 eV. These are artefacts: at such states the BOP
+  energy is far from stationary in the shifts (0.85 eV in bulk), and the
+  potential-condition energy is wrong to first order (see
+  [Formulation](formulation.md#potential-self-consistency)).
+
+So past the fold of the core moment neither self-consistency condition gives
+a trustworthy energy for this model. Options: check whether the fold
+survives more moments or a Jackson kernel (both change the fitted model),
+the sd model (`IRON_SD_FIT`), or a constrained core moment; or relax the
+band images perpendicular to the path before the fold is reached, in case
+it is an artefact of unrelaxed intermediate images.
