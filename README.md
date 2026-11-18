@@ -126,6 +126,7 @@ This prints -6.0112485448437 eV per atom, the BOPfox value to all 13 digits.
 | [Validation](docs/validation.md) | agreement with BOPfox, and where the two codes differ |
 | [Screening](docs/screening.md) | environment-dependent d-d bond integrals |
 | [Iron](docs/iron.md) | magnetic d-band iron model: fit, phase stability, elastic constants, magnetism |
+| [Carbon](docs/carbon.md) | sp-valent carbon model: fit, diamond, graphene and dense phases, elastic constants |
 | [Limitations](docs/limitations.md) | what is not implemented, caveats |
 
 ## References
