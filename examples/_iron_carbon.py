@@ -197,6 +197,8 @@ class _Chord:
             return False
         if max(energies[-3:]) - min(energies[-3:]) > de:
             return False
+        if float(jnp.max(jnp.abs(g))) < 3e-3 and max(energies[-3:]) - min(energies[-3:]) < 2e-5:
+            return True  # near-converged and the energy has stopped moving
         w, v = jnp.linalg.eigh(self.h)
         proj = v.T @ g
         soft = jnp.abs(w) < lam * jnp.max(jnp.abs(w))
