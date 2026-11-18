@@ -95,7 +95,9 @@ class Model:
     def residuals(self, x):
         values = dict(zip(FREE, x))
         try:
-            out = self.properties(values)
+            # cementite at its experimental positions during the fit (relaxed
+            # in the report): its relaxation costs as much as the rest together
+            out = self.properties(values, relax_cementite=False)
         except Exception as err:  # noqa: BLE001 (a failed evaluation is a bad point)
             print("failed:", err, file=sys.stderr)
             return np.full(len(TARGETS), 1e2)

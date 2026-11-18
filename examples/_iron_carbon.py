@@ -222,11 +222,14 @@ class Calculator:
     def solve(self, params, positions=None, tol=1e-8, max_iter=60, verbose=False):
         """(total energy, aux) at the given (default: current) positions."""
         pos = self.positions if positions is None else positions
-        x = self._x
-        if x is None:
+        x, cold = self._x, self._x is None
+        if cold:
             x = (self._from_nonmagnetic(params, pos, verbose) if self.c.magnetic
                  else self._block_start(params, pos, verbose))
         x, e, aux, res = self._solver(x, pos, self.cell, params, tol, max_iter, verbose)
+        if (res > 1e-6 or not self.sane(aux)) and not cold:  # warm start failed
+            self._x = None
+            return self.solve(params, positions, tol, max_iter, verbose)
         self.residual = res
         if res > 1e-6 or not self.sane(aux):
             self._x = None
@@ -353,7 +356,7 @@ class Calculator:
             if longest > 0.1:  # no atom moves more than 0.1 A per step
                 step, v = step * 0.1 / longest, v * 0.1 / longest
             pos = pos + step
-            self.solve(params, pos)
+            self.solve(params, pos, tol=1e-7)
             f = self.forces(params, pos) * keep
             self.n_steps += 1
         self.positions = pos
