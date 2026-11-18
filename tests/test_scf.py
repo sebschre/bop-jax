@@ -243,3 +243,41 @@ def test_scf_magnetic_moment_includes_the_response():
 
     fd = -(e_in(h) - e_in(-h)) / (2 * h) / zeeman.MU_B
     assert float(jnp.sum(total[:, 2])) == pytest.approx(fd, abs=1e-6)
+
+
+def test_electronic_temperature():
+    # Mermin free energy: continuous as kT -> 0, falls as T^2 (Sommerfeld),
+    # and stays variational (the stationary point satisfies the potential
+    # condition in a crystal); forces are derivatives of the free energy
+    import jax
+
+    a = 2.9
+    pos = jnp.array(a * np.array([[0, 0, 0], [0.5, 0.5, 0.5]]))
+    cell = jnp.array(a * np.eye(3))
+    start = bj.stoner_shifts(np.full((2, 1), 2.0), 0.6)
+    free = {}
+    for kT in (0.0, 1e-4, 0.02, 0.04):
+        cfg = bj.BOPConfig(nmom=6, rcut=3.4, dcut=0.4, spin="collinear", bandwidth="averaged",
+                           kT=kT)
+        topo = bj.build_topology(np.asarray(pos), [0, 0], cfg.rcut, cfg.nmom, np.asarray(cell))
+        energy = bj.make_energy_fn(topo, cfg)
+        params = dict(canonical_d(n_electrons=7.0, hubbard=3.0), stoner=jnp.array([[0.6]]))
+        res = bj.make_scf(energy)(pos, cell, params, shifts0=start, tol=1e-12)
+        assert res.converged
+        free[kT] = res.energy
+        target = energy.potential_target(res.aux["occupations"], pos, cell, params)
+        np.testing.assert_allclose(target - res.shifts, 0.0, atol=1e-9)
+    assert free[1e-4] == pytest.approx(free[0.0], abs=1e-7)
+    d1, d2 = free[0.0] - free[0.02], free[0.0] - free[0.04]
+    assert d1 > 0 and d2 / d1 == pytest.approx(4.0, rel=0.1)
+    # forces at kT = 0.04 against finite differences of the free energy
+    distorted = pos.at[1].add(jnp.array([0.07, -0.05, 0.03]))
+    potential = bj.make_potential(energy, tol=1e-12)
+    force = -jax.grad(lambda x: potential(x, cell, params, start)[0])(distorted)
+    h = 1e-3
+
+    def e_at(delta):
+        return float(potential(distorted.at[1, 0].add(delta), cell, params, start)[0])
+
+    fd = -(-e_at(2 * h) + 8 * e_at(h) - 8 * e_at(-h) + e_at(-2 * h)) / (12 * h)
+    assert float(force[1, 0]) == pytest.approx(fd, abs=1e-7)

@@ -53,6 +53,8 @@ class BOPConfig:
     coulomb: str = "diagonal"  # "diagonal" (onsite only) or "frauenheim"
     screening: bool = False  # environment-dependent d-d bond integrals
     batch: int = 64  # atoms whose moments are evaluated at once (memory)
+    kT: float = 0.0  # electronic temperature (eV); the energy is then the free energy
+    smearing_nodes: int = 24  # quadrature nodes of the Fermi kernel (kT > 0)
 
     @property
     def n_expansion(self) -> int:
@@ -289,6 +291,11 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     collinear calculations only the component along z couples, to the spin
     only.
 
+    With ``cfg.kT > 0`` the band filling has an electronic temperature: the
+    filling is averaged over the Fermi kernel and the bond energy becomes the
+    Mermin free energy (``expansion.smeared_filling_and_bond_energy``), so the
+    energy is the free energy E - TS, still variational in the shifts.
+
     ``shifts`` has shape ``energy.shift_shape``: (N, nshell), or (N, 2, nshell)
     for magnetic calculations (spin up, spin down).
     """
@@ -317,6 +324,12 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     if needs_pairs and topo.nbr2_mask is None:
         raise ValueError("build the topology with rcut2 for repulsion or Coulomb terms")
 
+    if cfg.kT < 0.0:
+        raise ValueError("kT must not be negative")
+    smear_offsets = smear_weights = None
+    if cfg.kT > 0.0:
+        smear_offsets, smear_weights = ex.fermi_nodes(cfg.kT, cfg.smearing_nodes)
+
     def local_expansion(mu):
         a, b = ex.recursion_coefficients(mu, cfg.nmom)
         ainf, binf = ex.band_centre_and_width(a, b, cfg.nmom, cfg.bandwidth, cfg.global_ab)
@@ -328,7 +341,13 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
         """Electrons and bond energy per atom, spin channel and shell."""
         ainf, binf, sigma = loc
         gamma0 = sigma[..., 1] / kernel[1]
-        fn = jnp.vectorize(ex.filling_and_bond_energy, signature="(k),(),(),(),()->(),()")
+        if cfg.kT > 0.0:
+            def smeared(sig, a_, b_, e_, g_):
+                return ex.smeared_filling_and_bond_energy(sig, a_, b_, e_, g_,
+                                                          smear_offsets, smear_weights)
+            fn = jnp.vectorize(smeared, signature="(k),(),(),(),()->(),()")
+        else:
+            fn = jnp.vectorize(ex.filling_and_bond_energy, signature="(k),(),(),(),()->(),()")
         fill, bond = fn(sigma, ainf, binf, ef, gamma0)
         return degeneracy * fill, degeneracy * bond
 
@@ -342,8 +361,8 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
             return jnp.sum(occupations(loc_, ef)[0]) - n_total
 
         frozen = jax.lax.stop_gradient(loc)
-        lo = jnp.min(frozen[0] - 2.0 * frozen[1])
-        hi = jnp.max(frozen[0] + 2.0 * frozen[1])
+        lo = jnp.min(frozen[0] - 2.0 * frozen[1]) - 40.0 * cfg.kT
+        hi = jnp.max(frozen[0] + 2.0 * frozen[1]) + 40.0 * cfg.kT
 
         def bisect(_, bracket):
             lo_, hi_ = bracket
