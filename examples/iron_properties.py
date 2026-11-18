@@ -60,12 +60,18 @@ def lowest_energy(calc, a):
     if phase.moments is None:
         return calc.energy(PARAMS, a)
     best = None
-    for f in (1.0, 0.6, 0.8, 1.2):
+    # the first try warm-starts from the previous call; the others start
+    # fresh, as a converged warm start would hide the damped-Newton fallback
+    for k, f in enumerate((1.0, 0.6, 0.8, 1.0, 1.2)):
         calc.phase = dataclasses.replace(phase, moments=tuple(f * m for m in phase.moments))
+        if k > 0:
+            calc._last = None
         e, aux = calc.energy(PARAMS, a)
         if calc.residual < 1e-6 and (best is None or e < best[0] - 1e-9):
             best = (e, aux)
     calc.phase = phase
+    if best is not None:
+        calc._last = best[1]["shifts"]
     return best if best is not None else (np.nan, aux)
 
 
