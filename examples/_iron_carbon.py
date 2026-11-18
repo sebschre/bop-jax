@@ -73,16 +73,120 @@ class Cell:
     fe_moment: float = 2.4  # starting moment of each Fe atom
 
 
+class _Chord:
+    """Newton's method for stationary levels in the subspace ``levels = B x``,
+    with a cached Hessian (a chord method) and a Levenberg-Marquardt fallback
+    on |g|^2 as in ``bopjax.make_scf``.
+
+    The Hessian is built once and reused across relaxation steps and nearby
+    parameters until the residual stops dropping fast; every iteration then
+    costs one gradient.
+    """
+
+    def __init__(self, energy, basis, shape):
+        self.basis = jnp.asarray(basis)
+
+        def e_of(x, pos, cell, params):
+            return energy((self.basis @ x).reshape(shape), pos, cell, params)
+
+        grad_x = jax.grad(lambda *a: e_of(*a)[0])
+
+        def hessian(x, pos, cell, params):
+            # columns in small batches: all tangents at once need ~20 GB
+            def column(v):
+                return jax.jvp(lambda y: grad_x(y, pos, cell, params), (x,), (v,))[1]
+            return jax.lax.map(column, jnp.eye(len(x), dtype=x.dtype), batch_size=4)
+
+        def columns(x, pos, cell, params, vs):
+            """H @ vs.T for a few directions vs (k, n)."""
+            def column(v):
+                return jax.jvp(lambda y: grad_x(y, pos, cell, params), (x,), (v,))[1]
+            return jax.lax.map(column, vs, batch_size=4).T
+
+        self._vg = jax.jit(jax.value_and_grad(e_of, has_aux=True))
+        self._hess = jax.jit(hessian)
+        self.columns = jax.jit(columns)
+        self.h = None
+        self.n_hessian = 0
+
+    def _new_hessian(self, x, pos, cell, params):
+        h = self._hess(x, pos, cell, params)
+        self.h = 0.5 * (h + h.T)
+        self.hinv = jnp.linalg.pinv(self.h, rtol=1e-10, hermitian=True)
+        self.normal = self.h @ self.h
+        self.n_hessian += 1
+
+    def __call__(self, x, pos, cell, params, tol, max_iter, verbose=False):
+        (e, aux), g = self._vg(x, pos, cell, params)
+        if self.h is None:
+            self._new_hessian(x, pos, cell, params)
+        fresh, stale = False, False
+        for _ in range(max_iter):
+            if float(jnp.max(jnp.abs(g))) < tol:
+                break
+            norm = float(jnp.linalg.norm(g))
+            if stale and not fresh:
+                self._new_hessian(x, pos, cell, params)
+                fresh = True
+            accepted, damping = False, 0.0
+            scale = float(jnp.max(jnp.diag(self.normal)))
+            for _ in range(10):
+                if damping == 0.0:
+                    step = -(self.hinv @ g)
+                else:
+                    step = -jnp.linalg.solve(self.normal + damping * jnp.eye(len(x)),
+                                             self.h @ g)
+                (e_new, aux_new), g_new = self._vg(x + step, pos, cell, params)
+                norm_new = float(jnp.linalg.norm(g_new))
+                if np.isfinite(norm_new) and norm_new < 0.95 * norm:
+                    accepted = True
+                    break
+                damping = 1e-4 * scale if damping == 0.0 else 10.0 * damping
+            if not accepted and fresh:
+                # The residual lies along a soft mode (the C 2s level against
+                # 2p): Newton's step there is far too long and |g|^2 has a
+                # false minimum.  Search along the softest modes that carry it.
+                w, v = jnp.linalg.eigh(self.h)
+                proj = v.T @ g
+                carry = jnp.abs(proj) > 0.2 * jnp.linalg.norm(g)
+                order = jnp.argsort(jnp.where(carry, jnp.abs(w), jnp.inf))
+                best = (norm, None)
+                for k in [int(i) for i in order[:2] if bool(carry[int(i)])]:
+                    direction = -jnp.sign(proj[k]) * v[:, k]
+                    for t in (0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, -0.1, -0.4, -1.6):
+                        (e_t, aux_t), g_t = self._vg(x + t * direction, pos, cell, params)
+                        n_t = float(jnp.linalg.norm(g_t))
+                        if np.isfinite(n_t) and n_t < best[0]:
+                            best = (n_t, (t * direction, e_t, aux_t, g_t))
+                if best[1] is not None and best[0] < 0.95 * norm:
+                    step, e_new, aux_new, g_new = best[1]
+                    norm_new = best[0]
+                    accepted = True
+            if not accepted:
+                if fresh:
+                    break
+                stale = True
+                continue
+            if verbose:
+                print(f"  scf {len(x)} |g| {norm:.3e} -> {norm_new:.3e}  fresh={fresh}",
+                      flush=True)
+            stale = norm_new > 0.3 * norm  # slow with an old Hessian: rebuild
+            fresh = False
+            x, e, aux, g = x + step, e_new, aux_new, g_new
+        return x, e, aux, float(jnp.max(jnp.abs(g)))
+
+
 class Calculator:
     """Self-consistent energy, forces and stress of one cell.
 
     The parameters are an argument, so a fit does not recompile.  The onsite
-    levels are solved by Newton's method with a cached Hessian (a chord
-    method): the Hessian on the levels of the shells each atom has is built
-    once and reused across relaxation steps and nearby parameters until the
-    residual stops dropping fast.  Every iteration then costs one gradient,
-    about 25 times less than a Newton-Krylov step on these cells.  The last
-    levels and positions are kept as warm starts.
+    levels are found in two stages.  From a cold start they are first solved
+    with one level per atom (iron: one per spin): all shells of an atom
+    shifted together.  That removes a soft mode, the C 2s level against 2p
+    (2s is nearly full and hardly responds), along which Newton overshoots.
+    The levels of every shell are then converged from there, and from the
+    previous solution on later calls.  Both stages are chord-Newton
+    (``_Chord``).
     """
 
     def __init__(self, c: Cell, skin=0.4):
@@ -94,113 +198,114 @@ class Calculator:
                                  c.cell, rcut2=self.cfg.rcut2, skin=skin)
         energy = bj.make_energy_fn(topo, self.cfg, radial=tapered_exp)
         shape = energy.shift_shape
-        own = np.array([[0, 0, 1], [1, 1, 0]], bool)[self.species]  # (N, shells s p d)
-        mask = np.broadcast_to(own[:, None, :], shape) if c.magnetic else own
-        free = np.flatnonzero(mask.ravel())
         size = int(np.prod(shape))
-        self.n_free = len(free)
+        idx = np.arange(size).reshape(shape)
+        tied, own = [], []  # columns of the two subspaces: lists of level indices
+        for i, sp in enumerate(self.species):
+            shells = [2] if sp == FE else [0, 1]
+            if c.magnetic and sp == FE:
+                tied += [idx[i, 0, shells], idx[i, 1, shells]]
+            elif c.magnetic:
+                tied.append(idx[i][:, shells].ravel())
+            else:
+                tied.append(idx[i, shells])
+            for rows in tied[-2 if c.magnetic and sp == FE else -1:]:
+                own += [[r] for r in rows]
 
-        def full(x):
-            return jnp.zeros(size, x.dtype).at[free].set(x).reshape(shape)
+        def basis(cols):
+            b = np.zeros((size, len(cols)))
+            for k, rows in enumerate(cols):
+                b[rows, k] = 1.0
+            return b
 
-        def e_of(x, pos, cell, params):
-            return energy(full(x), pos, cell, params)
+        b_tied, b_own = basis(tied), basis(own)
+        self._own_is_c = np.array([self.species[np.unravel_index(rows[0], shape)[0]] == C
+                                   for rows in own])
+        # tied columns that belong to carbon atoms
+        self._tied_is_c = np.array([self.species[np.unravel_index(rows[0], shape)[0]] == C
+                                    for rows in tied], float)
+        self._tied_to_own = b_own.T @ b_tied  # own levels of a tied solution
+        self._tied = _Chord(energy, b_tied, shape)
+        self._own = _Chord(energy, b_own, shape)
+        self._b_own = jnp.asarray(b_own)
 
-        def e_only(x, pos, cell, params):
-            return e_of(x, pos, cell, params)[0]
+        def e_own(x, pos, cell, params):
+            return energy((self._b_own @ x).reshape(shape), pos, cell, params)[0]
 
         def strained(strain, x, pos, cell, params):
             deform = jnp.eye(3) + 0.5 * (strain + strain.T)
-            return e_only(x, pos @ deform, cell @ deform, params)
+            return e_own(x, pos @ deform, cell @ deform, params)
 
-        self._full = jax.jit(full)
-        self._vg = jax.jit(jax.value_and_grad(e_of, has_aux=True))
-        grad_x = jax.grad(e_only)
-
-        def hessian(x, pos, cell, params):
-            # columns in small batches: all tangents at once need ~20 GB
-            def column(v):
-                return jax.jvp(lambda y: grad_x(y, pos, cell, params), (x,), (v,))[1]
-            return jax.lax.map(column, jnp.eye(len(x), dtype=x.dtype), batch_size=4)
-
-        self._hess = jax.jit(hessian)
-        self._dpos = jax.jit(jax.grad(e_only, argnums=1))
+        self._dpos = jax.jit(jax.grad(e_own, argnums=1))
         self._dstrain = jax.jit(jax.grad(strained))
         self.cell = jnp.asarray(c.cell)
         self.positions = jnp.asarray(c.positions)
         self.n_atoms = len(c.positions)
-        self._x = None  # last self-consistent levels (free entries)
-        self._hinv = None  # cached inverse Hessian
-        self.n_hessian = 0
+        self._x = None  # last self-consistent levels (own subspace)
+
+    @property
+    def n_hessian(self):
+        return self._tied.n_hessian + self._own.n_hessian
 
     def _start(self, params):
-        if not self.c.magnetic:
-            return jnp.zeros(self.n_free)
-        m = np.zeros((self.n_atoms, 3))
-        m[self.species == FE, 2] = self.c.fe_moment
-        full = np.asarray(bj.stoner_shifts(m, float(params["stoner"][FE, 2])))
-        own = np.array([[0, 0, 1], [1, 1, 0]], bool)[self.species]
-        return jnp.asarray(full[np.broadcast_to(own[:, None, :], full.shape)])
-
-    def _new_hessian(self, x, pos, params):
-        h = self._hess(x, pos, self.cell, params)
-        h = 0.5 * (h + h.T)
-        self._h = h
-        self._hinv = jnp.linalg.pinv(h, rtol=1e-10, hermitian=True)
-        self._normal = h @ h
-        self.n_hessian += 1
+        """Tied levels of the starting moments (Stoner splitting on Fe d)."""
+        x = []
+        split = 0.5 * float(params["stoner"][FE, 2]) * self.c.fe_moment
+        for sp in self.species:
+            x += ([-split, split] if self.c.magnetic and sp == FE else [0.0])
+        return jnp.asarray(x)
 
     def solve(self, params, positions=None, tol=1e-8, max_iter=60, verbose=False):
         """(total energy, aux) at the given (default: current) positions."""
         pos = self.positions if positions is None else positions
-        x = self._x if self._x is not None else self._start(params)
-        (e, aux), g = self._vg(x, pos, self.cell, params)
-        if self._hinv is None:
-            self._new_hessian(x, pos, params)
-        fresh, stale = False, False
-        for _ in range(max_iter):
-            if float(jnp.max(jnp.abs(g))) < tol:
-                break
-            norm = float(jnp.linalg.norm(g))
-            if stale and not fresh:
-                self._new_hessian(x, pos, params)
-                fresh = True
-            # Newton first; if the residual does not drop (far from the
-            # solution, or soft modes of the indefinite Hessian), Levenberg-
-            # Marquardt steps on |g|^2 with growing damping, as in make_scf
-            accepted, damping = False, 0.0
-            scale = float(jnp.max(jnp.diag(self._normal)))
-            for _ in range(10):
-                if damping == 0.0:
-                    step = -(self._hinv @ g)
-                else:
-                    step = -jnp.linalg.solve(self._normal + damping * jnp.eye(len(x)),
-                                             self._h @ g)
-                x_new = x + step
-                (e_new, aux_new), g_new = self._vg(x_new, pos, self.cell, params)
-                norm_new = float(jnp.linalg.norm(g_new))
-                if np.isfinite(norm_new) and norm_new < 0.95 * norm:
-                    accepted = True
-                    break
-                damping = 1e-4 * scale if damping == 0.0 else 10.0 * damping
-            if not accepted:
-                if fresh:
-                    break  # Newton itself fails
-                stale = True
-                continue
-            if verbose:
-                print(f"  scf |g| {norm:.3e} -> {norm_new:.3e}  fresh={fresh}", flush=True)
-            # slow progress with an old Hessian: rebuild it at the next step
-            stale = norm_new > 0.3 * norm
-            fresh = False
-            x, e, aux, g = x_new, e_new, aux_new, g_new
-        self.residual = float(jnp.max(jnp.abs(g)))
-        if self.residual > 1e-6:
-            self._x, self._hinv = None, None
-            raise RuntimeError(f"{self.c.name}: no self-consistent state ({self.residual:.2e})")
+        x = self._x
+        if x is None:
+            x = self._block_start(params, pos, verbose)
+        x, e, aux, res = self._own(x, pos, self.cell, params, tol, max_iter, verbose)
+        self.residual = res
+        if res > 1e-6:
+            self._x = None
+            raise RuntimeError(f"{self.c.name}: no self-consistent state ({res:.2e})")
         self._x = x
         self.aux = aux
         return float(e), aux
+
+    def _block_start(self, params, pos, verbose=False, cap=0.5):
+        """Levels from a cold start, by blocks.  Carbon can take or give most
+        of an electron, which the Hubbard term answers with shifts of several
+        eV; joint Newton steps from zero wander into levels where the C
+        expansion diverges and |g| has false minima.  So: converge the iron
+        levels with carbon fixed, take a Newton step of at most ``cap`` eV in
+        the carbon block, and repeat until the joint solver can take over."""
+        n = len(self._own_is_c)
+        x = np.asarray(self._tied_to_own @ np.asarray(self._start(params)))
+        fe, cc = np.flatnonzero(~self._own_is_c), np.flatnonzero(self._own_is_c)
+        eye = np.eye(n)
+        vg = self._own._vg
+        h_fe = None
+        for outer in range(40):
+            for it in range(15):  # iron block, cached Hessian
+                g = np.asarray(vg(jnp.asarray(x), pos, self.cell, params)[1])
+                if np.max(np.abs(g[fe])) < 1e-4:
+                    break
+                if h_fe is None or it == 6:
+                    h = np.asarray(self._own.columns(jnp.asarray(x), pos, self.cell, params,
+                                                     jnp.asarray(eye[fe])))[fe]
+                    h_fe = np.linalg.pinv(0.5 * (h + h.T), rcond=1e-10)
+                step = -h_fe @ g[fe]
+                x[fe] += step * min(1.0, cap / max(np.max(np.abs(step)), 1e-12))
+            res = float(np.max(np.abs(g)))
+            if verbose:
+                print(f"  block {outer}: |g_Fe| {np.max(np.abs(g[fe])):.2e} "
+                      f"|g_C| {np.max(np.abs(g[cc])):.2e}", flush=True)
+            if res < 1e-3 or not np.all(np.isfinite(g)):
+                break
+            h = np.asarray(self._own.columns(jnp.asarray(x), pos, self.cell, params,
+                                             jnp.asarray(eye[cc])))[cc]
+            step = -np.linalg.pinv(0.5 * (h + h.T), rcond=1e-8) @ g[cc]
+            x[cc] += step * min(1.0, cap / max(np.max(np.abs(step)), 1e-12))
+        self._own.h = None  # the joint solver builds its own Hessian here
+        return jnp.asarray(x)
 
     def forces(self, params, positions):
         """Forces at the last self-consistent levels (call ``solve`` first)."""
