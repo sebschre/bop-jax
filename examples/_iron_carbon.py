@@ -18,7 +18,7 @@ from bopjax.models import FE, IRON_CARBON_CONFIG, C, iron_carbon, tapered_exp
 
 EV_A3_TO_GPA = 160.21766
 A_FE = 2.8540  # bcc FM equilibrium of IRON_FIT
-A_DIAMOND = 3.5651  # diamond equilibrium of CARBON_FIT
+A_DIAMOND = 3.5679  # diamond equilibrium of CARBON_FIT
 
 
 def bcc_supercell(n=2, a=A_FE):
@@ -274,6 +274,9 @@ class Calculator:
         can take over."""
         n = len(self._is_c)
         fe, cc = np.flatnonzero(~self._is_c), np.flatnonzero(self._is_c)
+        if len(fe) == 0 or len(cc) == 0:  # one element: the joint solver alone
+            self._solver.h = None
+            return jnp.zeros(n)
         eye = np.eye(n)
         vg, cols = self._solver._vg, self._solver.columns
 

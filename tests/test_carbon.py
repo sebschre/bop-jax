@@ -12,7 +12,7 @@ from bopjax.hamiltonian import v0_bond
 from bopjax.models import CARBON_CONFIG, carbon
 
 FCC = 0.5 * np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0.0]])
-A_DIAMOND = 3.5651
+A_DIAMOND = 3.5679
 
 
 def diamond(a):
