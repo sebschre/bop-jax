@@ -151,11 +151,12 @@ IRON_CONFIG = dict(nmom=9, bandwidth="averaged", rcut=3.4, dcut=0.4, rcut2=3.4, 
                    repulsion=pw.V0)
 
 
-# fitted parameters of the sp carbon model (examples/fit_carbon.py, docs/carbon.md)
+# fitted parameters of the sp carbon model with atomic shifts (examples/fit_carbon.py,
+# docs/carbon.md)
 CARBON_FIT = {
-    "e_s": -7.8627, "sss": -2.87213, "sps": 7.17265, "pps": 6.62997, "ppp": -0.78207,
-    "decay": 4.03771, "pair": 19.44275, "pair_decay": 4.85353, "embed": 4.86397,
-    "density_decay": 0.50549, "r0": 1.54,
+    "e_s": -8.08885, "sss": -2.91351, "sps": 7.17174, "pps": 6.60702, "ppp": -0.77806,
+    "decay": 4.04441, "pair": 19.41433, "pair_decay": 4.85776, "embed": 4.80143,
+    "density_decay": 0.48509, "r0": 1.54,
 }
 
 

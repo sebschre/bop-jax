@@ -228,9 +228,10 @@ class Calculator:
                  else self._block_start(params, pos, verbose))
         x, e, aux, res = self._solver(x, pos, self.cell, params, tol, max_iter, verbose)
         self.residual = res
-        if res > 1e-6:
+        if res > 1e-6 or not self.sane(aux):
             self._x = None
-            raise RuntimeError(f"{self.c.name}: no self-consistent state ({res:.2e})")
+            raise RuntimeError(f"{self.c.name}: no self-consistent state ({res:.2e}, "
+                               f"sane={self.sane(aux)})")
         self._x = x
         self.aux = aux
         return float(e), aux
@@ -250,22 +251,47 @@ class Calculator:
         self._solver.h = None
         return jnp.asarray(np.stack([x_nm - m, x_nm + m], axis=1).ravel())
 
-    def _block_start(self, params, pos, verbose=False, cap=0.5):
+    @staticmethod
+    def sane(aux):
+        """Shell occupations within their capacity (s 2, p 6, d 10): outside
+        it the expansion of the local density of states has broken down
+        (far-shifted levels) and a stationary point there is spurious."""
+        n = np.asarray(aux["n_shell"])
+        return bool(np.all(n > -1e-3) and np.all(n < np.array([2, 6, 10]) + 1e-3))
+
+    def _block_start(self, params, pos, verbose=False, cap=0.25):
         """Shifts from a cold start, by blocks.  Carbon can take or give most
         of an electron, which the Hubbard term answers with shifts of several
-        eV; joint Newton steps from zero can wander into levels where the C
-        expansion diverges.  So: converge the iron shifts with carbon fixed,
-        take a Newton step of at most ``cap`` eV for carbon, and repeat until
-        the joint solver can take over."""
+        eV; joint Newton steps from zero can wander into levels where the
+        expansion of the C density of states breaks down and has spurious
+        stationary points.  So: pick the carbon shift from a scan of sane
+        states, converge the iron shifts with carbon fixed, take a capped,
+        backtracked Newton step for carbon, and repeat until the joint solver
+        can take over."""
         n = len(self._is_c)
-        x = np.zeros(n)
         fe, cc = np.flatnonzero(~self._is_c), np.flatnonzero(self._is_c)
         eye = np.eye(n)
         vg, cols = self._solver._vg, self._solver.columns
+
+        def evaluate(x):
+            (_, aux), g = vg(jnp.asarray(x), pos, self.cell, params)
+            g = np.asarray(g)
+            ok = self.sane(aux) and np.all(np.isfinite(g))
+            return g, ok
+
+        best = (np.inf, None)
+        for shift in np.arange(-3.0, 3.01, 0.5):
+            x = np.where(self._is_c, shift, 0.0)
+            g, ok = evaluate(x)
+            if ok and np.max(np.abs(g[cc])) < best[0]:
+                best = (np.max(np.abs(g[cc])), x)
+        if best[1] is None:
+            raise RuntimeError(f"{self.c.name}: no sane starting levels")
+        x = best[1]
         h_fe = None
         for outer in range(40):
-            for it in range(15):  # iron block, cached Hessian
-                g = np.asarray(vg(jnp.asarray(x), pos, self.cell, params)[1])
+            for it in range(15):  # iron block, cached Hessian, capped steps
+                g, ok = evaluate(x)
                 if np.max(np.abs(g[fe])) < 1e-4:
                     break
                 if h_fe is None or it == 6:
@@ -276,13 +302,20 @@ class Calculator:
                 x[fe] += step * min(1.0, cap / max(np.max(np.abs(step)), 1e-12))
             if verbose:
                 print(f"  block {outer}: |g_Fe| {np.max(np.abs(g[fe])):.2e} "
-                      f"|g_C| {np.max(np.abs(g[cc])):.2e}", flush=True)
-            if np.max(np.abs(g)) < 1e-3 or not np.all(np.isfinite(g)):
+                      f"|g_C| {np.max(np.abs(g[cc])):.2e} sane={ok}", flush=True)
+            if np.max(np.abs(g)) < 1e-3 and ok:
                 break
             h = np.asarray(cols(jnp.asarray(x), pos, self.cell, params,
                                 jnp.asarray(eye[cc])))[cc]
             step = -np.linalg.pinv(0.5 * (h + h.T), rcond=1e-8) @ g[cc]
-            x[cc] += step * min(1.0, cap / max(np.max(np.abs(step)), 1e-12))
+            step *= min(1.0, cap / max(np.max(np.abs(step)), 1e-12))
+            for _ in range(5):  # stay among sane states
+                trial = x.copy()
+                trial[cc] += step
+                if evaluate(trial)[1]:
+                    break
+                step *= 0.5
+            x = trial
         self._solver.h = None  # the joint solver builds its own Hessian here
         return jnp.asarray(x)
 
