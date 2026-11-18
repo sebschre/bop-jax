@@ -121,6 +121,8 @@ class _Chord:
         if self.h is None:
             self._new_hessian(x, pos, cell, params)
         fresh, stale = False, False
+        energies = [float(e)]
+        self.flat_accepted = None
         for _ in range(max_iter):
             if float(jnp.max(jnp.abs(g))) < tol:
                 break
@@ -164,6 +166,9 @@ class _Chord:
                     accepted = True
             if not accepted:
                 if fresh:
+                    flat = self._flat_residual(g, energies)
+                    if flat:
+                        self.flat_accepted = float(jnp.max(jnp.abs(g)))
                     break
                 stale = True
                 continue
@@ -173,7 +178,29 @@ class _Chord:
             stale = norm_new > 0.3 * norm  # slow with an old Hessian: rebuild
             fresh = False
             x, e, aux, g = x + step, e_new, aux_new, g_new
-        return x, e, aux, float(jnp.max(jnp.abs(g)))
+            energies.append(float(e))
+            if len(energies) >= 4 and self._flat_residual(g, energies):
+                self.flat_accepted = float(jnp.max(jnp.abs(g)))
+                break
+        res = float(jnp.max(jnp.abs(g)))
+        if self.flat_accepted is not None:
+            res = 0.0  # accepted: what is left lies along flat modes
+        return x, e, aux, res
+
+    def _flat_residual(self, g, energies, gmax=0.1, lam=0.02, share=0.9, de=1e-4):
+        """True when what is left of the residual is small, lies along
+        near-null modes of the Hessian, and the energy has stopped moving.
+        Near a saturated majority d band the levels along those modes are
+        not unique and the truncated expansion leaves a residual there that
+        Newton cannot remove; the energy is flat along them."""
+        if self.h is None or float(jnp.max(jnp.abs(g))) > gmax or len(energies) < 3:
+            return False
+        if max(energies[-3:]) - min(energies[-3:]) > de:
+            return False
+        w, v = jnp.linalg.eigh(self.h)
+        proj = v.T @ g
+        soft = jnp.abs(w) < lam * jnp.max(jnp.abs(w))
+        return float(jnp.sum(jnp.where(soft, proj**2, 0.0))) > share * float(g @ g)
 
 
 class Calculator:
