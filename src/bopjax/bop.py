@@ -48,6 +48,7 @@ class SpeciesSettings:
     bandwidth: str | None = None
     terminator: str | None = None
     kernel: str | None = None
+    bandwidth_guard: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,9 @@ class BOPConfig:
     terminator: str = "none"  # see expansion.TERMINATORS
     alpha_weight: float = 1.0  # for terminator = "weighted"
     kernel: str = "none"  # "none" or "jackson"
+    # widen b_inf where the scaled recursion chain has eigenvalues outside
+    # [-1, 1], where the Chebyshev expansion would diverge
+    bandwidth_guard: bool = False
     rcut: float = 3.0  # bond integrals
     dcut: float = 0.0
     rcut2: float | None = None  # repulsion, embedding, Coulomb
@@ -244,7 +248,7 @@ class _SpeciesLayout:
     starts: np.ndarray  # (N, norb, ncol) start vectors of each atom
     columns: tuple  # per species, per own shell: start columns of that shell
     atoms: tuple  # per species: its atoms in the unit cell
-    settings: tuple  # per species: (nmom, nexp, bandwidth, terminator, kernel)
+    settings: tuple  # per species: (nmom, nexp, bandwidth, terminator, kernel, guard)
 
 
 def _species_layout(cfg: BOPConfig, species: np.ndarray) -> _SpeciesLayout:
@@ -266,7 +270,9 @@ def _species_layout(cfg: BOPConfig, species: np.ndarray) -> _SpeciesLayout:
         settings.append((nmom, nexp,
                          cfg.bandwidth if st.bandwidth is None else st.bandwidth,
                          cfg.terminator if st.terminator is None else st.terminator,
-                         cfg.kernel if st.kernel is None else st.kernel))
+                         cfg.kernel if st.kernel is None else st.kernel,
+                         cfg.bandwidth_guard if st.bandwidth_guard is None
+                         else st.bandwidth_guard))
     nsp = len(cfg.species)
     orb_mask = np.zeros((nsp, norb))
     shell_mask = np.zeros((nsp, len(cfg.basis)))
@@ -360,12 +366,15 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     if layout is not None:
         nexp = max(st[1] for st in layout.settings)
 
-    def expansion_fn(nmom_, nexp_, bandwidth_, terminator_, kernel_):
+    def expansion_fn(nmom_, nexp_, bandwidth_, terminator_, kernel_, guard_=False):
         kern = ex.jackson_kernel(nexp_) if kernel_ == "jackson" else np.ones(nexp_ + 1)
 
         def local(mu_):
             a, b = ex.recursion_coefficients(mu_, nmom_)
             ainf, binf = ex.band_centre_and_width(a, b, nmom_, bandwidth_, cfg.global_ab)
+            if guard_:
+                binf = ex.guarded_width(a, b, ainf, binf, nmom_, nexp_, terminator_,
+                                        cfg.alpha_weight)
             sigma = ex.sigma_coefficients(a, b, ainf, binf, nmom_, nexp_, kern,
                                           terminator_, cfg.alpha_weight)
             return ainf, binf, sigma, sigma[1] / kern[1]
@@ -376,7 +385,7 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
         """(a_inf, b_inf, sigma, gamma0), each (N, nspin, nshell[, nexp + 1])."""
         if layout is None:
             return expansion_fn(cfg.nmom, nexp, cfg.bandwidth, cfg.terminator,
-                                cfg.kernel)(mu)
+                                cfg.kernel, cfg.bandwidth_guard)(mu)
         # absent shells: sigma = 0, i.e. no states; a_inf, b_inf only keep
         # the Fermi-level bracket finite
         shape = mu.shape[:3]

@@ -202,7 +202,7 @@ def carbon(**values):
 # level wanders in the gap of diamond and the energy is not smooth.
 CARBON_CONFIG = dict(nmom=10, nexp=20, kernel="jackson", bandwidth="averaged",
                      basis=("s", "p"), rcut=2.2, dcut=0.3, rcut2=2.2, dcut2=0.3,
-                     repulsion=pw.V0, atomic_shifts=True)
+                     repulsion=pw.V0, atomic_shifts=True, bandwidth_guard=True)
 
 
 # --- iron-carbon: the d iron model and the sp carbon model with d-sp cross terms ---
@@ -317,7 +317,8 @@ def _iron_carbon_config():
                          bandwidth=IRON_CONFIG["bandwidth"], kernel="none")
     c = SpeciesSettings(basis=CARBON_CONFIG["basis"], nmom=CARBON_CONFIG["nmom"],
                         nexp=CARBON_CONFIG["nexp"], bandwidth=CARBON_CONFIG["bandwidth"],
-                        kernel=CARBON_CONFIG["kernel"])
+                        kernel=CARBON_CONFIG["kernel"],
+                        bandwidth_guard=CARBON_CONFIG["bandwidth_guard"])
     rmax = max(IRON_CONFIG["rcut"], CARBON_CONFIG["rcut"], 3.0)
     # the global cutoff is a hard step at the longest range; every pair is
     # tapered inside its own radial function

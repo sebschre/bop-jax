@@ -187,6 +187,30 @@ def terminated_chain(a, b, ainf, binf, nmom: int, nrec: int, terminator: str = "
     return a_hat.at[:na].set(a_ex[:na]), b_hat.at[:nb].set(b_ex[:nb])
 
 
+def guarded_width(a, b, ainf, binf, nmom: int, nexp: int, terminator: str = "none",
+                  alpha_weight: float = 1.0, passes: int = 3):
+    """b_inf, widened where needed so that the scaled recursion chain of the
+    expansion has its spectrum inside [-1, 1].
+
+    The Chebyshev moments are T_n of that chain; an eigenvalue outside
+    [-1, 1] makes them grow exponentially with n, and the filling of the
+    shell can then exceed its capacity.  This happens when a few strongly
+    split levels (a deep bonding state and a broad band, say) make the
+    estimate of the band too narrow.  Where the chain already fits, b_inf is
+    unchanged.
+    """
+    _, nrec = n_recursion(nexp)
+    nrec = max(nrec, 1)
+    for _ in range(passes):
+        a_hat, b_hat = terminated_chain(a, b, ainf, binf, nmom, nrec, terminator,
+                                        alpha_weight)
+        chain = jnp.diag(a_hat) + jnp.diag(b_hat[1:], 1) + jnp.diag(b_hat[1:], -1)
+        ev = jnp.linalg.eigvalsh(chain)
+        reach = jnp.maximum(jnp.abs(ev[0]), jnp.abs(ev[-1]))
+        binf = binf * jnp.maximum(1.0, reach)
+    return binf
+
+
 def sigma_coefficients(a, b, ainf, binf, nmom: int, nexp: int, kernel,
                        terminator: str = "none", alpha_weight: float = 1.0):
     """Chebyshev (2nd kind) moments sigma_0..sigma_nexp of the scaled DOS."""
