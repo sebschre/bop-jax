@@ -228,6 +228,11 @@ class Image:
             (e, aux), g = self._careful(jnp.asarray(positions), self.shifts, par)
             print(f"   self-consistency residual {first:.1e}; retry with gentler mixing: "
                   f"{float(aux['scf_residual']):.1e}", flush=True)
+            if float(aux["scf_residual"]) > 1e-6 and args.out:
+                failed = os.path.splitext(args.out)[0] + "_failed_scf.npz"
+                np.savez(failed, positions=np.asarray(positions),
+                         shifts0=np.asarray(self.shifts), shifts=np.asarray(aux["shifts"]))
+                print(f"   (configuration written to {failed})", flush=True)
         if field is None and float(aux["scf_residual"]) < 1e-6:
             self.shifts = aux["shifts"]  # warm start only from converged levels
         self.aux = aux
