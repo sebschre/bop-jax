@@ -71,12 +71,14 @@ parser.add_argument("--check-field", type=float, default=100.0,
                     help="field (T) of the self-consistent check of the first-order shift")
 parser.add_argument("--xi", type=float, default=0.0,
                     help="d spin-orbit constant (eV) for the orbital moments; 0 to skip")
+parser.add_argument("--batch", type=int, default=16,
+                    help="atoms whose moments are evaluated at once (memory)")
 parser.add_argument("--out", default=None, help="save the path and moments (.npz)")
 args = parser.parse_args()
 
 t_start = time.perf_counter()
 basis = ("d",) if args.basis == "d" else ("s", "d")
-cfg = bj.BOPConfig(**IRON_CONFIG, basis=basis, spin="collinear")
+cfg = bj.BOPConfig(**IRON_CONFIG, basis=basis, spin="collinear", batch=args.batch)
 params = iron(basis=basis)
 d_shell = np.array([sh == "d" for sh in basis], dtype=float)
 
@@ -270,7 +272,8 @@ print(f"\nself-consistent check at +-{bc:.0f} T (fixed positions): "
 
 soc = {}
 if args.xi > 0:
-    cfg_nc = bj.BOPConfig(**IRON_CONFIG, basis=basis, spin="noncollinear", spin_orbit=True)
+    cfg_nc = bj.BOPConfig(**IRON_CONFIG, basis=basis, spin="noncollinear", spin_orbit=True,
+                          batch=max(1, args.batch // 4))
     xi = jnp.array([args.xi * d_shell])
     directions = {"[111] line": [0, 0, 1.0], "[11-2] glide": [1.0, 0, 0],
                   "[-110] normal": [0, 1.0, 0]}
