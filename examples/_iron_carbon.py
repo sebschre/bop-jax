@@ -179,14 +179,11 @@ class _Chord:
 class Calculator:
     """Self-consistent energy, forces and stress of one cell.
 
-    The parameters are an argument, so a fit does not recompile.  The onsite
-    levels are found in two stages.  From a cold start they are first solved
-    with one level per atom (iron: one per spin): all shells of an atom
-    shifted together.  That removes a soft mode, the C 2s level against 2p
-    (2s is nearly full and hardly responds), along which Newton overshoots.
-    The levels of every shell are then converged from there, and from the
-    previous solution on later calls.  Both stages are chord-Newton
-    (``_Chord``).
+    The parameters are an argument, so a fit does not recompile.  The model
+    has one onsite shift per atom (and spin), so the unknowns are the
+    N (or 2N) shifts, solved by chord-Newton (``_Chord``) from the previous
+    solution.  Cold starts go by blocks (``_block_start``); magnetic cells
+    start from the non-magnetic levels plus a Stoner splitting on iron.
     """
 
     def __init__(self, c: Cell, skin=0.4):
@@ -197,64 +194,30 @@ class Calculator:
         topo = bj.build_topology(c.positions, c.species, self.cfg.rcut, self.cfg.nmom,
                                  c.cell, rcut2=self.cfg.rcut2, skin=skin)
         energy = bj.make_energy_fn(topo, self.cfg, radial=tapered_exp)
-        shape = energy.shift_shape
+        shape = energy.shift_shape  # (N, 1) or (N, 2, 1)
         size = int(np.prod(shape))
-        idx = np.arange(size).reshape(shape)
-        tied, own = [], []  # columns of the two subspaces: lists of level indices
-        for i, sp in enumerate(self.species):
-            shells = [2] if sp == FE else [0, 1]
-            if c.magnetic and sp == FE:
-                tied += [idx[i, 0, shells], idx[i, 1, shells]]
-            elif c.magnetic:
-                tied.append(idx[i][:, shells].ravel())
-            else:
-                tied.append(idx[i, shells])
-            for rows in tied[-2 if c.magnetic and sp == FE else -1:]:
-                own += [[r] for r in rows]
+        self._solver = _Chord(energy, np.eye(size), shape)
+        # which unknown belongs to a carbon atom (atom index is the leading axis)
+        self._is_c = np.repeat(self.species == C, size // len(self.species))
 
-        def basis(cols):
-            b = np.zeros((size, len(cols)))
-            for k, rows in enumerate(cols):
-                b[rows, k] = 1.0
-            return b
-
-        b_tied, b_own = basis(tied), basis(own)
-        self._own_is_c = np.array([self.species[np.unravel_index(rows[0], shape)[0]] == C
-                                   for rows in own])
-        # tied columns that belong to carbon atoms
-        self._tied_is_c = np.array([self.species[np.unravel_index(rows[0], shape)[0]] == C
-                                    for rows in tied], float)
-        self._tied_to_own = b_own.T @ b_tied  # own levels of a tied solution
-        self._tied = _Chord(energy, b_tied, shape)
-        self._own = _Chord(energy, b_own, shape)
-        self._b_own = jnp.asarray(b_own)
-
-        def e_own(x, pos, cell, params):
-            return energy((self._b_own @ x).reshape(shape), pos, cell, params)[0]
+        def e_x(x, pos, cell, params):
+            return energy(x.reshape(shape), pos, cell, params)[0]
 
         def strained(strain, x, pos, cell, params):
             deform = jnp.eye(3) + 0.5 * (strain + strain.T)
-            return e_own(x, pos @ deform, cell @ deform, params)
+            return e_x(x, pos @ deform, cell @ deform, params)
 
-        self._dpos = jax.jit(jax.grad(e_own, argnums=1))
+        self._dpos = jax.jit(jax.grad(e_x, argnums=1))
         self._dstrain = jax.jit(jax.grad(strained))
         self.cell = jnp.asarray(c.cell)
         self.positions = jnp.asarray(c.positions)
         self.n_atoms = len(c.positions)
-        self._x = None  # last self-consistent levels (own subspace)
+        self._x = None  # last self-consistent shifts (flat)
         self._nm = None  # non-magnetic twin for cold starts of magnetic cells
 
     @property
     def n_hessian(self):
-        return self._tied.n_hessian + self._own.n_hessian
-
-    def _start(self, params):
-        """Tied levels of the starting moments (Stoner splitting on Fe d)."""
-        x = []
-        split = 0.5 * float(params["stoner"][FE, 2]) * self.c.fe_moment
-        for sp in self.species:
-            x += ([-split, split] if self.c.magnetic and sp == FE else [0.0])
-        return jnp.asarray(x)
+        return self._solver.n_hessian
 
     def solve(self, params, positions=None, tol=1e-8, max_iter=60, verbose=False):
         """(total energy, aux) at the given (default: current) positions."""
@@ -263,7 +226,7 @@ class Calculator:
         if x is None:
             x = (self._from_nonmagnetic(params, pos, verbose) if self.c.magnetic
                  else self._block_start(params, pos, verbose))
-        x, e, aux, res = self._own(x, pos, self.cell, params, tol, max_iter, verbose)
+        x, e, aux, res = self._solver(x, pos, self.cell, params, tol, max_iter, verbose)
         self.residual = res
         if res > 1e-6:
             self._x = None
@@ -273,8 +236,8 @@ class Calculator:
         return float(e), aux
 
     def _from_nonmagnetic(self, params, pos, verbose=False):
-        """Cold start of a magnetic cell: the non-magnetic levels (found by
-        blocks) plus the Stoner splitting of the starting moment on Fe d."""
+        """Cold start of a magnetic cell: the non-magnetic shifts plus the
+        Stoner splitting of the starting moment on iron."""
         if self._nm is None:
             self._nm = Calculator(Cell(self.c.name + " NM", self.c.cell, self.c.positions,
                                        self.c.species, magnetic=False))
@@ -283,29 +246,22 @@ class Calculator:
         self._nm.solve(params, verbose=verbose)
         x_nm = np.asarray(self._nm._x)
         split = 0.5 * float(params["stoner"][FE, 2]) * self.c.fe_moment
-        x, k = [], 0
-        for sp in self.species:
-            if sp == FE:
-                x += [x_nm[k] - split, x_nm[k] + split]
-                k += 1
-            else:
-                x += [x_nm[k], x_nm[k + 1], x_nm[k], x_nm[k + 1]]  # s, p up; s, p down
-                k += 2
-        self._own.h = None
-        return jnp.asarray(x)
+        m = np.where(self.species == FE, split, 0.0)
+        self._solver.h = None
+        return jnp.asarray(np.stack([x_nm - m, x_nm + m], axis=1).ravel())
 
     def _block_start(self, params, pos, verbose=False, cap=0.5):
-        """Levels from a cold start, by blocks.  Carbon can take or give most
+        """Shifts from a cold start, by blocks.  Carbon can take or give most
         of an electron, which the Hubbard term answers with shifts of several
-        eV; joint Newton steps from zero wander into levels where the C
-        expansion diverges and |g| has false minima.  So: converge the iron
-        levels with carbon fixed, take a Newton step of at most ``cap`` eV in
-        the carbon block, and repeat until the joint solver can take over."""
-        n = len(self._own_is_c)
-        x = np.asarray(self._tied_to_own @ np.asarray(self._start(params)))
-        fe, cc = np.flatnonzero(~self._own_is_c), np.flatnonzero(self._own_is_c)
+        eV; joint Newton steps from zero can wander into levels where the C
+        expansion diverges.  So: converge the iron shifts with carbon fixed,
+        take a Newton step of at most ``cap`` eV for carbon, and repeat until
+        the joint solver can take over."""
+        n = len(self._is_c)
+        x = np.zeros(n)
+        fe, cc = np.flatnonzero(~self._is_c), np.flatnonzero(self._is_c)
         eye = np.eye(n)
-        vg = self._own._vg
+        vg, cols = self._solver._vg, self._solver.columns
         h_fe = None
         for outer in range(40):
             for it in range(15):  # iron block, cached Hessian
@@ -313,22 +269,21 @@ class Calculator:
                 if np.max(np.abs(g[fe])) < 1e-4:
                     break
                 if h_fe is None or it == 6:
-                    h = np.asarray(self._own.columns(jnp.asarray(x), pos, self.cell, params,
-                                                     jnp.asarray(eye[fe])))[fe]
+                    h = np.asarray(cols(jnp.asarray(x), pos, self.cell, params,
+                                        jnp.asarray(eye[fe])))[fe]
                     h_fe = np.linalg.pinv(0.5 * (h + h.T), rcond=1e-10)
                 step = -h_fe @ g[fe]
                 x[fe] += step * min(1.0, cap / max(np.max(np.abs(step)), 1e-12))
-            res = float(np.max(np.abs(g)))
             if verbose:
                 print(f"  block {outer}: |g_Fe| {np.max(np.abs(g[fe])):.2e} "
                       f"|g_C| {np.max(np.abs(g[cc])):.2e}", flush=True)
-            if res < 1e-3 or not np.all(np.isfinite(g)):
+            if np.max(np.abs(g)) < 1e-3 or not np.all(np.isfinite(g)):
                 break
-            h = np.asarray(self._own.columns(jnp.asarray(x), pos, self.cell, params,
-                                             jnp.asarray(eye[cc])))[cc]
+            h = np.asarray(cols(jnp.asarray(x), pos, self.cell, params,
+                                jnp.asarray(eye[cc])))[cc]
             step = -np.linalg.pinv(0.5 * (h + h.T), rcond=1e-8) @ g[cc]
             x[cc] += step * min(1.0, cap / max(np.max(np.abs(step)), 1e-12))
-        self._own.h = None  # the joint solver builds its own Hessian here
+        self._solver.h = None  # the joint solver builds its own Hessian here
         return jnp.asarray(x)
 
     def forces(self, params, positions):
