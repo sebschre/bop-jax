@@ -202,3 +202,129 @@ def carbon(**values):
 CARBON_CONFIG = dict(nmom=10, nexp=20, kernel="jackson", bandwidth="averaged",
                      basis=("s", "p"), rcut=2.2, dcut=0.3, rcut2=2.2, dcut2=0.3,
                      repulsion=pw.V0)
+
+
+# --- iron-carbon: the d iron model and the sp carbon model with d-sp cross terms ---
+
+
+def _taper(r, rc, dc):
+    """1 below rc - dc, 0 above rc, half cosine in between; rc and dc may be
+    traced (the same curve as ``hamiltonian.cosine_cutoff``)."""
+    x = jnp.clip((r - rc + dc) / dc, 0.0, 1.0)
+    return jnp.where(r < rc, 0.5 * (1.0 + jnp.cos(jnp.pi * x)), 0.0)
+
+
+def tapered_exp(p, r):
+    """``p[0] * exp(-p[1] (r / p[2] - 1))`` switched off between ``p[3] - p[4]``
+    and ``p[3]``: an exponential with a cutoff of its own, so that each pair
+    of species can have its own range under one global cutoff."""
+    return p[0] * jnp.exp(-p[1] * (r / p[2] - 1.0)) * _taper(r, p[3], p[4])
+
+
+# repulsion and embedding density with per-pair cutoffs (rows as tapered_exp)
+TAPERED_V0 = pw.Repulsion(pair=tapered_exp, density=tapered_exp, embed=pw.V0.embed)
+
+
+# fitted cross parameters of the iron-carbon model (examples/fit_iron_carbon.py,
+# docs/iron-carbon.md)
+IRON_CARBON_FIT = {
+    "e_c": 0.0, "sds": -1.0, "pds": -1.5, "pdp": 0.7, "decay": 3.0,
+    "pair": 1.0, "pair_decay": 6.0, "rho_fe": 1.0, "rho_c": 1.0, "rho_decay": 3.0,
+    "r0": 1.95, "rcut": 3.0, "dcut": 0.5,
+}
+
+FE, C = 0, 1  # species indices of the iron-carbon model
+
+
+def iron_carbon(iron_values=None, carbon_values=None, **values):
+    """Iron (species 0, the d model ``IRON_FIT``) and carbon (species 1, the
+    sp model ``CARBON_FIT``) with d-sp bonds between them.
+
+    Use with ``BOPConfig(**IRON_CARBON_CONFIG, spin=...)`` and
+    ``radial=models.tapered_exp``.  Fe-Fe and C-C interactions are exactly
+    those of ``iron()`` and ``carbon()``, with their own cutoffs;
+    ``iron_values`` and ``carbon_values`` override their parameters.
+    Keyword arguments override entries of ``IRON_CARBON_FIT``, the Fe-C terms:
+
+      e_c                 shift of the carbon levels (2s and 2p together)
+                          relative to the iron d level (eV)
+      sds, pds, pdp       bond integrals C(2s, 2p) - Fe(3d) at r0 (eV), each
+                          ``beta * exp(-decay (r / r0 - 1))``
+      pair, pair_decay    Fe-C pair term ``pair * exp(-pair_decay (r / r0 - 1))``
+      rho_fe, rho_c, rho_decay
+                          embedding density that a C neighbour adds on Fe
+                          (``rho_fe``) and an Fe neighbour adds on C
+                          (``rho_c``), both ``* exp(-rho_decay (r / r0 - 1))``
+      rcut, dcut          range of every Fe-C term (taper from rcut - dcut)
+    """
+    fe = dict(IRON_FIT, **(iron_values or {}))
+    cv = dict(CARBON_FIT, **(carbon_values or {}))
+    v = dict(IRON_CARBON_FIT, **values)
+    fe_cut = (IRON_CONFIG["rcut"], IRON_CONFIG["dcut"])
+    c_cut = (CARBON_CONFIG["rcut"], CARBON_CONFIG["dcut"])
+    x_cut = (v["rcut"], v["dcut"])
+
+    def row(amp, decay, r0, cut):
+        return [amp, decay, r0, cut[0], cut[1]]
+
+    zero = row(0.0, 1.0, 1.0, (1.0, 0.5))
+
+    def table(entries):
+        """(2, 2, 5) parameter array from {(a, b): row}."""
+        t = [[zero, zero], [zero, zero]]
+        for (a, b), r in entries.items():
+            t[a][b] = r
+        return jnp.array(t)
+
+    bond = {}
+    for c in ("dds", "ddp", "ddd"):
+        bond[c] = table({(FE, FE): row(fe[c], fe["decay"], fe["r0"], fe_cut)})
+    for c in ("sss", "sps", "pps", "ppp"):
+        bond[c] = table({(C, C): row(cv[c], cv["decay"], cv["r0"], c_cut)})
+    # mixed channels: entry [a, b] has the lower shell (s or p) on a, d on b
+    for c in ("sds", "pds", "pdp"):
+        bond[c] = table({(C, FE): row(v[c], v["decay"], v["r0"], x_cut)})
+    e_c = v["e_c"]
+    return {
+        # shells (s, p, d); iron has only d, carbon only s and p
+        "onsite": jnp.array([[0.0, 0.0, 0.0], [cv["e_s"] + e_c, e_c, 0.0]]),
+        "n0": jnp.array([[0.0, 0.0, fe["n_d"]], [2.0, 2.0, 0.0]]),
+        "hubbard": jnp.array([8.0, 8.0]),
+        "stoner": jnp.array([[0.0, 0.0, fe["stoner"]], [0.0, 0.0, 0.0]]),
+        "bond": bond,
+        "repulsion": {
+            "pair": table({
+                (FE, FE): row(fe["pair"], fe["pair_decay"], fe["r0"], fe_cut),
+                (C, C): row(cv["pair"], cv["pair_decay"], cv["r0"], c_cut),
+                (FE, C): row(v["pair"], v["pair_decay"], v["r0"], x_cut),
+                (C, FE): row(v["pair"], v["pair_decay"], v["r0"], x_cut)}),
+            # density[a, b]: what a neighbour of species b adds on an atom of a
+            "density": table({
+                (FE, FE): row(1.0, fe["density_decay"], fe["r0"], fe_cut),
+                (C, C): row(1.0, cv["density_decay"], cv["r0"], c_cut),
+                (FE, C): row(v["rho_fe"], v["rho_decay"], v["r0"], x_cut),
+                (C, FE): row(v["rho_c"], v["rho_decay"], v["r0"], x_cut)}),
+            "embed": jnp.array([[-fe["embed"], 0.5], [-cv["embed"], 0.5]]),
+        },
+    }
+
+
+def _iron_carbon_config():
+    from .bop import SpeciesSettings
+
+    fe = SpeciesSettings(basis=("d",), nmom=IRON_CONFIG["nmom"],
+                         bandwidth=IRON_CONFIG["bandwidth"], kernel="none")
+    c = SpeciesSettings(basis=CARBON_CONFIG["basis"], nmom=CARBON_CONFIG["nmom"],
+                        nexp=CARBON_CONFIG["nexp"], bandwidth=CARBON_CONFIG["bandwidth"],
+                        kernel=CARBON_CONFIG["kernel"])
+    rmax = max(IRON_CONFIG["rcut"], CARBON_CONFIG["rcut"], 3.0)
+    # the global cutoff is a hard step at the longest range; every pair is
+    # tapered inside its own radial function
+    return dict(basis=("s", "p", "d"), species=(fe, c),
+                nmom=max(IRON_CONFIG["nmom"], CARBON_CONFIG["nmom"]),
+                rcut=rmax, dcut=0.0, rcut2=rmax, dcut2=0.0, repulsion=TAPERED_V0)
+
+
+# BOPConfig settings of the iron-carbon model (pass radial=models.tapered_exp);
+# Fe-C terms must not reach beyond rcut
+IRON_CARBON_CONFIG = _iron_carbon_config()
