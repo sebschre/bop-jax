@@ -52,12 +52,31 @@ def birch_murnaghan(v, e0, v0, b0, b1):
     return e0 + 9.0 * v0 * b0 / 16.0 * ((x - 1) ** 3 * b1 + (x - 1) ** 2 * (6 - 4 * x))
 
 
-def eos(calc, a, span=0.05, n=11):
-    """Energy-volume curve around a, its Birch-Murnaghan fit and the moments."""
-    scales = np.linspace(1 - span, 1 + span, n)
+def lowest_energy(calc, a):
+    """Energy and aux at a; magnetic phases start from several moment
+    magnitudes and keep the lowest self-consistent state (with an s shell,
+    expanded bcc FM has several solutions)."""
+    phase = calc.phase
+    if phase.moments is None:
+        return calc.energy(PARAMS, a)
+    best = None
+    for f in (1.0, 0.6, 0.8, 1.2):
+        calc.phase = dataclasses.replace(phase, moments=tuple(f * m for m in phase.moments))
+        e, aux = calc.energy(PARAMS, a)
+        if calc.residual < 1e-6 and (best is None or e < best[0] - 1e-9):
+            best = (e, aux)
+    calc.phase = phase
+    return best if best is not None else (np.nan, aux)
+
+
+def eos(calc, a, span=0.05, n=11, upper=None):
+    """Energy-volume curve around a (scales 1 - span to 1 + upper, upper
+    defaulting to span), its Birch-Murnaghan fit and the moments."""
+    upper = span if upper is None else upper
+    scales = np.linspace(1 - span, 1 + upper, n)
     vols, ens, moms = [], [], []
     for s in scales:
-        e, aux = calc.energy(PARAMS, s * a)
+        e, aux = lowest_energy(calc, s * a)
         vols.append(atomic_volume(calc.phase, s * a) if not calc.extra else
                     abs(np.linalg.det(calc.phase.lattice(s * a, *calc.extra)[0])) / 2)
         ens.append(e)
@@ -146,7 +165,14 @@ def main():
     curves = {}
     for name in ("bcc FM", "bcc NM", "hcp NM", "fcc AFM", "fcc NM"):
         r = results[name]
-        curves[name] = eos(r["calc"], r["a"], span=0.07 if name == "bcc FM" else 0.05)
+        if name == "bcc FM":
+            # with an s shell the SCF has several solutions above about
+            # 13 A^3 (m = 4 states 200-400 meV too high), so stop at 1.04 a
+            upper = 0.04 if "s" in BASIS else 0.07
+            curves[name] = eos(r["calc"], r["a"], span=0.07, upper=upper,
+                               n=11 if upper == 0.07 else 9)
+        else:
+            curves[name] = eos(r["calc"], r["a"])
     v, e, m, fit = curves["bcc FM"]
     print("  bcc FM moment against volume:")
     for vi, mi in zip(v[::2], m[::2]):
