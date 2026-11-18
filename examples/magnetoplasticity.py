@@ -227,7 +227,7 @@ ends = []
 for label, site in (("A", site_a), ("B", site_b)):
     calc = Image(dislocated(site))
     t0 = time.perf_counter()
-    pos, e, ok = neb.relax(calc, dislocated(site), mobile, fmax=0.01, steps=400)
+    pos, e, ok = neb.relax(calc, dislocated(site), mobile, fmax=0.01, steps=400, verbose=True)
     print(f"end point {label}: E = {e:.5f} eV, core at x = {core_x(pos):+.3f} A, "
           f"{'converged' if ok else 'NOT converged'} ({time.perf_counter() - t0:.0f} s)")
     ends.append((pos, calc))
