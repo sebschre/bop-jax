@@ -376,16 +376,45 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
             rho = jnp.sum(fc * dens(rp["density"][sp_i, sp_j], r), axis=1)
             e_rep = emb(rp["embed"][species], rho) + 0.5 * jnp.sum(
                 fc * pair(rp["pair"][sp_i, sp_j], r), axis=1)
-        if cfg.coulomb == "frauenheim":
-            jii = params["hubbard"]
-            tp = params["taper"][sp_i, sp_j]
-            in_range = jnp.where(r < cfg.rcut2, 1.0, 0.0) * mask
-            jij = in_range * pw.taper(tp[..., 0], tp[..., 1], r) * pw.frauenheim_coulomb(
-                jii[sp_i], jii[sp_j], r)
-            e_coul = 0.5 * charge * jnp.sum(jij * charge[topo.nbr2_origin], axis=1)
-        elif cfg.coulomb != "diagonal":
-            raise ValueError(f"unknown Coulomb model {cfg.coulomb!r}")
+        if cfg.coulomb != "diagonal":
+            e_coul = coulomb_energy(r, mask, sp_i, sp_j, params, charge)
         return e_rep, e_coul
+
+    def coulomb_energy(r, mask, sp_i, sp_j, params, charge):
+        """Intersite Coulomb energy per atom."""
+        if cfg.coulomb != "frauenheim":
+            raise ValueError(f"unknown Coulomb model {cfg.coulomb!r}")
+        jii = params["hubbard"]
+        tp = params["taper"][sp_i, sp_j]
+        in_range = jnp.where(r < cfg.rcut2, 1.0, 0.0) * mask
+        jij = in_range * pw.taper(tp[..., 0], tp[..., 1], r) * pw.frauenheim_coulomb(
+            jii[sp_i], jii[sp_j], r)
+        return 0.5 * charge * jnp.sum(jij * charge[topo.nbr2_origin], axis=1)
+
+    def double_counting(occupations, positions, cell, params):
+        """The part of the energy that depends on the occupations (N, nspin,
+        nshell) explicitly: onsite and intersite Coulomb, Stoner."""
+        n_shell = jnp.sum(occupations, axis=1)
+        charge = jnp.sum(n_shell - params["n0"][species], axis=1)
+        e = 0.5 * jnp.sum(params["hubbard"][species] * charge**2)
+        if cfg.magnetic:
+            moment = occupations[:, 0] - occupations[:, 1]
+            e = e - 0.25 * jnp.sum(params["stoner"][species] * moment**2)
+        if cfg.coulomb != "diagonal":
+            rvec = pair_vectors(positions, cell, topo)
+            r = jnp.linalg.norm(rvec, axis=-1)
+            mask = jnp.asarray(topo.nbr2_mask, dtype=r.dtype)
+            sp_i = np.broadcast_to(species[:, None], topo.nbr2_origin.shape)
+            e = e + jnp.sum(coulomb_energy(r, mask, sp_i, species[topo.nbr2_origin], params,
+                                           charge))
+        return e
+
+    def potential_target(occupations, positions, cell, params):
+        """Onsite shifts that the occupations imply, dE_dc/dN, in the shape of
+        the shifts.  For exact tight binding the stationary point of the
+        energy has shifts == potential_target(occupations)."""
+        grad = jax.grad(double_counting)(occupations, positions, cell, params)
+        return grad.reshape((topo.n_atoms,) + energy.shift_shape[1:])
 
     def energy(shifts, positions, cell, params):
         rij = bond_vectors(positions, cell, topo)
@@ -447,7 +476,8 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
         e_prom = jnp.sum(e0 * (n_shell - n0), axis=1)
         e_ion = 0.5 * params["hubbard"][species] * charge**2
         e_atom = e_bond + e_prom + e_ion
-        aux = {"fermi": ef, "n_shell": n_shell, "charge": charge, "energy_bond": e_bond}
+        aux = {"fermi": ef, "n_shell": n_shell, "charge": charge, "energy_bond": e_bond,
+               "occupations": n_spin}
         if cfg.magnetic:
             moment = n_spin[:, 0] - n_spin[:, 1]  # per shell, along the local axis
             e_mag = -0.25 * jnp.sum(params["stoner"][species] * moment**2, axis=1)
@@ -470,6 +500,8 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     energy.shift_shape = (topo.n_atoms, 2, nshell) if cfg.magnetic else (topo.n_atoms, nshell)
     energy.config = cfg
     energy.topology = topo
+    energy.double_counting = double_counting
+    energy.potential_target = potential_target
     return energy
 
 

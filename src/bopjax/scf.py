@@ -146,8 +146,48 @@ def make_forces(energy_fn):
     return lambda shifts, positions, cell, params: -grad(shifts, positions, cell, params)
 
 
-def make_potential(energy_fn, tol=1e-10, max_iter=20, self_consistent=True,
-                   method="auto", free=None):
+CONDITIONS = ("stationary", "potential")
+
+
+def _anderson(residual, y0, tol, max_iter, mixing, history):
+    """Anderson (Pulay) mixing for ``residual(y) = 0`` with ``residual(y) =
+    target(y) - y``, in a ``lax.while_loop``.  Returns ``(y, max|r|, iterations)``.
+
+    The least-squares problem for the mixing coefficients is regularised
+    relative to its diagonal; a non-finite step restarts from simple mixing.
+    """
+    k = y0.shape[0]
+    dtype = y0.dtype
+
+    def mix(y, f, dy, df, count):
+        valid = (jnp.arange(history) < count).astype(dtype)
+        a = (df @ df.T) * valid[:, None] * valid[None, :]
+        a = a + jnp.diag(1e-10 * jnp.max(jnp.diag(a)) + (1.0 - valid) + 1e-300)
+        gamma = jnp.linalg.solve(a, (df @ f) * valid) * valid
+        return y + mixing * f - (dy + mixing * df).T @ gamma
+
+    def cond(state):
+        _, f, _, _, _, it = state
+        return (jnp.max(jnp.abs(f)) > tol) & (it < max_iter)
+
+    def body(state):
+        y, f, dy, df, count, it = state
+        y_new = mix(y, f, dy, df, count)
+        y_new = jnp.where(jnp.all(jnp.isfinite(y_new)), y_new, y + mixing * f)
+        f_new = residual(y_new)
+        dy = jnp.roll(dy, 1, axis=0).at[0].set(y_new - y)
+        df = jnp.roll(df, 1, axis=0).at[0].set(f_new - f)
+        return y_new, f_new, dy, df, jnp.minimum(count + 1, history), it + 1
+
+    zeros = jnp.zeros((history, k), dtype=dtype)
+    state = (y0, residual(y0), zeros, zeros, 0, 0)
+    y, f, _, _, _, it = jax.lax.while_loop(cond, body, state)
+    return y, jnp.max(jnp.abs(f)), it
+
+
+def make_potential(energy_fn, tol=1e-10, max_iter=None, self_consistent=True,
+                   method="auto", free=None, condition="stationary", mixing=0.1,
+                   history=8):
     """Return a jit-compatible ``potential(positions, cell, params, shifts0=None)``
     giving ``(E, aux)`` with the onsite levels made self-consistent inside.
 
@@ -168,7 +208,32 @@ def make_potential(energy_fn, tol=1e-10, max_iter=20, self_consistent=True,
     cluster or cylinder, whose surface moments can come close to saturation
     and leave the self-consistency with nearly flat directions.
     ``aux["scf_residual"]`` is then the residual of the free levels.
+
+    ``condition`` selects what "self-consistent" means:
+
+    * ``"stationary"`` (default): dE/d(shifts) = 0, the condition BOPfox
+      solves, by Newton's method (``max_iter`` default 20).
+    * ``"potential"``: the shifts equal the potentials their occupations imply,
+      ``shifts = dE_dc/dN`` (``energy_fn.potential_target``; onsite and
+      intersite Coulomb, Stoner), solved by Anderson mixing with parameter
+      ``mixing`` and ``history`` previous steps (``max_iter`` default 200).
+      This is the usual charge and spin self-consistency of tight binding.
+      For exact tight binding the two conditions coincide (in a perfect
+      crystal they also coincide for the BOP); in inhomogeneous systems they
+      differ by the error of the moment expansion, the amount by which the
+      BOP bond energy is not variational.  Where moments approach saturation
+      (surfaces), dN/d(shifts) nearly vanishes and the stationary point can
+      lie far away or be out of reach of Newton's method, while the
+      potential condition stays well conditioned.  The energy is then not
+      stationary in the shifts, so gradients carry the response of the
+      shifts: they are obtained by implicit differentiation of the
+      condition, one adjoint linear solve (GMRES) per gradient.
+      ``aux["scf_residual"]`` is max |shifts - dE_dc/dN|.
     """
+    if condition not in CONDITIONS:
+        raise ValueError(f"unknown self-consistency condition {condition!r}")
+    if max_iter is None:
+        max_iter = 20 if condition == "stationary" else 200
     shape = energy_fn.shift_shape
     size = int(np.prod(shape))
     if free is None:
@@ -206,9 +271,48 @@ def make_potential(energy_fn, tol=1e-10, max_iter=20, self_consistent=True,
         y, g, it = jax.lax.while_loop(cond, body, (y0, grad(y0), 0))
         return x0.at[index].set(y), jnp.max(jnp.abs(g)), it
 
+    def potential_residual(y, x0, positions, cell, params):
+        x = x0.at[index].set(y)
+        _, aux = energy_fn(x.reshape(shape), positions, cell, params)
+        target = energy_fn.potential_target(aux["occupations"], positions, cell, params)
+        return jnp.ravel(target)[index] - y
+
+    @jax.custom_vjp
+    def solve_potential(y0, x0, positions, cell, params):
+        return _anderson(lambda y: potential_residual(y, x0, positions, cell, params),
+                         y0, tol, max_iter, mixing, history)
+
+    def solve_fwd(y0, x0, positions, cell, params):
+        out = solve_potential(y0, x0, positions, cell, params)
+        return out, (out[0], x0, positions, cell, params)
+
+    def solve_bwd(res, cotangent):
+        # r(y(theta), theta) = 0  =>  theta_bar = -(dr/dtheta)^T u,
+        # (dr/dy)^T u = y_bar
+        y, x0, positions, cell, params = res
+        y_bar = cotangent[0]
+        _, vjp_y = jax.vjp(lambda v: potential_residual(v, x0, positions, cell, params), y)
+        u, _ = jax.scipy.sparse.linalg.gmres(lambda v: vjp_y(v)[0], y_bar, tol=1e-10,
+                                             atol=0.0, restart=30, maxiter=10)
+        _, vjp_t = jax.vjp(lambda p, c, par: potential_residual(y, x0, p, c, par),
+                           positions, cell, params)
+        p_bar, c_bar, par_bar = vjp_t(-u)
+        return (jnp.zeros_like(y), jnp.zeros_like(x0), p_bar, c_bar, par_bar)
+
+    solve_potential.defvjp(solve_fwd, solve_bwd)
+
     def potential(positions, cell, params, shifts0=None):
         x = jnp.zeros(size, dtype=positions.dtype) if shifts0 is None else jnp.ravel(shifts0)
         iterations = jnp.zeros((), dtype=jnp.int32)
+        if self_consistent and condition == "potential":
+            x0 = jax.lax.stop_gradient(x)
+            y, residual, iterations = solve_potential(x0[index], x0, positions, cell, params)
+            residual, iterations = jax.lax.stop_gradient((residual, iterations))
+            x = x0.at[index].set(y)
+            e, aux = energy_fn(x.reshape(shape), positions, cell, params)
+            aux = dict(aux, shifts=jax.lax.stop_gradient(x.reshape(shape)),
+                       scf_iterations=iterations, scf_residual=residual)
+            return e, aux
         if self_consistent:
             frozen = jax.lax.stop_gradient((x, positions, cell, params))
             x, residual, iterations = converge(*frozen)
