@@ -228,6 +228,8 @@ class Calculator:
                  else self._block_start(params, pos, verbose))
         x, e, aux, res = self._solver(x, pos, self.cell, params, tol, max_iter, verbose)
         if (res > 1e-6 or not self.sane(aux)) and not cold:  # warm start failed
+            if verbose or getattr(self, "trace", False):
+                print(f"  warm start failed ({res:.2e}), cold restart", flush=True)
             self._x = None
             return self.solve(params, positions, tol, max_iter, verbose)
         self.residual = res
@@ -388,7 +390,7 @@ class Calculator:
             modes[k, sel] = d[sel] / r[sel, None]
         return modes
 
-    def relax_shells(self, params, n_shells=2, gtol=2e-3, max_step=0.05):
+    def relax_shells(self, params, n_shells=2, gtol=2e-3, max_step=0.05, verbose=False):
         """Relax only the breathing modes of the first Fe shells around C
         (amplitudes in A, positive outward), starting from the current
         amplitudes.  Much cheaper than a full relaxation, which needs fresh
@@ -401,8 +403,14 @@ class Calculator:
 
         def grad(u):
             pos = base + jnp.tensordot(jnp.asarray(u), modes, 1)
-            e, _ = self.solve(params, pos, tol=1e-7)
-            return e, -np.asarray(jnp.tensordot(modes, self.forces(params, pos), 2))
+            e, aux = self.solve(params, pos, tol=1e-7)
+            g = -np.asarray(jnp.tensordot(modes, self.forces(params, pos), 2))
+            if verbose:
+                m = np.asarray(aux["moment"])
+                print(f"  shells u {np.round(u, 4)} E {e:.5f} g {np.round(g, 3)} "
+                      f"qC {float(aux['charge'][-1]):+.3f} m {np.round(m[[1, -1]], 2)} "
+                      f"hess {self.n_hessian}", flush=True)
+            return e, g
 
         # gradient descent with Barzilai-Borwein steps, at most max_step A
         # per iteration: small moves keep every warm start close
