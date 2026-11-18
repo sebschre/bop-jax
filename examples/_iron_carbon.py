@@ -330,7 +330,7 @@ class Calculator:
         """Forces at the last self-consistent levels (call ``solve`` first)."""
         return -self._dpos(self._x, positions, self.cell, params)
 
-    def relax(self, params, ftol=5e-3, steps=200, fixed=None):
+    def relax(self, params, ftol=5e-3, steps=200, fixed=None, verbose=False):
         """Relax the atoms at fixed cell (FIRE), starting from the current
         positions; ``fixed`` atoms do not move.  Returns the energy and aux."""
         pos = self.positions
@@ -359,9 +359,12 @@ class Calculator:
             if longest > 0.1:  # no atom moves more than 0.1 A per step
                 step, v = step * 0.1 / longest, v * 0.1 / longest
             pos = pos + step
-            self.solve(params, pos, tol=1e-7)
+            e, aux = self.solve(params, pos, tol=1e-7, verbose=verbose)
             f = self.forces(params, pos) * keep
             self.n_steps += 1
+            if verbose:
+                print(f" relax {self.n_steps} E {e:.6f} fmax {float(jnp.max(jnp.abs(f))):.4f} "
+                      f"m {np.round(np.asarray(aux['moment'])[[1, 3, 16]], 3)}", flush=True)
         self.positions = pos
         self.max_force = float(jnp.max(jnp.abs(f)))
         return self.solve(params, pos)
