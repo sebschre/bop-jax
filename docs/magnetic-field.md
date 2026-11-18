@@ -118,3 +118,22 @@ spin-orbit coupling for fields along the line, the glide direction and the
 plane normal (orbital moments and direction dependence; the anisotropy is
 not converged with the number of moments, see
 [Spin-orbit coupling](spin-orbit.md)).
+
+The onsite levels are self-consistent in the mobile region and a buffer
+around it, and frozen at the bulk values in the rest of the fixed shell
+(`make_potential(..., free=mask)`): the surface moments of the cylinder reach
+2.95-3.01 muB, close to the d-band limit, which leaves the self-consistency
+with nearly flat directions.
+
+**Status: not yet run to completion.** On a 4-core cloud machine without GPU
+the self-consistency of the 9-moment iron model in a cylinder one b long is
+the obstacle. For 61 atoms (clusters of 529 members, the periodic images
+along the short line included) one energy and force at fixed levels costs
+about 1 s, but the compiled Newton loop with Krylov steps needs 16-20 s per
+step and converges only linearly, stalling near a residual of 1e-2 with or
+without the frozen outer shell; undamped dense Newton steps diverge, and
+the damped solver of `make_scf` needs more than 15 GB for 122 unknowns. A
+Peierls path of 5 images and a few hundred NEB steps is out of reach there.
+Running it needs a GPU, a damped and preconditioned solver inside
+`make_potential`, or a fully periodic quadrupole cell without free surfaces.
+No result for iron is therefore quoted here.

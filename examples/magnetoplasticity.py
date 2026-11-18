@@ -37,9 +37,21 @@ The magnetisation of the collinear model is along z (the line direction); it
 is isotropic without spin-orbit coupling, so only the field component along
 the magnetisation matters there.
 
-Size: --radius 20 --fixed 10 gives 213 atoms (55 mobile); a stiffer test of
-the boundary is --radius 26 --fixed 12.  The NEB is the expensive part
-(5 images x 100-300 steps of a self-consistent energy and force).
+The onsite levels are self-consistent in the mobile region and a buffer
+around it (--free-buffer) and frozen at the bulk values further out.
+
+Status: this script has not been run to completion.  On a 4-core cloud
+machine (no GPU) the self-consistency of the 9-moment iron model in a
+cylinder that is one b long is the obstacle: one energy and force of 61
+atoms costs about 1 s at fixed levels, and the compiled Newton loop needs
+16-20 s per step with Krylov steps; those converge only linearly and stall
+near a residual of 1e-2 (without and with the frozen outer shell), while
+undamped dense Newton steps diverge, and the damped solver of ``make_scf``
+needs more than 15 GB for 122 unknowns.  Expect to need a GPU, a more robust
+(damped, preconditioned) solver inside ``make_potential``, or a fully
+periodic quadrupole cell without free surfaces.  The tools it uses
+(``bopjax.zeeman``, ``bopjax.neb``) are tested on small systems in
+tests/test_zeeman.py.
 
     uv run python examples/magnetoplasticity.py [--basis sd] [--xi 0.05] [--out profile.npz]
 """
@@ -64,6 +76,10 @@ parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
 parser.add_argument("--basis", default="d", choices=("d", "sd"))
 parser.add_argument("--radius", type=float, default=20.0, help="cylinder radius (A)")
 parser.add_argument("--fixed", type=float, default=10.0, help="fixed outer shell (A)")
+parser.add_argument("--free-buffer", type=float, default=4.0,
+                    help="fixed atoms within this distance of the mobile region keep "
+                         "self-consistent onsite levels (A)")
+parser.add_argument("--solver", default="auto", choices=("auto", "dense", "krylov"))
 parser.add_argument("--images", type=int, default=5, help="images between the end points")
 parser.add_argument("--fmax", type=float, default=0.02, help="NEB force tolerance (eV/A)")
 parser.add_argument("--steps", type=int, default=400, help="NEB steps")
@@ -114,10 +130,12 @@ def lattice_and_elastic_constants():
             e[k, m] += h / 2
             e[m, k] += h / 2
             c[:, :, k, m] = c[:, :, m, k] = (sigma(a1, e) - sigma(a1, -e)) / (2 * h)
-    return a1, c
+    bulk = bj.make_scf(bj.make_energy_fn(topo, cfg, radial=v0_bond))(
+        jnp.array(a1 * frac), jnp.array(a1 * np.eye(3)), params, shifts0=s0, tol=1e-12)
+    return a1, c, np.asarray(bulk.shifts[0])
 
 
-a, c_cubic = lattice_and_elastic_constants()
+a, c_cubic, bulk_shifts = lattice_and_elastic_constants()
 b = a * np.sqrt(3) / 2
 print(f"model ({args.basis}): a0 = {a:.4f} A, C11 = {c_cubic[0, 0, 0, 0] * GPA:.1f}, "
       f"C12 = {c_cubic[0, 0, 1, 1] * GPA:.1f}, C44 = {c_cubic[1, 2, 1, 2] * GPA:.1f} GPa")
@@ -132,11 +150,16 @@ site_a = cols.easy_core_site()
 hop = a * np.sqrt(2.0 / 3.0)
 site_b = site_a + np.array([hop, 0.0])
 mid = 0.5 * (site_a + site_b)
-mobile = np.hypot(*(ref[:, :2] - mid).T) < args.radius - args.fixed
+rho = np.hypot(*(ref[:, :2] - mid).T)
+mobile = rho < args.radius - args.fixed
+# onsite levels: self-consistent inside, frozen at the bulk values in the outer
+# part of the fixed shell, whose surface moments would otherwise approach
+# saturation (nearly flat directions of the self-consistency)
+free = rho < args.radius - args.fixed + args.free_buffer
 side = 2 * args.radius + 2 * (cfg.rcut + 1.0)
 cell = np.diag([side, side, b])
 n_atoms = len(ref)
-print(f"{n_atoms} atoms, {mobile.sum()} mobile, one b = {b:.4f} A along [111]; easy cores "
+print(f"{n_atoms} atoms, {mobile.sum()} mobile, {free.sum()} with self-consistent levels, one b = {b:.4f} A along [111]; easy cores "
       f"at x = {site_a[0]:+.3f} and {site_b[0]:+.3f} A")
 
 
@@ -161,14 +184,15 @@ def core_x(pos):
 
 class Image:
     def __init__(self, positions):
-        self.shifts = start_shifts(n_atoms)
+        self.shifts = jnp.tile(jnp.asarray(bulk_shifts)[None], (n_atoms, 1, 1))
         self._build(positions)
 
     def _build(self, positions):
         self.topo = bj.build_topology(np.asarray(positions), [0] * n_atoms, cfg.rcut, cfg.nmom,
                                       cell, rcut2=cfg.rcut2, skin=0.6)
         self.energy_fn = bj.make_energy_fn(self.topo, cfg, radial=v0_bond)
-        potential = bj.make_potential(self.energy_fn)
+        potential = bj.make_potential(self.energy_fn, max_iter=40, method=args.solver,
+                                      free=free)
         self._value_grad = jax.jit(jax.value_and_grad(
             lambda p, s0, par: potential(p, jnp.asarray(cell), par, s0), has_aux=True))
 
@@ -177,6 +201,9 @@ class Image:
             self._build(positions)
         par = params if field is None else dict(params, magnetic_field=jnp.asarray(field))
         (e, aux), g = self._value_grad(jnp.asarray(positions), self.shifts, par)
+        if float(aux["scf_residual"]) > 1e-6:
+            print(f"   warning: self-consistency residual {float(aux['scf_residual']):.1e}",
+                  flush=True)
         if field is None:
             self.shifts = aux["shifts"]
         self.aux = aux
