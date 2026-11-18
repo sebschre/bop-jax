@@ -115,7 +115,15 @@ class Calculator:
 
         self._full = jax.jit(full)
         self._vg = jax.jit(jax.value_and_grad(e_of, has_aux=True))
-        self._hess = jax.jit(jax.jacfwd(jax.grad(e_only)))
+        grad_x = jax.grad(e_only)
+
+        def hessian(x, pos, cell, params):
+            # columns in small batches: all tangents at once need ~20 GB
+            def column(v):
+                return jax.jvp(lambda y: grad_x(y, pos, cell, params), (x,), (v,))[1]
+            return jax.lax.map(column, jnp.eye(len(x), dtype=x.dtype), batch_size=4)
+
+        self._hess = jax.jit(hessian)
         self._dpos = jax.jit(jax.grad(e_only, argnums=1))
         self._dstrain = jax.jit(jax.grad(strained))
         self.cell = jnp.asarray(c.cell)
@@ -146,22 +154,32 @@ class Calculator:
         (e, aux), g = self._vg(x, pos, self.cell, params)
         if self._hinv is None:
             self._new_hessian(x, pos, params)
-        fresh = False
+        fresh, stale = False, False
         for _ in range(max_iter):
             norm = float(jnp.max(jnp.abs(g)))
             if norm < tol:
                 break
-            x_new = x - self._hinv @ g
-            (e_new, aux_new), g_new = self._vg(x_new, pos, self.cell, params)
-            norm_new = float(jnp.max(jnp.abs(g_new)))
-            if not np.isfinite(norm_new) or norm_new > 0.5 * norm:
-                if not fresh:  # stale Hessian: rebuild here and retry
-                    self._new_hessian(x, pos, params)
-                    fresh = True
-                    continue
-                if not np.isfinite(norm_new) or norm_new > norm:
+            if stale and not fresh:
+                self._new_hessian(x, pos, params)
+                fresh = True
+            step = -(self._hinv @ g)
+            accepted = False
+            for _ in range(6):  # backtracking: far from the solution Newton overshoots
+                x_new = x + step
+                (e_new, aux_new), g_new = self._vg(x_new, pos, self.cell, params)
+                norm_new = float(jnp.max(jnp.abs(g_new)))
+                if np.isfinite(norm_new) and norm_new < 0.9 * norm:
+                    accepted = True
+                    break
+                step = 0.5 * step
+            if not accepted:
+                if fresh:
                     break  # Newton itself fails
-            fresh = norm_new > 0.5 * norm and fresh
+                stale = True
+                continue
+            # slow progress with an old Hessian: rebuild it at the next step
+            stale = norm_new > 0.3 * norm
+            fresh = False
             x, e, aux, g = x_new, e_new, aux_new, g_new
         self.residual = float(jnp.max(jnp.abs(g)))
         if self.residual > 1e-6:
