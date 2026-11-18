@@ -144,7 +144,8 @@ class Calculator:
 
     def _new_hessian(self, x, pos, params):
         h = self._hess(x, pos, self.cell, params)
-        self._hinv = jnp.linalg.pinv(h, rtol=1e-10, hermitian=True)
+        # soft modes (|eigenvalue| < 1e-3 of the largest) make the step blow up
+        self._hinv = jnp.linalg.pinv(0.5 * (h + h.T), rtol=1e-3, hermitian=True)
         self.n_hessian += 1
 
     def solve(self, params, positions=None, tol=1e-8, max_iter=60, verbose=False):
