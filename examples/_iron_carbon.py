@@ -261,15 +261,19 @@ class Calculator:
         """Continuation in the Stoner integral of iron from the non-magnetic
         levels: the moments grow step by step, each step warm-started."""
         x_nm = np.asarray(self._nm._x)
-        x = []
-        for xi, sp in zip(x_nm, self.species):  # a small seed moment on iron
-            x += [xi - 0.05, xi + 0.05] if sp == FE else [xi]
-        x = jnp.asarray(x)
         stoner = params["stoner"]
+        x, magnetic = None, False
         for scale in scales:
             p = dict(params, stoner=stoner * scale)
+            if not magnetic:  # the non-magnetic state is stationary too: seed a moment
+                split = 0.5 * float(p["stoner"][FE, 2]) * 1.5
+                x = []
+                for xi, sp in zip(x_nm, self.species):
+                    x += [xi - split, xi + split] if sp == FE else [xi]
+                x = jnp.asarray(x)
             self._solver.h = None
             x, e, aux, res = self._solver(x, pos, self.cell, p, tol, max_iter, verbose)
+            magnetic = float(jnp.mean(jnp.abs(aux["moment"]))) > 0.2
             if verbose:
                 print(f"  Stoner x {scale}: |g| {res:.2e} "
                       f"mean m {float(jnp.mean(jnp.abs(aux['moment']))):.2f}", flush=True)
