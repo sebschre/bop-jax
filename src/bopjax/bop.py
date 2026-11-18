@@ -73,6 +73,9 @@ class BOPConfig:
     # per-species shells and expansion settings, one SpeciesSettings per
     # species; None: every species has all of ``basis`` and the settings above
     species: tuple[SpeciesSettings, ...] | None = None
+    # one onsite shift per atom (and spin) for all its shells, instead of one
+    # per shell: self-consistency in the atomic charge (and moment) only
+    atomic_shifts: bool = False
 
     @property
     def n_expansion(self) -> int:
@@ -324,7 +327,13 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     (see ``make_orbital_moment``).
 
     ``shifts`` has shape ``energy.shift_shape``: (N, nshell), or (N, 2, nshell)
-    for magnetic calculations (spin up, spin down).
+    for magnetic calculations (spin up, spin down).  With
+    ``cfg.atomic_shifts`` the last axis has length 1: every shell of an atom
+    is shifted by the same amount (per spin channel), so that only the atomic
+    charge and moment are made self-consistent.  With several shells the
+    relative position of their levels is then fixed by ``onsite``; with one
+    shift per shell it is a further unknown that, in a truncated expansion,
+    need not have a stationary point (seen for carbon in iron).
     """
     if cfg.spin not in SPIN_MODES:
         raise ValueError(f"unknown spin mode {cfg.spin!r}")
@@ -463,7 +472,8 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
             hblk = hblk * (om[species][:, None, :, None] * om[species[topo.nbr_origin]][:, :, None, :])
             starts = layout.starts
         e0 = params["onsite"][species]  # (N, nshell)
-        levels = e0[:, None, :] + shifts.reshape(topo.n_atoms, nspin, nshell)
+        nshift = 1 if cfg.atomic_shifts else nshell
+        levels = e0[:, None, :] + shifts.reshape(topo.n_atoms, nspin, nshift)
         orb_levels = levels[:, :, orb_shell]  # (N, nspin, norb)
         if cfg.spin == "noncollinear":
             spin_orbit = None
@@ -519,7 +529,8 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
                    sigma=squeeze(loc[2]), moments=squeeze(mu))
         return jnp.sum(e_atom), aux
 
-    energy.shift_shape = (topo.n_atoms, 2, nshell) if cfg.magnetic else (topo.n_atoms, nshell)
+    nshift = 1 if cfg.atomic_shifts else nshell
+    energy.shift_shape = (topo.n_atoms, 2, nshift) if cfg.magnetic else (topo.n_atoms, nshift)
     energy.config = cfg
     energy.topology = topo
     return energy

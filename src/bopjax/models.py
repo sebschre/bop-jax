@@ -201,7 +201,7 @@ def carbon(**values):
 # level wanders in the gap of diamond and the energy is not smooth.
 CARBON_CONFIG = dict(nmom=10, nexp=20, kernel="jackson", bandwidth="averaged",
                      basis=("s", "p"), rcut=2.2, dcut=0.3, rcut2=2.2, dcut2=0.3,
-                     repulsion=pw.V0)
+                     repulsion=pw.V0, atomic_shifts=True)
 
 
 # --- iron-carbon: the d iron model and the sp carbon model with d-sp cross terms ---
@@ -322,7 +322,8 @@ def _iron_carbon_config():
     # tapered inside its own radial function
     return dict(basis=("s", "p", "d"), species=(fe, c),
                 nmom=max(IRON_CONFIG["nmom"], CARBON_CONFIG["nmom"]),
-                rcut=rmax, dcut=0.0, rcut2=rmax, dcut2=0.0, repulsion=TAPERED_V0)
+                rcut=rmax, dcut=0.0, rcut2=rmax, dcut2=0.0, repulsion=TAPERED_V0,
+                atomic_shifts=True)
 
 
 # BOPConfig settings of the iron-carbon model (pass radial=models.tapered_exp);
