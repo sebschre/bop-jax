@@ -405,3 +405,20 @@ def test_md_with_fixed_atoms():
     # two moving atoms: six degrees of freedom
     assert float(md.temperature(state)) == pytest.approx(
         2 * float(md.kinetic_energy(state)) / (6 * md.KB_EV))
+
+
+def test_exact_rebuild_check():
+    # a rigid shift of everything by more than skin / 2 keeps every pair; the
+    # displacement rule rebuilds, the pair check does not, and it does once a
+    # pair really comes into range
+    a = 2.87
+    frac = np.array([[0, 0, 0], [0.5, 0.5, 0.5]])
+    cell = 2 * a * np.eye(3)
+    pos = np.concatenate([(frac + np.array(o)) * a for o in np.ndindex(2, 2, 2)])
+    topo = bj.build_topology(pos, [0] * len(pos), 2.6, 4, cell, rcut2=2.6, skin=0.2)
+    moved = pos + 0.5
+    assert bj.needs_rebuild(moved, topo)
+    assert not bj.needs_rebuild(moved, topo, cell, 2.6, 2.6)
+    squeezed = pos.copy()
+    squeezed[1] += np.array([0.0, 0.0, -0.5])  # second neighbour comes within 2.6 A
+    assert bj.needs_rebuild(squeezed, topo, cell, 2.6, 2.6)

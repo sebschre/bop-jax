@@ -57,6 +57,7 @@ tests/test_zeeman.py.
 """
 
 import argparse
+import os
 import time
 
 import jax
@@ -95,6 +96,8 @@ parser.add_argument("--xi", type=float, default=0.0,
                     help="d spin-orbit constant (eV) for the orbital moments; 0 to skip")
 parser.add_argument("--batch", type=int, default=16,
                     help="atoms whose moments are evaluated at once (memory)")
+parser.add_argument("--ends", default=None,
+                    help="file (.npz) with relaxed end points: read if present, else written")
 parser.add_argument("--out", default=None, help="save the path and moments (.npz)")
 args = parser.parse_args()
 
@@ -205,7 +208,8 @@ class Image:
             lambda p, s0, par: potential(p, jnp.asarray(cell), par, s0), has_aux=True))
 
     def __call__(self, positions, field=None):
-        if bj.needs_rebuild(jnp.asarray(positions), self.topo):
+        if bj.needs_rebuild(positions, self.topo, cell, cfg.rcut, cfg.rcut2):
+            print("   (neighbour lists rebuilt)", flush=True)
             self._build(positions)
         par = params if field is None else dict(params, magnetic_field=jnp.asarray(field))
         (e, aux), g = self._value_grad(jnp.asarray(positions), self.shifts, par)
@@ -227,12 +231,24 @@ class Image:
 # --- end points and the Peierls path ----------------------------------------------
 
 ends = []
+saved = {}
+if args.ends and os.path.exists(args.ends):
+    saved = dict(np.load(args.ends))
+    print(f"end points read from {args.ends}")
 for label, site in (("A", site_a), ("B", site_b)):
-    calc = Image(dislocated(site))
-    t0 = time.perf_counter()
-    pos, e, ok = neb.relax(calc, dislocated(site), mobile, fmax=0.01, steps=400, verbose=True)
-    print(f"end point {label}: E = {e:.5f} eV, core at x = {core_x(pos):+.3f} A, "
-          f"{'converged' if ok else 'NOT converged'} ({time.perf_counter() - t0:.0f} s)")
+    if label in saved:
+        pos = saved[label]
+        calc = Image(pos)
+    else:
+        calc = Image(dislocated(site))
+        t0 = time.perf_counter()
+        pos, e, ok = neb.relax(calc, dislocated(site), mobile, fmax=0.01, steps=400,
+                               verbose=True)
+        print(f"end point {label}: E = {e:.5f} eV, core at x = {core_x(pos):+.3f} A, "
+              f"{'converged' if ok else 'NOT converged'} ({time.perf_counter() - t0:.0f} s)")
+        saved[label] = pos
+        if args.ends:
+            np.savez(args.ends, **saved)
     ends.append((pos, calc))
 e_ends = [c(pos)[0] for pos, c in ends]
 print(f"E(B) - E(A) = {1e3 * (e_ends[1] - e_ends[0]):+.3f} meV (zero by symmetry, up to the "
