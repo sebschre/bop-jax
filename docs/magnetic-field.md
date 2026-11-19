@@ -165,9 +165,35 @@ What was tried at that configuration:
   potential-condition energy is wrong to first order (see
   [Formulation](formulation.md#potential-self-consistency)).
 
-So past the fold of the core moment neither self-consistency condition gives
-a trustworthy energy for this model. Options: check whether the fold
-survives more moments or a Jackson kernel (both change the fitted model),
-the sd model (`IRON_SD_FIT`), or a constrained core moment; or relax the
-band images perpendicular to the path before the fold is reached, in case
-it is an artefact of unrelaxed intermediate images.
+**The fold is a property of the model, not of the band.** A drag
+calculation (the z coordinates of the five core columns that move between
+the end points fixed at `(1 - f) A + f B`, every other mobile atom relaxed
+to 0.02 eV/A, each f continued from the previous relaxed positions and
+levels) shows it in relaxed images and under both conditions:
+
+| f | potential condition: E - E_A (meV), m_0 (muB) | stationary core (10 atoms, shell levels frozen): E - E_A (meV), m_0 (muB) |
+|---|---|---|
+| 0.1 | 9.9, 2.26 | |
+| 0.2 | 28.4, 2.13 | (m_0 = 1.99 at the same positions) |
+| 0.25 | | 33.3, 1.90 |
+| 0.3 | relaxation drives m_0 from 1.99 to 1.47, then no solution | 44.7, 1.74 |
+| 0.35 | | relaxation drives m_0 from 1.69 to 1.29 (Newton needs 16 steps), then no solution (residual 0.1 after 30 steps, m_0 -> 0.84) |
+
+E_A is that of the same condition at A (the two differ by 19 meV). At fixed
+f the relaxation lowers the energy by reducing the moment of the central
+column (atom 0, the column the core passes), with forces of 0.02-0.08 eV/A,
+until the self-consistent branch ends; the stationary condition follows it
+somewhat further (to f = 0.35) than the potential condition (f = 0.3).
+Within this d-band model the moment of that column collapses as the core
+leaves the easy site, at a turning point of the self-consistency. The
+stationary condition also gives systematically lower core moments than the
+potential condition (by 0.1-0.15 muB at f = 0.1-0.2) and core energies lower
+by about 19 meV.
+
+So the Peierls path of this model passes a magnetic transition of the core,
+and neither solver follows it through the turning point. Ways forward:
+continuation through the turning point (arc-length continuation, or a
+constrained moment of atom 0 as an extra path parameter, `E(f, m_0)`), which
+also gives the size of the moment change that enters `dE_P/dB`; and checking
+whether the collapse survives the sd model (`IRON_SD_FIT`) or more moments,
+before reading anything physical into it.
