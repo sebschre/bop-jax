@@ -190,10 +190,25 @@ stationary condition also gives systematically lower core moments than the
 potential condition (by 0.1-0.15 muB at f = 0.1-0.2) and core energies lower
 by about 19 meV.
 
+**The sd model (`IRON_SD_FIT`) shows the same collapse, earlier.** Same
+drag, stationary condition on the 10 core atoms, end point A relaxed with
+the sd model from the d-model geometry (moment of the central column 1.98
+muB at A, against 2.21 in the d model):
+
+| f | E - E_A (meV) | m_0 (muB) |
+|---|---|---|
+| 0.15 | 5.3 (relaxed to 0.03 eV/A) | 1.72 |
+| 0.3 | first steps 58 -> 47 -> 33 while m_0 falls 1.39 -> 1.32 -> 1.04 (Newton 8, 8, 22 steps), then no solution (residual 0.05 after 30 steps, jumping to a reversed moment) | |
+
+So the collapse of the central column's moment is not specific to the d
+basis: with the s shell it starts from a lower moment and sets in between
+f = 0.15 and 0.3, where it is between 0.3 and 0.35 in the d model.
+
 So the Peierls path of this model passes a magnetic transition of the core,
 and neither solver follows it through the turning point. Ways forward:
 continuation through the turning point (arc-length continuation, or a
 constrained moment of atom 0 as an extra path parameter, `E(f, m_0)`), which
 also gives the size of the moment change that enters `dE_P/dB`; and checking
-whether the collapse survives the sd model (`IRON_SD_FIT`) or more moments,
-before reading anything physical into it.
+whether it survives more moments, and how it compares with DFT for the core
+moments of a moving screw dislocation, before reading anything physical into
+it.
