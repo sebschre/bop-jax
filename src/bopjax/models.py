@@ -202,3 +202,59 @@ def carbon(**values):
 CARBON_CONFIG = dict(nmom=10, nexp=20, kernel="jackson", bandwidth="averaged",
                      basis=("s", "p"), rcut=2.2, dcut=0.3, rcut2=2.2, dcut2=0.3,
                      repulsion=pw.V0)
+
+
+# Fe part of the magnetic Fe-Co BOP of Egorov, Subramanyam, Yuan, Drautz and
+# Hammerschmidt, arXiv:2208.12973 (Supplemental Material, Table 1): d-valent,
+# bond integrals as sums of exponentials, square-root embedding of Gaussian
+# densities, pair, core and environment-dependent Yukawa repulsion
+IRON_EGOROV = {
+    "N": 6.98, "stoner": 0.751,
+    "dds": [(-20.10578, 1.68256, 0.83602), (-3.09201, 0.38260, 2.44521),
+            (3.20957, 0.29985, 6.02389)],
+    "ddp": [(29.59495, 1.47219, 1.27945), (13.96316, 0.94631, 1.76772)],
+    "ddd": [(-10.14975, 1.90305, 1.19157), (-42.05214, 2.58244, 1.07279)],
+    "embed": (4.36232, 0.26944, 0.03008),
+    "pair": (155.20896, 1.28421, 1.60531), "core": (1.5, 100.0),
+    "yukawa": {"B": 1.24913, "r_core": 1.06402, "lambda0": 1.99623, "C": 113.85788,
+               "upsilon": 1.78242, "m": 1.18487},
+}
+
+# BOPConfig settings of the Egorov Fe model (pass radial=pairwise.exp_sum): 9 moments,
+# Jackson kernel with 200 expansion coefficients and a constant terminator;
+# cutoffs 4.1 (1.0) A for the bond integrals, 6.0 (0.5) A for embedding and repulsion.
+# The bandwidth estimate is not given in the paper.
+IRON_EGOROV_CONFIG = dict(nmom=9, nexp=200, kernel="jackson", terminator="constantabn",
+                          bandwidth="averaged", rcut=4.1, dcut=1.0, rcut2=6.0, dcut2=0.5,
+                          repulsion=pw.EGOROV, yukawa=True)
+
+
+def iron_egorov(hubbard=8.0, **values):
+    """Parameters of the Egorov et al. Fe model (``IRON_EGOROV``, overridable by
+    keyword).  Use with ``BOPConfig(**IRON_EGOROV_CONFIG, spin=...)`` and
+    ``radial=pairwise.exp_sum``.  ``hubbard`` (not part of the published model)
+    keeps atoms close to charge neutrality in inhomogeneous structures."""
+    v = {k: val for k, val in IRON_EGOROV.items()}
+    v.update(values)
+
+    def channel(terms):
+        flat = [x for t in terms for x in t]
+        flat += [0.0, 1.0, 1.0] * (3 - len(terms))  # pad to three terms
+        return jnp.array([[flat]])
+
+    y = v["yukawa"]
+    return {
+        "onsite": jnp.array([[0.0]]),
+        "n0": jnp.array([[v["N"]]]),
+        "hubbard": jnp.array([hubbard]),
+        "stoner": jnp.array([[v["stoner"]]]),
+        "bond": {c: channel(v[c]) for c in ("dds", "ddp", "ddd")},
+        "repulsion": {
+            "pair": jnp.array([[[*v["pair"], *v["core"]]]]),
+            "density": jnp.array([[list(v["embed"])]]),
+            "embed": jnp.array([[-1.0, 0.5]]),
+        },
+        "yukawa": {"B": jnp.array([[y["B"]]]), "r_core": jnp.array([[y["r_core"]]]),
+                   "C": jnp.array([[y["C"]]]), "upsilon": jnp.array([[y["upsilon"]]]),
+                   "lambda0": jnp.array([y["lambda0"]]), "m": jnp.array([y["m"]])},
+    }

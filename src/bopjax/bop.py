@@ -50,6 +50,7 @@ class BOPConfig:
     spin: str = "none"  # see SPIN_MODES
     spin_orbit: bool = False  # onsite xi L.S (spin = "noncollinear" only)
     repulsion: pw.Repulsion | None = None
+    yukawa: bool = False  # environment-dependent Yukawa repulsion (params["yukawa"])
     coulomb: str = "diagonal"  # "diagonal" (onsite only) or "frauenheim"
     screening: bool = False  # environment-dependent d-d bond integrals
     batch: int = 64  # atoms whose moments are evaluated at once (memory)
@@ -256,6 +257,8 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
       "repulsion" {"pair", "density": (nspecies, nspecies, npar),
                    "embed": (nspecies, npar)}                  [cfg.repulsion]
       "taper"     (nspecies, nspecies, 2)   R1, R2             [cfg.coulomb]
+      "yukawa"    {"B", "r_core", "C", "upsilon": (nspecies, nspecies),
+                   "lambda0", "m": (nspecies,)}               [cfg.yukawa]
       "screening" {"sds", "sds_overlap", "dds_overlap", "ddp_overlap",
                    "ddd_overlap": (nspecies, nspecies, npar)}  [cfg.screening]
 
@@ -320,7 +323,7 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
         raise ValueError("screening acts on d-d bond integrals; the basis has no d shell")
     nbr_reverse = reverse_slots(topo) if cfg.screening else None
     screening_radial = radial if screening_radial is None else screening_radial
-    needs_pairs = cfg.repulsion is not None or cfg.coulomb != "diagonal"
+    needs_pairs = cfg.repulsion is not None or cfg.coulomb != "diagonal" or cfg.yukawa
     if needs_pairs and topo.nbr2_mask is None:
         raise ValueError("build the topology with rcut2 for repulsion or Coulomb terms")
 
@@ -395,6 +398,9 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
             rho = jnp.sum(fc * dens(rp["density"][sp_i, sp_j], r), axis=1)
             e_rep = emb(rp["embed"][species], rho) + 0.5 * jnp.sum(
                 fc * pair(rp["pair"][sp_i, sp_j], r), axis=1)
+        if cfg.yukawa:
+            e_rep = e_rep + pw.yukawa_energy(params["yukawa"], r, mask, species, sp_i, sp_j,
+                                             topo.nbr2_origin, cfg.rcut2, cfg.dcut2)
         if cfg.coulomb != "diagonal":
             e_coul = coulomb_energy(r, mask, sp_i, sp_j, params, charge)
         return e_rep, e_coul
