@@ -251,8 +251,12 @@ def iron_egorov(hubbard=8.0, **values):
         "bond": {c: channel(v[c]) for c in ("dds", "ddp", "ddd")},
         "repulsion": {
             "pair": jnp.array([[[*v["pair"], *v["core"]]]]),
-            "density": jnp.array([[list(v["embed"])]]),
-            "embed": jnp.array([[-1.0, 0.5]]),
+            # E_emb = -p1 sqrt(sum_j exp(-p2 (r - p3)^2)): with p1 inside the square
+            # root, as Eqs. 6-7 of the paper read, bcc Fe binds by -4.9 eV/atom at
+            # a = 3.05 A; with p1 in front it binds by -8.30 eV/atom at 2.83 A, the
+            # DFT energy the model was fitted to (-8.31 eV/atom, a = 2.84 A)
+            "density": jnp.array([[[1.0, v["embed"][1], v["embed"][2]]]]),
+            "embed": jnp.array([[-v["embed"][0], 0.5]]),
         },
         "yukawa": {"B": jnp.array([[y["B"]]]), "r_core": jnp.array([[y["r_core"]]]),
                    "C": jnp.array([[y["C"]]]), "upsilon": jnp.array([[y["upsilon"]]]),

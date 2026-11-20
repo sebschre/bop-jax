@@ -68,7 +68,7 @@ def _gaussian_density(p, r):
 
 
 # Egorov et al.: pair and core repulsion, square-root embedding of Gaussian
-# densities (embed row [-1, 0.5])
+# densities (embed row [-p1, 0.5], density row [1, p2, p3]; see models.iron_egorov)
 EGOROV = Repulsion(pair=_egorov_pair, density=_gaussian_density, embed=_power_embed)
 
 
