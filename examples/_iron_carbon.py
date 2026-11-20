@@ -105,6 +105,17 @@ class Calculator:
         self._forces = jax.jit(lambda pos, cell, p, x0: -jax.grad(
             lambda q: potential(q, cell, p, x0)[0])(pos))
         self._stress = jax.jit(bj.make_stress(potential))
+        # partial derivatives at fixed shifts: no adjoint solve, error first
+        # order in the stationarity residual; used inside fits
+        self._fpart = jax.jit(lambda x, pos, cell, p: -jax.grad(
+            lambda q: energy(x, q, cell, p)[0])(pos))
+
+        def strained(strain, x, pos, cell, p):
+            deform = jnp.eye(3) + 0.5 * (strain + strain.T)
+            return energy(x, pos @ deform, cell @ deform, p)[0]
+
+        self._spart = jax.jit(jax.grad(strained))
+        self.exact = True  # exact (implicit) or partial derivatives
         self.cell = jnp.asarray(c.cell)
         self.positions = jnp.asarray(c.positions)
         self.n_atoms = len(c.positions)
@@ -146,8 +157,11 @@ class Calculator:
         return float(e), aux
 
     def forces(self, params, positions):
-        """Forces (implicit differentiation of the potential condition)."""
-        return self._forces(positions, self.cell, params, self._x)
+        """Forces: exact (implicit differentiation of the potential condition)
+        or, with ``exact = False``, partial derivatives at the last shifts."""
+        if self.exact:
+            return self._forces(positions, self.cell, params, self._x)
+        return self._fpart(self._x, positions, self.cell, params)
 
     def relax(self, params, ftol=5e-3, steps=200, fixed=None, verbose=False):
         """Relax the atoms at fixed cell (FIRE), starting from the current
@@ -251,7 +265,12 @@ class Calculator:
     def stress(self, params):
         """Stress (3, 3) in GPa at the current positions, positive tensile."""
         self.solve(params)
-        return np.asarray(self._stress(self.positions, self.cell, params, self._x)) * EV_A3_TO_GPA
+        if self.exact:
+            s = self._stress(self.positions, self.cell, params, self._x)
+        else:
+            s = self._spart(jnp.zeros((3, 3)), self._x, self.positions, self.cell, params)
+            s = s / self.volume()
+        return np.asarray(s) * EV_A3_TO_GPA
 
     def volume(self):
         return float(abs(np.linalg.det(np.asarray(self.cell))))
