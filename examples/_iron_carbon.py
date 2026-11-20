@@ -90,7 +90,10 @@ class Calculator:
         self.c = c
         self.species = np.asarray(c.species)
         self._config = IRON_CARBON_CONFIG if config is None else config
-        self.cfg = bj.BOPConfig(spin="collinear" if c.magnetic else "none", **self._config)
+        # remat: recompute the moment walks in the backward pass; the forces
+        # of Fe16C otherwise need more than 15 GB
+        self.cfg = bj.BOPConfig(spin="collinear" if c.magnetic else "none",
+                                **dict(dict(remat=True), **self._config))
         topo = bj.build_topology(c.positions, c.species, self.cfg.rcut, self.cfg.nmom,
                                  c.cell, rcut2=self.cfg.rcut2, skin=skin)
         energy = bj.make_energy_fn(topo, self.cfg, radial=tapered_exp_sum)
