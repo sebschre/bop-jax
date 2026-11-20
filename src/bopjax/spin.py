@@ -48,11 +48,11 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from .bop import MU_B  # Bohr magneton in eV / T  # noqa: F401
 from .md import TIME_UNIT_FS
 from .scf import make_potential
 
 HBAR = 0.6582119569 / TIME_UNIT_FS  # eV * time unit
-MU_B = 5.7883818060e-5  # Bohr magneton in eV / T
 
 
 class SpinState(NamedTuple):

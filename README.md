@@ -103,13 +103,16 @@ This prints -6.0112485448437 eV per atom, the BOPfox value to all 13 digits.
 | Terminator | `none`/`constantabn`, `oscillation`, `weighted`; Jackson kernel |
 | Magnetism | `collinear`, `noncollinear` (prescribed local spin axes, torques from the gradient) |
 | [Spin-orbit coupling](docs/spin-orbit.md) | onsite `xi L.S` for p and d shells in non-collinear calculations (`BOPConfig(spin_orbit=True)`); no reference code to compare with |
+| [Magnetic field](docs/magnetic-field.md) | Zeeman term `-mu_B B.(L + g/2 sigma)` (`params["magnetic_field"]`), magnetic moments as field derivatives, first-order field shift of barriers and Peierls stress (`bopjax.zeeman`) |
 | Coulomb | onsite `J_ii`; intersite `frauenheim` with taper |
 | [Screening](docs/screening.md) | environment-dependent d-d bond integrals (`BOPConfig(screening=True)`), not yet compared with BOPfox |
-| Repulsion | pair term plus embedding (`pairwise.V0`, `pairwise.POWERLAW`, or your own) |
+| Repulsion | pair term plus embedding (`pairwise.V0`, `pairwise.POWERLAW`, `pairwise.EGOROV`, or your own); environment-dependent Yukawa repulsion (`BOPConfig(yukawa=True)`) |
+| [Self-consistency](docs/formulation.md) | stationary point by Newton's method (BOPfox), or potentials consistent with charges and moments by Anderson mixing with implicit-function gradients (`make_potential(condition="potential")`); a subset of atoms (`free=`); electronic temperature with the Mermin free energy (`BOPConfig(kT=...)`); `remat=True` for memory |
 | [Stress](docs/formulation.md) | `make_stress`, strain derivative of the self-consistent energy |
 | [Molecular dynamics](docs/molecular-dynamics.md) | `bopjax.md` for [JAX-MD](https://github.com/jax-md/jax-md) |
 | [Spin dynamics](docs/spin-dynamics.md) | `bopjax.spin`: Landau-Lifshitz-Gilbert precession, damping and thermal torques for the non-collinear spin axes |
 | [Spin-lattice dynamics](docs/spin-lattice.md) | `bopjax.spinlattice`: atoms and spin axes moving together under the forces and torques of one energy |
+| [Minimum energy paths](docs/magnetic-field.md#minimum-energy-paths) | `bopjax.neb`: climbing-image nudged elastic band and FIRE relaxation |
 | [Visualisation](docs/visualisation.md) | `bopjax.ovito`: trajectories with spin, orbital and other per-atom vectors as extended XYZ for [OVITO](https://www.ovito.org), and rendered pictures and animations through its Python module |
 
 ## Documentation
@@ -122,10 +125,11 @@ This prints -6.0112485448437 eV per atom, the BOPfox value to all 13 digits.
 | [Spin dynamics](docs/spin-dynamics.md) | Landau-Lifshitz-Gilbert dynamics of the spin axes |
 | [Spin-orbit coupling](docs/spin-orbit.md) | onsite `xi L.S`, magnetic anisotropy, orbital moment, its limits |
 | [Spin-lattice dynamics](docs/spin-lattice.md) | atoms and spin axes moving together |
+| [Magnetic field](docs/magnetic-field.md) | Zeeman term, magnetic moments, first-order field effect on the Peierls barrier of a screw dislocation in iron |
 | [Visualisation](docs/visualisation.md) | trajectories and animations with OVITO |
 | [Validation](docs/validation.md) | agreement with BOPfox, and where the two codes differ |
 | [Screening](docs/screening.md) | environment-dependent d-d bond integrals |
-| [Iron](docs/iron.md) | magnetic d-band iron model: fit, phase stability, elastic constants, magnetism |
+| [Iron](docs/iron.md) | magnetic d-band iron models: the fit of this repository, and the Fe model of Egorov et al. used for dislocations |
 | [Carbon](docs/carbon.md) | sp-valent carbon model: fit, diamond, graphene and dense phases, elastic constants |
 | [Limitations](docs/limitations.md) | what is not implemented, caveats |
 

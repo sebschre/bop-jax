@@ -29,6 +29,8 @@ from .hamiltonian import (L_OF, angular_momentum, bond_blocks, cosine_cutoff,
                           powerlaw, screening_factors, shell_slices)
 
 SPIN_MODES = ("none", "collinear", "noncollinear")
+MU_B = 5.7883818060e-5  # Bohr magneton in eV / T
+G_SPIN = 2.00231930436  # electron spin g-factor
 
 
 @dataclass(frozen=True)
@@ -48,9 +50,13 @@ class BOPConfig:
     spin: str = "none"  # see SPIN_MODES
     spin_orbit: bool = False  # onsite xi L.S (spin = "noncollinear" only)
     repulsion: pw.Repulsion | None = None
+    yukawa: bool = False  # environment-dependent Yukawa repulsion (params["yukawa"])
     coulomb: str = "diagonal"  # "diagonal" (onsite only) or "frauenheim"
     screening: bool = False  # environment-dependent d-d bond integrals
     batch: int = 64  # atoms whose moments are evaluated at once (memory)
+    remat: bool = False  # recompute the moment walks in the backward pass (memory)
+    kT: float = 0.0  # electronic temperature (eV); the energy is then the free energy
+    smearing_nodes: int = 24  # quadrature nodes of the Fermi kernel (kT > 0)
 
     @property
     def n_expansion(self) -> int:
@@ -61,9 +67,12 @@ class BOPConfig:
         return self.spin != "none"
 
 
-def _per_atom(fn, topo: Topology, batch: int):
+def _per_atom(fn, topo: Topology, batch: int, remat: bool = False):
     """Apply ``fn(cluster_origin_i, cluster_nbr_i)`` to every atom, in batches
-    so that memory stays bounded for large cells."""
+    so that memory stays bounded for large cells.  With ``remat`` the walk of
+    each batch is recomputed in the backward pass instead of being stored."""
+    if remat:
+        fn = jax.checkpoint(fn)
     xs = (jnp.asarray(topo.cluster_origin), jnp.asarray(topo.cluster_nbr))
     if topo.n_atoms <= batch:
         return jax.vmap(fn)(*xs)
@@ -91,7 +100,7 @@ def _walk(topo: Topology, nmom: int, start, hop):
     return run
 
 
-def moments(hblk, onsite, topo: Topology, nmom: int, batch: int = 64):
+def moments(hblk, onsite, topo: Topology, nmom: int, batch: int = 64, remat: bool = False):
     """Diagonal moments <i a|H^n|i a> for all unit-cell orbitals, (N, norb, nmom+1).
 
     hblk   : (N, K, norb, norb) hopping blocks of the unit-cell atoms
@@ -114,7 +123,7 @@ def moments(hblk, onsite, topo: Topology, nmom: int, batch: int = 64):
             mu.append(jnp.einsum("cbd,cbd->d", ws[a], ws[b][: sizes[a]]))
         return jnp.stack(mu, axis=-1)
 
-    return _per_atom(one, topo, batch)
+    return _per_atom(one, topo, batch, remat)
 
 
 PAULI = np.array(
@@ -151,15 +160,41 @@ def orbital_blocks(basis) -> np.ndarray:
     return out
 
 
+def spin_blocks(basis) -> np.ndarray:
+    """Pauli matrices times the unit matrix in the orbitals of the atom:
+    (3, norb, 2, norb, 2), in the global spin frame."""
+    _, norb = shell_slices(basis)
+    return np.einsum("xtu,ab->xatbu", PAULI, np.eye(norb))
+
+
+def _field_sources(params, n, dtype):
+    """Onsite sources ``h_i`` (coupling ``h_i.sigma``) and ``b_i`` (coupling
+    ``b_i.L``) in eV, each (N, 3) or None, from ``params``.
+
+    An external field B (Tesla) enters both:  h = -mu_B g/2 B,  b = -mu_B B,
+    so that the energy falls by mu_B B.M for a magnetic moment
+    M = g/2 <sigma> + <L> along B (to first order)."""
+    h = b = None
+    if "magnetic_field" in params:
+        field = jnp.broadcast_to(jnp.asarray(params["magnetic_field"], dtype), (n, 3))
+        h, b = -0.5 * G_SPIN * MU_B * field, -MU_B * field
+    if "spin_field" in params:
+        h = params["spin_field"] if h is None else h + params["spin_field"]
+    if "orbital_field" in params:
+        b = params["orbital_field"] if b is None else b + params["orbital_field"]
+    return h, b
+
+
 def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: int = 64,
-                         spin_orbit=None):
+                         spin_orbit=None, remat: bool = False):
     """Moments of the spinor Hamiltonian projected on each atom's local spin
     axis, shape (N, 2, norb, nmom+1).
 
     onsite     : (N, 2, norb) levels of the local spin-up and spin-down channels
     axes       : (N, 3) local spin quantisation axes (need not be normalised)
-    spin_orbit : None, or the onsite spin-orbit term (N, norb, 2, norb, 2) in
-                 the global spin frame, e.g. ``xi * spin_orbit_blocks(basis)``
+    spin_orbit : None, or an extra onsite matrix (N, norb, 2, norb, 2) in the
+                 global spin frame, e.g. ``xi * spin_orbit_blocks(basis)``, plus
+                 any Zeeman terms
 
     The start states stay |real orbital a, spin up/down along the axis>.  With
     spin-orbit coupling these are no longer eigenstates of the onsite block,
@@ -200,6 +235,8 @@ def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: i
         return jnp.stack(mu, axis=-1)
 
     xs = (jnp.asarray(topo.cluster_origin), jnp.asarray(topo.cluster_nbr), proj)
+    if remat:
+        one = jax.checkpoint(one)
     if topo.n_atoms <= batch:
         return jax.vmap(one)(*xs)
     return jax.lax.map(lambda x: one(*x), xs, batch_size=batch)
@@ -217,11 +254,17 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
       "stoner"    (nspecies, nshell)   Stoner integrals        [magnetic]
       "spin_axes" (N, 3)               local spin directions   [noncollinear]
       "spin_orbit" (nspecies, nshell)  spin-orbit constants xi [cfg.spin_orbit]
+      "magnetic_field" (3,) or (N, 3)  optional external field B (Tesla)
+                                       [magnetic]
+      "spin_field"    (N, 3)           optional source h_i of a term h_i.sigma
+                                       on each atom (eV)       [magnetic]
       "orbital_field" (N, 3)           optional source b_i of a term b_i.L on
-                                       each atom (eV)          [cfg.spin_orbit]
+                                       each atom (eV)          [noncollinear]
       "repulsion" {"pair", "density": (nspecies, nspecies, npar),
                    "embed": (nspecies, npar)}                  [cfg.repulsion]
       "taper"     (nspecies, nspecies, 2)   R1, R2             [cfg.coulomb]
+      "yukawa"    {"B", "r_core", "C", "upsilon": (nspecies, nspecies),
+                   "lambda0", "m": (nspecies,)}               [cfg.yukawa]
       "screening" {"sds", "sds_overlap", "dds_overlap", "ddp_overlap",
                    "ddd_overlap": (nspecies, nspecies, npar)}  [cfg.screening]
 
@@ -245,6 +288,23 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     as the derivative of the energy with respect to ``params["orbital_field"]``
     (see ``make_orbital_moment``).
 
+    An external field ``params["magnetic_field"]`` adds the Zeeman term
+    ``-mu_B B.(L + g/2 sigma)`` to the onsite Hamiltonian (see
+    ``bopjax.zeeman``).  Moments are counted as everywhere in bopjax, with the
+    magnetisation along ``m e``, so the field favours ``m e`` along B.  The
+    part of the spin term along each local axis acts like a free-atom level:
+    it splits the spin-up and spin-down levels by ``-/+ h.e`` and adds
+    ``(h.e) m`` to the energy (``aux["energy_zeeman"]``), so the shifts remain
+    the internal (Stoner and Coulomb) potentials.  The perpendicular part and
+    ``b.L`` enter the spinor Hamiltonian as matrices, like ``xi L.S``.  In
+    collinear calculations only the component along z couples, to the spin
+    only.
+
+    With ``cfg.kT > 0`` the band filling has an electronic temperature: the
+    filling is averaged over the Fermi kernel and the bond energy becomes the
+    Mermin free energy (``expansion.smeared_filling_and_bond_energy``), so the
+    energy is the free energy E - TS, still variational in the shifts.
+
     ``shifts`` has shape ``energy.shift_shape``: (N, nshell), or (N, 2, nshell)
     for magnetic calculations (spin up, spin down).
     """
@@ -262,14 +322,22 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     species = topo.species
     orb_shell = np.concatenate([[k] * (b - a) for k, (a, b) in enumerate(slices)])
     ls_blocks = spin_orbit_blocks(cfg.basis) if cfg.spin_orbit else None
-    l_blocks = orbital_blocks(cfg.basis) if cfg.spin_orbit else None
+    noncollinear = cfg.spin == "noncollinear"
+    l_blocks = orbital_blocks(cfg.basis) if noncollinear else None
+    s_blocks = spin_blocks(cfg.basis) if noncollinear else None
     if cfg.screening and "d" not in cfg.basis:
         raise ValueError("screening acts on d-d bond integrals; the basis has no d shell")
     nbr_reverse = reverse_slots(topo) if cfg.screening else None
     screening_radial = radial if screening_radial is None else screening_radial
-    needs_pairs = cfg.repulsion is not None or cfg.coulomb != "diagonal"
+    needs_pairs = cfg.repulsion is not None or cfg.coulomb != "diagonal" or cfg.yukawa
     if needs_pairs and topo.nbr2_mask is None:
         raise ValueError("build the topology with rcut2 for repulsion or Coulomb terms")
+
+    if cfg.kT < 0.0:
+        raise ValueError("kT must not be negative")
+    smear_offsets = smear_weights = None
+    if cfg.kT > 0.0:
+        smear_offsets, smear_weights = ex.fermi_nodes(cfg.kT, cfg.smearing_nodes)
 
     def local_expansion(mu):
         a, b = ex.recursion_coefficients(mu, cfg.nmom)
@@ -282,7 +350,13 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
         """Electrons and bond energy per atom, spin channel and shell."""
         ainf, binf, sigma = loc
         gamma0 = sigma[..., 1] / kernel[1]
-        fn = jnp.vectorize(ex.filling_and_bond_energy, signature="(k),(),(),(),()->(),()")
+        if cfg.kT > 0.0:
+            def smeared(sig, a_, b_, e_, g_):
+                return ex.smeared_filling_and_bond_energy(sig, a_, b_, e_, g_,
+                                                          smear_offsets, smear_weights)
+            fn = jnp.vectorize(smeared, signature="(k),(),(),(),()->(),()")
+        else:
+            fn = jnp.vectorize(ex.filling_and_bond_energy, signature="(k),(),(),(),()->(),()")
         fill, bond = fn(sigma, ainf, binf, ef, gamma0)
         return degeneracy * fill, degeneracy * bond
 
@@ -296,8 +370,8 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
             return jnp.sum(occupations(loc_, ef)[0]) - n_total
 
         frozen = jax.lax.stop_gradient(loc)
-        lo = jnp.min(frozen[0] - 2.0 * frozen[1])
-        hi = jnp.max(frozen[0] + 2.0 * frozen[1])
+        lo = jnp.min(frozen[0] - 2.0 * frozen[1]) - 40.0 * cfg.kT
+        hi = jnp.max(frozen[0] + 2.0 * frozen[1]) + 40.0 * cfg.kT
 
         def bisect(_, bracket):
             lo_, hi_ = bracket
@@ -330,16 +404,48 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
             rho = jnp.sum(fc * dens(rp["density"][sp_i, sp_j], r), axis=1)
             e_rep = emb(rp["embed"][species], rho) + 0.5 * jnp.sum(
                 fc * pair(rp["pair"][sp_i, sp_j], r), axis=1)
-        if cfg.coulomb == "frauenheim":
-            jii = params["hubbard"]
-            tp = params["taper"][sp_i, sp_j]
-            in_range = jnp.where(r < cfg.rcut2, 1.0, 0.0) * mask
-            jij = in_range * pw.taper(tp[..., 0], tp[..., 1], r) * pw.frauenheim_coulomb(
-                jii[sp_i], jii[sp_j], r)
-            e_coul = 0.5 * charge * jnp.sum(jij * charge[topo.nbr2_origin], axis=1)
-        elif cfg.coulomb != "diagonal":
-            raise ValueError(f"unknown Coulomb model {cfg.coulomb!r}")
+        if cfg.yukawa:
+            e_rep = e_rep + pw.yukawa_energy(params["yukawa"], r, mask, species, sp_i, sp_j,
+                                             topo.nbr2_origin, cfg.rcut2, cfg.dcut2)
+        if cfg.coulomb != "diagonal":
+            e_coul = coulomb_energy(r, mask, sp_i, sp_j, params, charge)
         return e_rep, e_coul
+
+    def coulomb_energy(r, mask, sp_i, sp_j, params, charge):
+        """Intersite Coulomb energy per atom."""
+        if cfg.coulomb != "frauenheim":
+            raise ValueError(f"unknown Coulomb model {cfg.coulomb!r}")
+        jii = params["hubbard"]
+        tp = params["taper"][sp_i, sp_j]
+        in_range = jnp.where(r < cfg.rcut2, 1.0, 0.0) * mask
+        jij = in_range * pw.taper(tp[..., 0], tp[..., 1], r) * pw.frauenheim_coulomb(
+            jii[sp_i], jii[sp_j], r)
+        return 0.5 * charge * jnp.sum(jij * charge[topo.nbr2_origin], axis=1)
+
+    def double_counting(occupations, positions, cell, params):
+        """The part of the energy that depends on the occupations (N, nspin,
+        nshell) explicitly: onsite and intersite Coulomb, Stoner."""
+        n_shell = jnp.sum(occupations, axis=1)
+        charge = jnp.sum(n_shell - params["n0"][species], axis=1)
+        e = 0.5 * jnp.sum(params["hubbard"][species] * charge**2)
+        if cfg.magnetic:
+            moment = occupations[:, 0] - occupations[:, 1]
+            e = e - 0.25 * jnp.sum(params["stoner"][species] * moment**2)
+        if cfg.coulomb != "diagonal":
+            rvec = pair_vectors(positions, cell, topo)
+            r = jnp.linalg.norm(rvec, axis=-1)
+            mask = jnp.asarray(topo.nbr2_mask, dtype=r.dtype)
+            sp_i = np.broadcast_to(species[:, None], topo.nbr2_origin.shape)
+            e = e + jnp.sum(coulomb_energy(r, mask, sp_i, species[topo.nbr2_origin], params,
+                                           charge))
+        return e
+
+    def potential_target(occupations, positions, cell, params):
+        """Onsite shifts that the occupations imply, dE_dc/dN, in the shape of
+        the shifts.  For exact tight binding the stationary point of the
+        energy has shifts == potential_target(occupations)."""
+        grad = jax.grad(double_counting)(occupations, positions, cell, params)
+        return grad.reshape((topo.n_atoms,) + energy.shift_shape[1:])
 
     def energy(shifts, positions, cell, params):
         rij = bond_vectors(positions, cell, topo)
@@ -354,19 +460,40 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
                            cfg.rcut, cfg.dcut, radial, dd_screen)
         e0 = params["onsite"][species]  # (N, nshell)
         levels = e0[:, None, :] + shifts.reshape(topo.n_atoms, nspin, nshell)
+        h_field, b_field = _field_sources(params, topo.n_atoms, rij.dtype)
+        if (h_field is not None or b_field is not None) and not cfg.magnetic:
+            raise ValueError("a magnetic field needs a magnetic calculation (cfg.spin)")
+        if not noncollinear:
+            if "orbital_field" in params:
+                raise ValueError('an orbital field needs spin="noncollinear"')
+            b_field = None  # real orbitals and no spin-orbit coupling: quenched
+        h_par = None
+        if h_field is not None:
+            if noncollinear:
+                e_axis = params["spin_axes"] / jnp.linalg.norm(
+                    params["spin_axes"], axis=-1, keepdims=True)
+                h_par = jnp.sum(h_field * e_axis, axis=-1)
+            else:
+                h_par = h_field[:, 2]
+            levels = levels + jnp.stack([h_par, -h_par], axis=1)[:, :, None]
         orb_levels = levels[:, :, orb_shell]  # (N, nspin, norb)
-        if cfg.spin == "noncollinear":
-            spin_orbit = None
+        if noncollinear:
+            extra = []
             if cfg.spin_orbit:
-                spin_orbit = jnp.einsum("nk,katbu->natbu", params["spin_orbit"][species],
-                                        ls_blocks)
-                if "orbital_field" in params:
-                    spin_orbit = spin_orbit + jnp.einsum(
-                        "nx,xatbu->natbu", params["orbital_field"], l_blocks)
+                extra.append(jnp.einsum("nk,katbu->natbu", params["spin_orbit"][species],
+                                        ls_blocks))
+            if b_field is not None:
+                extra.append(jnp.einsum("nx,xatbu->natbu", b_field, l_blocks))
+            if h_field is not None:
+                h_perp = h_field - h_par[:, None] * e_axis
+                extra.append(jnp.einsum("nx,xatbu->natbu", h_perp, s_blocks))
+            onsite_matrix = sum(extra[1:], extra[0]) if extra else None
             mu_orb = moments_noncollinear(hblk, orb_levels, params["spin_axes"],
-                                          topo, cfg.nmom, cfg.batch, spin_orbit)
+                                          topo, cfg.nmom, cfg.batch, onsite_matrix,
+                                          cfg.remat)
         else:
-            mu_orb = jax.vmap(lambda lev: moments(hblk, lev, topo, cfg.nmom, cfg.batch),
+            mu_orb = jax.vmap(lambda lev: moments(hblk, lev, topo, cfg.nmom, cfg.batch,
+                                                  cfg.remat),
                               in_axes=1, out_axes=1)(orb_levels)
         # average over the orbitals of each shell: (N, nspin, nshell, nmom+1)
         mu = jnp.stack([jnp.mean(mu_orb[:, :, a:b], axis=2) for a, b in slices], axis=2)
@@ -382,12 +509,17 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
         e_prom = jnp.sum(e0 * (n_shell - n0), axis=1)
         e_ion = 0.5 * params["hubbard"][species] * charge**2
         e_atom = e_bond + e_prom + e_ion
-        aux = {"fermi": ef, "n_shell": n_shell, "charge": charge, "energy_bond": e_bond}
+        aux = {"fermi": ef, "n_shell": n_shell, "charge": charge, "energy_bond": e_bond,
+               "occupations": n_spin}
         if cfg.magnetic:
             moment = n_spin[:, 0] - n_spin[:, 1]  # per shell, along the local axis
             e_mag = -0.25 * jnp.sum(params["stoner"][species] * moment**2, axis=1)
             e_atom = e_atom + e_mag
             aux.update(n_spin=n_spin, moment=jnp.sum(moment, axis=1), energy_mag=e_mag)
+            if h_par is not None:
+                e_zeeman = h_par * jnp.sum(moment, axis=1)
+                e_atom = e_atom + e_zeeman
+                aux.update(energy_zeeman=e_zeeman)
         if needs_pairs:
             e_rep, e_coul = pair_terms(positions, cell, params, charge)
             e_atom = e_atom + e_rep + e_coul
@@ -401,6 +533,8 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     energy.shift_shape = (topo.n_atoms, 2, nshell) if cfg.magnetic else (topo.n_atoms, nshell)
     energy.config = cfg
     energy.topology = topo
+    energy.double_counting = double_counting
+    energy.potential_target = potential_target
     return energy
 
 

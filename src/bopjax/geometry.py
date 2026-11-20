@@ -158,10 +158,34 @@ def build_topology(positions, species, rcut, n_hops, cell=None, rcut2=None,
     )
 
 
-def needs_rebuild(positions, topo: Topology) -> bool:
-    """True once some atom has moved more than skin / 2 since the lists were built."""
-    moved = np.linalg.norm(np.asarray(positions) - topo.reference_positions, axis=1)
-    return bool(moved.max() > 0.5 * topo.skin)
+def needs_rebuild(positions, topo: Topology, cell=None, rcut=None, rcut2=None) -> bool:
+    """True once the neighbour lists may no longer hold every pair in range.
+
+    By default: once some atom has moved more than skin / 2 since the lists
+    were built, which is safe for any motion.  With ``rcut`` (and ``rcut2``
+    for the second list) the pairs are checked directly instead: the lists
+    are kept while every pair closer than ``rcut`` (``rcut2``) at
+    ``positions`` is in them.  That allows larger displacements when atoms
+    move together, as the columns of a dislocation core do; ``cell`` must be
+    the cell the lists were built for.
+    """
+    pos = np.asarray(positions, dtype=float)
+    if rcut is None:
+        moved = np.linalg.norm(pos - topo.reference_positions, axis=1)
+        return bool(moved.max() > 0.5 * topo.skin)
+    cell = None if cell is None else np.asarray(cell, dtype=float)
+
+    def covered(origin, trans, mask, r_max):
+        shift = 0.0 if cell is None else trans @ cell
+        d = pos[origin] + shift - pos[:, None, :]
+        listed = int(np.sum(mask & (np.linalg.norm(d, axis=-1) < r_max)))
+        return listed == int(np.sum(_neighbours(pos, cell, r_max)[2]))
+
+    if not covered(topo.nbr_origin, topo.nbr_cell, topo.nbr_mask, rcut):
+        return True
+    if rcut2 is not None and topo.nbr2_origin is not None:
+        return not covered(topo.nbr2_origin, topo.nbr2_cell, topo.nbr2_mask, rcut2)
+    return False
 
 
 def reverse_slots(topo: Topology) -> np.ndarray:
