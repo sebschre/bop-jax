@@ -125,7 +125,17 @@ around it, and frozen at the bulk values in the rest of the fixed shell
 2.95-3.01 muB, close to the d-band limit, which leaves the self-consistency
 with nearly flat directions.
 
-**Status: no converged Peierls path yet.** Run on a 4-core cloud machine
+**Summary.** With the fitted models of this repository (`IRON_FIT`,
+`IRON_SD_FIT`) the Peierls path cannot be followed: the moment of the central
+core column collapses at a turning point of the self-consistency. With the
+Egorov et al. Fe model (`models.iron_egorov`) the path is well behaved: the
+barrier is 47 meV/b, the moments of the core stay within 1.5 % of bulk, and
+`dE_P/dB = -5.67 micro-eV/T per b` (-1.2e-4 of the barrier per Tesla),
+confirmed by self-consistent energies in +-100 T (`examples/peierls_drag.py`
+reproduces the drag, the moments and the check).
+The steps that led there follow.
+
+**`IRON_FIT`: no converged Peierls path.** Run on a 4-core cloud machine
 without GPU, 12 A cylinder (91 atoms, 25 mobile), `--condition potential`:
 
 - The stationary self-consistency (`condition="stationary"`) does not

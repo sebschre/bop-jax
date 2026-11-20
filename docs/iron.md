@@ -1,5 +1,10 @@
 # Iron
 
+Two iron models: the magnetic d-band BOP fitted here (`IRON_FIT`, and with an s
+shell `IRON_SD_FIT`), and the Fe part of the Fe-Co BOP of Egorov et al.
+(`iron_egorov`, [below](#the-egorov-et-al-fe-model-iron_egorov-iron_egorov_config)),
+which is the one to use for dislocations.
+
 A magnetic d-band BOP for Fe (`bopjax.models.iron`, `IRON_FIT`, `IRON_CONFIG`):
 d electrons only, collinear Stoner magnetism, exponential bond integrals
 (`v0_bond` without its short-range factor), an exponential pair repulsion and
@@ -125,6 +130,37 @@ moments.
   hcp NM (relaxed) C11 = 839, C12 = 285, C13 = 320, C33 = 939, C44 = 152,
   C66 = 278, B = 497 GPa, even stiffer than the d model (438). The
   non-magnetic phases have Birch-Murnaghan B0 of 450-470 GPa.
+
+## The Egorov et al. Fe model (`iron_egorov`, `IRON_EGOROV_CONFIG`)
+
+The Fe part of the magnetic Fe-Co BOP of Egorov, Subramanyam, Yuan, Drautz and
+Hammerschmidt (arXiv:2208.12973, parameters in its Supplemental Table 1):
+d-valent, 6.98 electrons, Stoner integral 0.751 eV, bond integrals as sums of
+stretched exponentials (`pairwise.exp_sum`, cutoff 4.1 A, third neighbours
+included), square-root embedding of Gaussian densities, pair and core
+repulsion and an environment-dependent Yukawa repulsion
+(`BOPConfig(yukawa=True)`, cutoff 6 A), 9 moments with a Jackson kernel, 200
+expansion coefficients and a constant terminator. Use with
+`radial=pairwise.exp_sum`.
+
+Two choices the paper leaves open were fixed by reproducing its bcc Fe values:
+the embedding prefactor p1 multiplies the square root (as Eqs. 6-7 read, inside
+it, bcc Fe binds by -4.9 eV/atom at a = 3.05 A), and the bandwidth estimate is
+`findeminemax` (with `averaged` the 200-term expansion grows without bound).
+`hubbard` (8 eV) is not part of the published model.
+
+| bcc FM | V (A^3) | moment (muB) | B | C11 | C12 | C44 (GPa) | E (eV/atom) |
+|---|---|---|---|---|---|---|---|
+| bopjax | 11.45 | 2.875 | 184 | 272 | 140 | 85 | -8.292 |
+| paper | 11.45 | 2.88 | 185 | 269 | 147 | 90 | -8.31 (DFT) |
+
+Compared with `IRON_FIT`, the Stoner integral is smaller (0.751 against 1.165
+eV) and the dd-sigma bond integral about half as strong (-0.64 against -1.15 eV
+at 2.48 A). Its screw dislocation core keeps the bulk moment within 1.5 % along
+the whole Peierls path, where the core moment of `IRON_FIT` and `IRON_SD_FIT`
+collapses (see [Magnetic field](magnetic-field.md)). A self-consistent energy
+and force of 91 atoms costs about 5 s at fixed levels; use
+`BOPConfig(remat=True)` for gradients of large cells (2 GB instead of 6 GB).
 
 ## Targets (`examples/fit_iron.py`)
 

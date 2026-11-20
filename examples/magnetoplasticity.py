@@ -40,7 +40,9 @@ the magnetisation matters there.
 The onsite levels are self-consistent in the mobile region and a buffer
 around it (--free-buffer) and frozen at the bulk values further out.
 
-Status: no converged Peierls path yet; see docs/magnetic-field.md.  The end
+Status: with the fitted iron models (IRON_FIT, IRON_SD_FIT) used here the path
+cannot be followed (see docs/magnetic-field.md); examples/peierls_drag.py does
+the calculation with the Egorov et al. Fe model.  The end
 points relax (about 45 FIRE steps of about 60 s each for --radius 12 on 4 CPU
 cores), but along the band the moment of the central core atom reaches a
 Stoner fold where the self-consistency has no nearby solution.
