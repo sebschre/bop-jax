@@ -54,6 +54,7 @@ class BOPConfig:
     coulomb: str = "diagonal"  # "diagonal" (onsite only) or "frauenheim"
     screening: bool = False  # environment-dependent d-d bond integrals
     batch: int = 64  # atoms whose moments are evaluated at once (memory)
+    remat: bool = False  # recompute the moment walks in the backward pass (memory)
     kT: float = 0.0  # electronic temperature (eV); the energy is then the free energy
     smearing_nodes: int = 24  # quadrature nodes of the Fermi kernel (kT > 0)
 
@@ -66,9 +67,12 @@ class BOPConfig:
         return self.spin != "none"
 
 
-def _per_atom(fn, topo: Topology, batch: int):
+def _per_atom(fn, topo: Topology, batch: int, remat: bool = False):
     """Apply ``fn(cluster_origin_i, cluster_nbr_i)`` to every atom, in batches
-    so that memory stays bounded for large cells."""
+    so that memory stays bounded for large cells.  With ``remat`` the walk of
+    each batch is recomputed in the backward pass instead of being stored."""
+    if remat:
+        fn = jax.checkpoint(fn)
     xs = (jnp.asarray(topo.cluster_origin), jnp.asarray(topo.cluster_nbr))
     if topo.n_atoms <= batch:
         return jax.vmap(fn)(*xs)
@@ -96,7 +100,7 @@ def _walk(topo: Topology, nmom: int, start, hop):
     return run
 
 
-def moments(hblk, onsite, topo: Topology, nmom: int, batch: int = 64):
+def moments(hblk, onsite, topo: Topology, nmom: int, batch: int = 64, remat: bool = False):
     """Diagonal moments <i a|H^n|i a> for all unit-cell orbitals, (N, norb, nmom+1).
 
     hblk   : (N, K, norb, norb) hopping blocks of the unit-cell atoms
@@ -119,7 +123,7 @@ def moments(hblk, onsite, topo: Topology, nmom: int, batch: int = 64):
             mu.append(jnp.einsum("cbd,cbd->d", ws[a], ws[b][: sizes[a]]))
         return jnp.stack(mu, axis=-1)
 
-    return _per_atom(one, topo, batch)
+    return _per_atom(one, topo, batch, remat)
 
 
 PAULI = np.array(
@@ -182,7 +186,7 @@ def _field_sources(params, n, dtype):
 
 
 def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: int = 64,
-                         spin_orbit=None):
+                         spin_orbit=None, remat: bool = False):
     """Moments of the spinor Hamiltonian projected on each atom's local spin
     axis, shape (N, 2, norb, nmom+1).
 
@@ -231,6 +235,8 @@ def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: i
         return jnp.stack(mu, axis=-1)
 
     xs = (jnp.asarray(topo.cluster_origin), jnp.asarray(topo.cluster_nbr), proj)
+    if remat:
+        one = jax.checkpoint(one)
     if topo.n_atoms <= batch:
         return jax.vmap(one)(*xs)
     return jax.lax.map(lambda x: one(*x), xs, batch_size=batch)
@@ -483,9 +489,11 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
                 extra.append(jnp.einsum("nx,xatbu->natbu", h_perp, s_blocks))
             onsite_matrix = sum(extra[1:], extra[0]) if extra else None
             mu_orb = moments_noncollinear(hblk, orb_levels, params["spin_axes"],
-                                          topo, cfg.nmom, cfg.batch, onsite_matrix)
+                                          topo, cfg.nmom, cfg.batch, onsite_matrix,
+                                          cfg.remat)
         else:
-            mu_orb = jax.vmap(lambda lev: moments(hblk, lev, topo, cfg.nmom, cfg.batch),
+            mu_orb = jax.vmap(lambda lev: moments(hblk, lev, topo, cfg.nmom, cfg.batch,
+                                                  cfg.remat),
                               in_axes=1, out_axes=1)(orb_levels)
         # average over the orbitals of each shell: (N, nspin, nshell, nmom+1)
         mu = jnp.stack([jnp.mean(mu_orb[:, :, a:b], axis=2) for a, b in slices], axis=2)
