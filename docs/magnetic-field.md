@@ -204,7 +204,51 @@ So the collapse of the central column's moment is not specific to the d
 basis: with the s shell it starts from a lower moment and sets in between
 f = 0.15 and 0.3, where it is between 0.3 and 0.35 in the d model.
 
-So the Peierls path of this model passes a magnetic transition of the core,
+**The Egorov et al. Fe model does not collapse.** `models.iron_egorov` (the Fe
+part of the Fe-Co BOP of Egorov et al., arXiv:2208.12973: DFT-projected,
+then optimised bond integrals with a 4.1 A cutoff, I = 0.751 eV, Jackson
+kernel with 200 moments, Yukawa repulsion; reproduces the published bcc Fe
+volume, moment and elastic constants to 1-5 %). Its own end points A and B
+(equal to 0.01 meV), its own column targets (central column -0.33 b, two
+pairs of neighbours +0.16 b and -0.09 b), potential condition (36-52
+Anderson steps), forces to 0.03 eV/A:
+
+| f | E - E_A (meV) | m_0 (muB) | core triangle |
+|---|---|---|---|
+| 0 (A) | 0 | 2.84 | A |
+| 0.15 | 10.7 | 2.84 | A |
+| 0.3 | 31.9 | 2.85 | A |
+| 0.35 | 37.6 | 2.86 | |
+| 0.4 | 42.9 | 2.86 | intermediate |
+| 0.5 | 47.0 | 2.86 | intermediate |
+| 1 (B) | 0.0 | 2.84 | B |
+
+The core moves from A through the intermediate triangle towards B, the
+moment of the central column stays within 1.5 % of bulk (2.875 muB) all the
+way, and max |dE/dshift| stays at 2.6e-2 (no sign of a non-variational
+state). The barrier at the midpoint, 47 meV/b (an upper bound for the
+minimum energy path), is within the DFT range of 35-58 meV/b and close to
+the ~40 meV/b of Mrovec et al. (PRL 106, 246402 (2011)), whose screw core
+moments also change by less than 1 %.
+
+Compared with `IRON_FIT`, the Egorov model has a Stoner integral of 0.751
+against 1.165 eV, a dd-sigma bond integral about half as strong (-0.64
+against -1.15 eV at the nearest-neighbour distance, -1.00 against -1.88 eV
+at 2.2 A), and a moment that hardly reacts to the core (1.3 % below bulk at
+the relaxed easy core, against 9 % in the d model and 14 % in the sd model).
+The collapse in `IRON_FIT` and `IRON_SD_FIT` is therefore an artefact of
+those fits (large I with strong, steep bond integrals put the core near the
+Stoner threshold), not a property of d-band BOPs for iron. A first run of
+this drag with the column targets of the d model left the core in place
+and only strained it (233 meV at f = 0.5): the drag targets must come from
+the model's own end points.
+
+For the first-order field effect, the Egorov model's moments along the path
+give `dE_P/dB` directly: the moment of the central column changes by only
++0.02 muB between the easy core and the midpoint, so the magnetoplastic
+effect stays of the small, bulk-like size estimated at the outset.
+
+For `IRON_FIT`, the Peierls path passes a magnetic transition of the core,
 and neither solver follows it through the turning point. Ways forward:
 continuation through the turning point (arc-length continuation, or a
 constrained moment of atom 0 as an extra path parameter, `E(f, m_0)`), which
