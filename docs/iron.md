@@ -131,6 +131,39 @@ moments.
   C66 = 278, B = 497 GPa, even stiffer than the d model (438). The
   non-magnetic phases have Birch-Murnaghan B0 of 450-470 GPa.
 
+### Bain path of the sd model
+
+`uv run python examples/bain_path.py --volumes 9.8 10.2 10.6 11.0 11.4 11.8 12.2
+--pressures 0 10 20 --figure iron_sd_bain.png` (about 30 minutes on 4 cores).
+A two-atom body-centred tetragonal cell at fixed volume, c/a from 0.8 to 1.6:
+c/a = 1 is bcc, c/a = sqrt(2) is fcc. Moments (+, +) follow bcc FM to fcc FM,
+moments (+, -) on alternating (001) planes follow bcc AFM (B2) to fcc AFM-I.
+At c/a = sqrt(2) the two-atom cell gives the energy and moments of the
+four-atom fcc AFM cell exactly. The constant-pressure path minimises
+H = E + PV over a cubic fit of E(V) on the volume grid, for each c/a.
+
+![Bain path of the sd iron model](figures/iron_sd_bain.png)
+
+- **The magnetic order changes halfway along the path.** At every volume the
+  FM branch is lowest up to c/a = 1.10-1.15 and the AFM branch beyond.
+  FM moments collapse on the way to fcc (fcc FM is non-magnetic below about
+  11.4 A^3); the AFM moment survives (1.7 muB at 11.0 A^3 in fcc).
+- **Zero pressure:** fcc AFM lies 91 meV/atom above bcc FM (10.85 against
+  11.67 A^3). The highest point of the lowest path is 108 meV at c/a = 1.30,
+  so fcc AFM is metastable behind a barrier of 17 meV/atom. From the bcc side
+  the climb is monotonic: there is no intermediate minimum.
+- **Under pressure** the fcc end comes down: 39 meV above bcc FM at 10 GPa,
+  and 10 meV below it at 20 GPa, where it is nearly non-magnetic (fcc FM, AFM
+  and NM within 10 meV). That is above the bcc FM -> hcp NM transition
+  (15.6 GPa), so fcc is not the stable phase there. At no pressure studied is
+  fcc AFM the lowest state along the path.
+- Each point keeps the lowest self-consistent solution of several starts.
+  With the s shell there are also spurious solutions with an s spin channel
+  almost full or empty (b_inf two to five times the physical value, Fermi
+  level several eV away), up to 870 meV/atom *below* the physical states;
+  the script rejects solutions with an s spin channel outside 0.05-0.9
+  electrons.
+
 ## The Egorov et al. Fe model (`iron_egorov`, `IRON_EGOROV_CONFIG`)
 
 The Fe part of the magnetic Fe-Co BOP of Egorov, Subramanyam, Yuan, Drautz and
