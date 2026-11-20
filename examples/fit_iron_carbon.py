@@ -1,7 +1,10 @@
-"""Fit the Fe-C cross terms of the iron-carbon BOP (d iron, sp carbon).
+"""Fit the Fe-C cross terms of the iron-carbon BOP (Egorov d iron, sp carbon).
 
 Only the Fe-C parameters are fitted; Fe-Fe and C-C stay those of
-``IRON_FIT`` and ``CARBON_FIT``.  Needs scipy (uv sync --extra md).
+``iron_egorov`` and ``CARBON_FIT``, as Egorov et al. fitted only the cross
+terms of their Fe-Co BOP on fixed elemental models.  Self-consistency is the
+potential condition (Anderson mixing); inside the fit, forces and stress are
+partial derivatives at the converged shifts (no adjoint solve).  Needs scipy (uv sync --extra md).
 Run with:  uv run python examples/fit_iron_carbon.py  [--quick] [--max-nfev N]
 
 Each residual is (model - target) / tolerance; targets in ``TARGETS``, see
@@ -65,10 +68,13 @@ class Model:
         self.oct = Calculator(Cell("oct", *fe_with_carbon("octahedral")))
         self.tet = Calculator(Cell("tet", *fe_with_carbon("tetrahedral")))
         self.cem = Calculator(Cell("Fe3C", *cementite()))
+        for calc in (self.oct, self.tet, self.cem):
+            calc.exact = False  # partial-derivative forces and stress (cheap)
         p = iron_carbon()
         self.e_fe = Calculator(Cell("bcc Fe", *bcc_fe())).solve(p)[0] / 2
         self.e_c = Calculator(Cell("diamond", *diamond(), magnetic=False)).solve(p)[0] / 2
         host = Calculator(Cell("Fe16", *bcc_supercell()))
+        host.exact = False
         host.solve(p)
         self.host_stress = host.stress(p)  # zero up to the precision of A_FE
         self.n_eval = 0
@@ -103,6 +109,8 @@ class Model:
         out["m Fe3C"] = float(np.mean(fe_moments(aux_cem, self.cem.species)))
         out["charge C oct"] = float(aux_oct["charge"][16])
         out["charge C Fe3C"] = float(np.mean(np.asarray(aux_cem["charge"])[12:]))
+        out["stationarity"] = max(self.oct.stationarity, self.tet.stationarity,
+                                  self.cem.stationarity)
         return out
 
     def residuals(self, x):
@@ -137,8 +145,13 @@ def report(model, values):
     print(f"{'property':14s} {'model':>9s} {'target':>9s}")
     for k, (t, _) in TARGETS.items():
         print(f"{k:14s} {out[k]:9.4f} {t:9.4f}")
-    for k in ("m Fe nn oct", "charge C Fe3C"):
+    for k in ("m Fe nn oct", "charge C Fe3C", "stationarity"):
         print(f"{k:14s} {out[k]:9.4f}")
+    # the relaxations used partial-derivative forces; exact residual force:
+    model.oct.exact = True
+    f = np.asarray(model.oct.forces(iron_carbon(**values), model.oct.positions))
+    model.oct.exact = False
+    print(f"exact residual force, octahedral cell: {np.max(np.abs(f)):.3f} eV/A")
     cost = sum(((out[k] - t) / tol) ** 2 for k, (t, tol) in TARGETS.items())
     print(f"cost {cost:.3f}")
 
