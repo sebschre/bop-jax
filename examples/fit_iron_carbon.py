@@ -99,7 +99,7 @@ class Model:
         out["P axial"] = dp[2, 2]
         out["P transverse"] = 0.5 * (dp[0, 0] + dp[1, 1])
         # moment of the two Fe neighbours of C at a/2, along its axis
-        d = np.asarray(self.oct.positions[:16] - self.oct.positions[16])
+        d = np.array(self.oct.positions[:16] - self.oct.positions[16])
         d -= np.round(d / np.diag(np.asarray(self.oct.cell))) * np.diag(np.asarray(self.oct.cell))
         nn = np.argsort(np.linalg.norm(d, axis=1))[:2]
         out["m Fe nn oct"] = float(np.asarray(aux_oct["moment"])[nn].mean())
