@@ -243,10 +243,43 @@ this drag with the column targets of the d model left the core in place
 and only strained it (233 meV at f = 0.5): the drag targets must come from
 the model's own end points.
 
-For the first-order field effect, the Egorov model's moments along the path
-give `dE_P/dB` directly: the moment of the central column changes by only
-+0.02 muB between the easy core and the midpoint, so the magnetoplastic
-effect stays of the small, bulk-like size estimated at the outset.
+**First-order field effect (Egorov model).** Total magnetic moment of the
+cell (91 atoms, one b) from `zeeman.make_scf_magnetic_moment`, i.e. the field
+derivative of the self-consistent energy including the response of the
+shifts (the potential condition is not stationary), at each relaxed point of
+the drag:
+
+| f | E - E_A (meV) | M_cell (muB) | M - M_A (muB) |
+|---|---|---|---|
+| 0 (A) | 0 | 265.2137 | 0 |
+| 0.15 | 10.65 | 265.2406 | +0.027 |
+| 0.3 | 31.91 | 265.2851 | +0.071 |
+| 0.35 | 37.60 | 265.2951 | +0.081 |
+| 0.4 | 42.89 | 265.3057 | +0.092 |
+| 0.5 | 47.03 | 265.3117 | +0.098 |
+
+- The moment is larger at the saddle than at the easy core by 0.098 muB per b
+  (fixed-shift moments without the response: 0.106 muB). It is spread over
+  the core: the largest single changes are +0.081, +0.056, -0.049, +0.044
+  muB on atoms 1.8-4 A from the core, the central column +0.026.
+- `dE_P/dB = -mu_B dM = -5.67 micro-eV/T per b`, i.e. -1.21e-4 of the
+  barrier per Tesla. A field along the magnetisation lowers the barrier.
+- Self-consistent check at +-100 T (fixed positions): the barrier changes by
+  -5.6709 micro-eV/T against -5.6723 from first order (2e-4 relative); the
+  second-order shift at 100 T is +10.1 micro-eV against -567 micro-eV of
+  first order, so second order is about 2 % at 100 T and negligible at
+  laboratory fields. The total moment of each configuration agrees with
+  differences of the self-consistent energy to 2e-5.
+- Peierls stress from the drag profile (mirrored about f = 0.5, finite
+  difference slopes): 1784 MPa; at B_z = +-10 T it changes by -/+2.17 MPa
+  (-/+1.22e-3), i.e. -0.22 MPa (-1.2e-4) per Tesla.
+
+The drag is a constrained path, so the barrier and Peierls stress are upper
+bounds; the relative field effect is set by the moment change between the
+easy core and the saddle, which a free NEB would change little. In
+collinear magnetism without spin-orbit coupling only the field component
+along the magnetisation enters, and there is no dependence on the field
+direction relative to the dislocation.
 
 For `IRON_FIT`, the Peierls path passes a magnetic transition of the core,
 and neither solver follows it through the turning point. Ways forward:
