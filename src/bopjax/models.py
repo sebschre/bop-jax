@@ -223,9 +223,13 @@ IRON_EGOROV = {
 # BOPConfig settings of the Egorov Fe model (pass radial=pairwise.exp_sum): 9 moments,
 # Jackson kernel with 200 expansion coefficients and a constant terminator;
 # cutoffs 4.1 (1.0) A for the bond integrals, 6.0 (0.5) A for embedding and repulsion.
-# The bandwidth estimate is not given in the paper.
+# The paper does not name the bandwidth estimate; "findeminemax" reproduces its bcc Fe
+# values (V 11.45 A^3, 2.875 muB, B 184, C11 272, C12 140, C44 85 GPa; paper 11.45,
+# 2.88, 185, 269, 147, 90) and keeps the 200 Chebyshev moments bounded, which the
+# "averaged" estimate does not (split-off chain states outside the band grow without
+# bound in the expansion).
 IRON_EGOROV_CONFIG = dict(nmom=9, nexp=200, kernel="jackson", terminator="constantabn",
-                          bandwidth="averaged", rcut=4.1, dcut=1.0, rcut2=6.0, dcut2=0.5,
+                          bandwidth="findeminemax", rcut=4.1, dcut=1.0, rcut2=6.0, dcut2=0.5,
                           repulsion=pw.EGOROV, yukawa=True)
 
 
