@@ -405,3 +405,38 @@ def test_md_with_fixed_atoms():
     # two moving atoms: six degrees of freedom
     assert float(md.temperature(state)) == pytest.approx(
         2 * float(md.kinetic_energy(state)) / (6 * md.KB_EV))
+
+
+def test_exact_rebuild_check():
+    # a rigid shift of everything by more than skin / 2 keeps every pair; the
+    # displacement rule rebuilds, the pair check does not, and it does once a
+    # pair really comes into range
+    a = 2.87
+    frac = np.array([[0, 0, 0], [0.5, 0.5, 0.5]])
+    cell = 2 * a * np.eye(3)
+    pos = np.concatenate([(frac + np.array(o)) * a for o in np.ndindex(2, 2, 2)])
+    topo = bj.build_topology(pos, [0] * len(pos), 2.6, 4, cell, rcut2=2.6, skin=0.2)
+    moved = pos + 0.5
+    assert bj.needs_rebuild(moved, topo)
+    assert not bj.needs_rebuild(moved, topo, cell, 2.6, 2.6)
+    squeezed = pos.copy()
+    squeezed[1] += np.array([0.0, 0.0, -0.5])  # second neighbour comes within 2.6 A
+    assert bj.needs_rebuild(squeezed, topo, cell, 2.6, 2.6)
+
+
+def test_remat_changes_nothing_but_memory():
+    a = 2.9
+    pos = jnp.array(a * np.array([[0, 0, 0], [0.5, 0.5, 0.5]]) + np.array([[0.05, -0.02, 0.0], [0, 0, 0]]))
+    cell = jnp.array(a * np.eye(3))
+    params = dict(canonical_d(n_electrons=7.0, hubbard=3.0), stoner=jnp.array([[0.6]]))
+    shifts = bj.stoner_shifts(np.full((2, 1), 2.0), 0.6)
+    out = []
+    for remat in (False, True):
+        cfg = bj.BOPConfig(nmom=6, rcut=3.4, dcut=0.4, spin="collinear", batch=1, remat=remat)
+        topo = bj.build_topology(np.asarray(pos), [0, 0], cfg.rcut, cfg.nmom, np.asarray(cell))
+        energy = bj.make_energy_fn(topo, cfg)
+        out.append(jax.value_and_grad(lambda s, x: energy(s, x, cell, params)[0], argnums=(0, 1))(
+            shifts, pos))
+    np.testing.assert_allclose(out[1][0], out[0][0], rtol=1e-13)
+    for g1, g0 in zip(out[1][1], out[0][1]):
+        np.testing.assert_allclose(g1, g0, atol=1e-12)

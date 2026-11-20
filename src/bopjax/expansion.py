@@ -253,3 +253,28 @@ def filling_and_bond_energy(sigma, ainf, binf, ef, gamma0):
     fill = jnp.sum(sigma * chi[1 : nexp + 2])
     bond = binf * jnp.sum(sigma * (chi[2:] - gamma0 * chi[1 : nexp + 2] + chi[:nexp + 1]))
     return fill, bond
+
+
+def fermi_nodes(kT: float, n: int):
+    """Energy offsets and weights for averages over the Fermi kernel
+    ``w(x) = -df/dx`` (f the Fermi function at temperature ``kT``):
+    ``int w(x) g(x) dx = sum_q weight_q g(x_q)``.  Gauss-Legendre in
+    ``u = f(x)``, i.e. ``x = kT ln(1/u - 1)``; the weights sum to 1."""
+    u, weight = np.polynomial.legendre.leggauss(n)
+    u = 0.5 * (u + 1.0)
+    return kT * np.log(1.0 / u - 1.0), 0.5 * weight
+
+
+def smeared_filling_and_bond_energy(sigma, ainf, binf, ef, gamma0, offsets, weights):
+    """Filling and bond energy at an electronic temperature.
+
+    The filling is the T = 0 filling averaged over the Fermi kernel,
+    ``N_T(ef) = int w(x) N_0(ef + x) dx``, and the bond energy is the Mermin
+    free energy measured from the centre of gravity,
+    ``U_T(ef) = int w(x) [U_0(ef + x) - x N_0(ef + x)] dx``, so that
+    ``dU_T/d(level) = -(level) dN_T/d(level)`` holds as at T = 0 and the
+    total energy is the (variational) free energy E - TS.
+    """
+    fill0, bond0 = jax.vmap(
+        lambda x: filling_and_bond_energy(sigma, ainf, binf, ef + x, gamma0))(offsets)
+    return jnp.sum(weights * fill0), jnp.sum(weights * (bond0 - offsets * fill0))

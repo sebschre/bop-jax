@@ -1,5 +1,10 @@
 # Iron
 
+Two iron models: the magnetic d-band BOP fitted here (`IRON_FIT`, and with an s
+shell `IRON_SD_FIT`), and the Fe part of the Fe-Co BOP of Egorov et al.
+(`iron_egorov`, [below](#the-egorov-et-al-fe-model-iron_egorov-iron_egorov_config)),
+which is the one to use for dislocations.
+
 A magnetic d-band BOP for Fe (`bopjax.models.iron`, `IRON_FIT`, `IRON_CONFIG`):
 d electrons only, collinear Stoner magnetism, exponential bond integrals
 (`v0_bond` without its short-range factor), an exponential pair repulsion and
@@ -125,6 +130,70 @@ moments.
   hcp NM (relaxed) C11 = 839, C12 = 285, C13 = 320, C33 = 939, C44 = 152,
   C66 = 278, B = 497 GPa, even stiffer than the d model (438). The
   non-magnetic phases have Birch-Murnaghan B0 of 450-470 GPa.
+
+### Bain path of the sd model
+
+`uv run python examples/bain_path.py --volumes 9.8 10.2 10.6 11.0 11.4 11.8 12.2
+--pressures 0 10 20 --figure iron_sd_bain.png` (about 30 minutes on 4 cores).
+A two-atom body-centred tetragonal cell at fixed volume, c/a from 0.8 to 1.6:
+c/a = 1 is bcc, c/a = sqrt(2) is fcc. Moments (+, +) follow bcc FM to fcc FM,
+moments (+, -) on alternating (001) planes follow bcc AFM (B2) to fcc AFM-I.
+At c/a = sqrt(2) the two-atom cell gives the energy and moments of the
+four-atom fcc AFM cell exactly. The constant-pressure path minimises
+H = E + PV over a cubic fit of E(V) on the volume grid, for each c/a.
+
+![Bain path of the sd iron model](figures/iron_sd_bain.png)
+
+- **The magnetic order changes halfway along the path.** At every volume the
+  FM branch is lowest up to c/a = 1.10-1.15 and the AFM branch beyond.
+  FM moments collapse on the way to fcc (fcc FM is non-magnetic below about
+  11.4 A^3); the AFM moment survives (1.7 muB at 11.0 A^3 in fcc).
+- **Zero pressure:** fcc AFM lies 91 meV/atom above bcc FM (10.85 against
+  11.67 A^3). The highest point of the lowest path is 108 meV at c/a = 1.30,
+  so fcc AFM is metastable behind a barrier of 17 meV/atom. From the bcc side
+  the climb is monotonic: there is no intermediate minimum.
+- **Under pressure** the fcc end comes down: 39 meV above bcc FM at 10 GPa,
+  and 10 meV below it at 20 GPa, where it is nearly non-magnetic (fcc FM, AFM
+  and NM within 10 meV). That is above the bcc FM -> hcp NM transition
+  (15.6 GPa), so fcc is not the stable phase there. At no pressure studied is
+  fcc AFM the lowest state along the path.
+- Each point keeps the lowest self-consistent solution of several starts.
+  With the s shell there are also spurious solutions with an s spin channel
+  almost full or empty (b_inf two to five times the physical value, Fermi
+  level several eV away), up to 870 meV/atom *below* the physical states;
+  the script rejects solutions with an s spin channel outside 0.05-0.9
+  electrons.
+
+## The Egorov et al. Fe model (`iron_egorov`, `IRON_EGOROV_CONFIG`)
+
+The Fe part of the magnetic Fe-Co BOP of Egorov, Subramanyam, Yuan, Drautz and
+Hammerschmidt (arXiv:2208.12973, parameters in its Supplemental Table 1):
+d-valent, 6.98 electrons, Stoner integral 0.751 eV, bond integrals as sums of
+stretched exponentials (`pairwise.exp_sum`, cutoff 4.1 A, third neighbours
+included), square-root embedding of Gaussian densities, pair and core
+repulsion and an environment-dependent Yukawa repulsion
+(`BOPConfig(yukawa=True)`, cutoff 6 A), 9 moments with a Jackson kernel, 200
+expansion coefficients and a constant terminator. Use with
+`radial=pairwise.exp_sum`.
+
+Two choices the paper leaves open were fixed by reproducing its bcc Fe values:
+the embedding prefactor p1 multiplies the square root (as Eqs. 6-7 read, inside
+it, bcc Fe binds by -4.9 eV/atom at a = 3.05 A), and the bandwidth estimate is
+`findeminemax` (with `averaged` the 200-term expansion grows without bound).
+`hubbard` (8 eV) is not part of the published model.
+
+| bcc FM | V (A^3) | moment (muB) | B | C11 | C12 | C44 (GPa) | E (eV/atom) |
+|---|---|---|---|---|---|---|---|
+| bopjax | 11.45 | 2.875 | 184 | 272 | 140 | 85 | -8.292 |
+| paper | 11.45 | 2.88 | 185 | 269 | 147 | 90 | -8.31 (DFT) |
+
+Compared with `IRON_FIT`, the Stoner integral is smaller (0.751 against 1.165
+eV) and the dd-sigma bond integral about half as strong (-0.64 against -1.15 eV
+at 2.48 A). Its screw dislocation core keeps the bulk moment within 1.5 % along
+the whole Peierls path, where the core moment of `IRON_FIT` and `IRON_SD_FIT`
+collapses (see [Magnetic field](magnetic-field.md)). A self-consistent energy
+and force of 91 atoms costs about 5 s at fixed levels; use
+`BOPConfig(remat=True)` for gradients of large cells (2 GB instead of 6 GB).
 
 ## Targets (`examples/fit_iron.py`)
 

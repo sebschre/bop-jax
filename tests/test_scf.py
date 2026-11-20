@@ -100,3 +100,184 @@ def test_clusters_grow_by_hop_shells():
     assert topo.cluster_sizes == (1, 13, 55, 147)
     # every listed neighbour of the central atom is in its first shell
     assert set(topo.cluster_nbr[0, 0]) == set(range(1, 13))
+
+
+def test_potential_with_frozen_levels():
+    # self-consistency on atoms 0 and 1 only; the levels of 2 and 3 stay as given
+    import jax
+
+    cfg = bj.BOPConfig(nmom=6, rcut=3.3, dcut=0.5, spin="collinear")
+    topo = bj.build_topology(POS, [0] * 4, cfg.rcut, cfg.nmom, np.array(CELL))
+    energy = bj.make_energy_fn(topo, cfg)
+    params = dict(canonical_d(n_electrons=7.0, hubbard=3.0), stoner=jnp.array([[0.6]]))
+    pos = jnp.array(POS)
+    start = bj.stoner_shifts(np.full((4, 1), 2.0), 0.6)
+    full = bj.make_scf(energy)(pos, CELL, params, shifts0=start, tol=1e-12)
+    assert full.converged
+    # frozen levels near, but not at, self-consistency (as for a fixed outer shell)
+    # (not a common shift of all levels: that only moves the Fermi level)
+    frozen = full.shifts.at[2, :, 0].add(jnp.array([0.03, -0.03])).at[3, 0, 0].add(0.05)
+    free = np.array([True, True, False, False])
+    potential = bj.make_potential(energy, tol=1e-12, free=free)
+    e, aux = potential(pos, CELL, params, frozen)
+    np.testing.assert_allclose(aux["shifts"][2:], frozen[2:], atol=0)
+    g = jax.grad(lambda s: energy(s, pos, CELL, params)[0])(aux["shifts"])
+    assert float(jnp.max(jnp.abs(g[:2]))) < 1e-12
+    assert float(jnp.max(jnp.abs(g[2:]))) > 1e-3  # not stationary in the frozen levels
+    # forces are still the total derivative: the energy is stationary in the free levels
+    force = -jax.grad(lambda x: potential(x, CELL, params, frozen)[0])(pos)
+    h = 1e-3
+    for i, d in ((0, 0), (3, 2)):
+        def e_at(delta):
+            return float(potential(pos.at[i, d].add(delta), CELL, params, frozen)[0])
+
+        fd = -(-e_at(2 * h) + 8 * e_at(h) - 8 * e_at(-h) + e_at(-2 * h)) / (12 * h)
+        assert float(force[i, d]) == pytest.approx(fd, abs=1e-8)
+
+
+# --- potential self-consistency (Anderson mixing, implicit gradients) ---------------
+
+def _magnetic_cell(positions, cell, stoner=0.6):
+    cfg = bj.BOPConfig(nmom=6, rcut=3.3, dcut=0.5, spin="collinear", bandwidth="averaged")
+    topo = bj.build_topology(positions, [0] * len(positions), cfg.rcut, cfg.nmom,
+                             np.asarray(cell))
+    params = dict(canonical_d(n_electrons=7.0, hubbard=3.0), stoner=jnp.array([[stoner]]))
+    return bj.make_energy_fn(topo, cfg), params
+
+
+# distorted fcc cell: magnetic only from I = 1.4, and then close to saturation
+# (3.0 muB for 7 d electrons), where dN/d(shifts) nearly vanishes
+DISTORTED_STONER = 1.4
+
+
+def test_potential_condition_matches_stationary_in_a_perfect_crystal():
+    a = 2.9
+    pos = a * np.array([[0, 0, 0], [0.5, 0.5, 0.5]])
+    cell = jnp.array(a * np.eye(3))
+    energy, params = _magnetic_cell(pos, cell)
+    start = bj.stoner_shifts(np.full((2, 1), 2.0), 0.6)
+    stat = bj.make_potential(energy, tol=1e-12)(jnp.array(pos), cell, params, start)
+    mixed = bj.make_potential(energy, tol=1e-12, condition="potential")(
+        jnp.array(pos), cell, params, start)
+    assert float(mixed[1]["scf_residual"]) < 1e-12
+    assert float(mixed[0]) == pytest.approx(float(stat[0]), abs=1e-10)
+    np.testing.assert_allclose(mixed[1]["moment"], stat[1]["moment"], atol=1e-9)
+    # the stationary shifts already satisfy the potential condition
+    target = energy.potential_target(stat[1]["occupations"], jnp.array(pos), cell, params)
+    np.testing.assert_allclose(target - stat[1]["shifts"], 0.0, atol=1e-9)
+
+
+def test_potential_condition_gradients_carry_the_response():
+    import jax
+
+    pos = jnp.array(POS)
+    energy, params = _magnetic_cell(POS, CELL, DISTORTED_STONER)
+    start = bj.stoner_shifts(np.full((4, 1), 2.0), DISTORTED_STONER)
+    potential = bj.make_potential(energy, tol=1e-12, condition="potential")
+    e, aux = potential(pos, CELL, params, start)
+    assert float(aux["scf_residual"]) < 1e-12
+    assert float(jnp.min(aux["moment"])) > 2.9
+    # in a distorted cell the energy is not stationary in the shifts...
+    g = jax.grad(lambda s: energy(s, pos, CELL, params)[0])(aux["shifts"])
+    assert float(jnp.max(jnp.abs(g))) > 1e-6
+    # ...but jax.grad of the potential is the total derivative
+    force = -jax.grad(lambda x: potential(x, CELL, params, start)[0])(pos)
+    h = 1e-3
+    for i, d in ((0, 0), (2, 1)):
+        def e_at(delta):
+            return float(potential(pos.at[i, d].add(delta), CELL, params, aux["shifts"])[0])
+
+        fd = -(-e_at(2 * h) + 8 * e_at(h) - 8 * e_at(-h) + e_at(-2 * h)) / (12 * h)
+        assert float(force[i, d]) == pytest.approx(fd, abs=1e-7)
+    np.testing.assert_allclose(jnp.sum(force, axis=0), 0.0, atol=1e-9)
+    # and with respect to a parameter that enters the potentials only
+    def e_of(stoner):
+        return potential(pos, CELL, dict(params, stoner=stoner), start)[0]
+
+    d_stoner = float(jax.grad(e_of)(params["stoner"])[0, 0])
+    fd = (float(e_of(params["stoner"] + 1e-4)) - float(e_of(params["stoner"] - 1e-4))) / 2e-4
+    assert d_stoner == pytest.approx(fd, abs=1e-6)
+
+
+def test_potential_condition_with_frozen_levels():
+    import jax
+
+    pos = jnp.array(POS)
+    energy, params = _magnetic_cell(POS, CELL, DISTORTED_STONER)
+    start = bj.stoner_shifts(np.full((4, 1), 2.0), DISTORTED_STONER)
+    full = bj.make_potential(energy, tol=1e-12, condition="potential")(pos, CELL, params, start)
+    frozen = full[1]["shifts"].at[3, 0, 0].add(0.05)
+    free = np.array([True, True, True, False])
+    potential = bj.make_potential(energy, tol=1e-12, condition="potential", free=free)
+    e, aux = potential(pos, CELL, params, frozen)
+    np.testing.assert_allclose(aux["shifts"][3], frozen[3], atol=0)
+    target = energy.potential_target(aux["occupations"], pos, CELL, params)
+    np.testing.assert_allclose((target - aux["shifts"])[:3], 0.0, atol=1e-11)
+    force = -jax.grad(lambda x: potential(x, CELL, params, frozen)[0])(pos)
+    h = 1e-3
+
+    def e_at(delta):
+        return float(potential(pos.at[1, 2].add(delta), CELL, params, frozen)[0])
+
+    fd = -(-e_at(2 * h) + 8 * e_at(h) - 8 * e_at(-h) + e_at(-2 * h)) / (12 * h)
+    assert float(force[1, 2]) == pytest.approx(fd, abs=1e-7)
+    with pytest.raises(ValueError, match="condition"):
+        bj.make_potential(energy, condition="mixing")
+
+
+def test_scf_magnetic_moment_includes_the_response():
+    from bopjax import zeeman
+
+    pos = jnp.array(POS)
+    energy, params = _magnetic_cell(POS, CELL, DISTORTED_STONER)
+    start = bj.stoner_shifts(np.full((4, 1), 2.0), DISTORTED_STONER)
+    potential = bj.make_potential(energy, tol=1e-12, condition="potential")
+    _, aux = potential(pos, CELL, params, start)
+    total = zeeman.make_scf_magnetic_moment(potential, energy)(pos, CELL, params,
+                                                                aux["shifts"])["total"]
+    h = 2.0
+
+    def e_in(b):
+        return float(potential(pos, CELL, dict(params, magnetic_field=jnp.array([0, 0, b])),
+                               aux["shifts"])[0])
+
+    fd = -(e_in(h) - e_in(-h)) / (2 * h) / zeeman.MU_B
+    assert float(jnp.sum(total[:, 2])) == pytest.approx(fd, abs=1e-6)
+
+
+def test_electronic_temperature():
+    # Mermin free energy: continuous as kT -> 0, falls as T^2 (Sommerfeld),
+    # and stays variational (the stationary point satisfies the potential
+    # condition in a crystal); forces are derivatives of the free energy
+    import jax
+
+    a = 2.9
+    pos = jnp.array(a * np.array([[0, 0, 0], [0.5, 0.5, 0.5]]))
+    cell = jnp.array(a * np.eye(3))
+    start = bj.stoner_shifts(np.full((2, 1), 2.0), 0.6)
+    free = {}
+    for kT in (0.0, 1e-4, 0.02, 0.04):
+        cfg = bj.BOPConfig(nmom=6, rcut=3.4, dcut=0.4, spin="collinear", bandwidth="averaged",
+                           kT=kT)
+        topo = bj.build_topology(np.asarray(pos), [0, 0], cfg.rcut, cfg.nmom, np.asarray(cell))
+        energy = bj.make_energy_fn(topo, cfg)
+        params = dict(canonical_d(n_electrons=7.0, hubbard=3.0), stoner=jnp.array([[0.6]]))
+        res = bj.make_scf(energy)(pos, cell, params, shifts0=start, tol=1e-12)
+        assert res.converged
+        free[kT] = res.energy
+        target = energy.potential_target(res.aux["occupations"], pos, cell, params)
+        np.testing.assert_allclose(target - res.shifts, 0.0, atol=1e-9)
+    assert free[1e-4] == pytest.approx(free[0.0], abs=1e-7)
+    d1, d2 = free[0.0] - free[0.02], free[0.0] - free[0.04]
+    assert d1 > 0 and d2 / d1 == pytest.approx(4.0, rel=0.1)
+    # forces at kT = 0.04 against finite differences of the free energy
+    distorted = pos.at[1].add(jnp.array([0.07, -0.05, 0.03]))
+    potential = bj.make_potential(energy, tol=1e-12)
+    force = -jax.grad(lambda x: potential(x, cell, params, start)[0])(distorted)
+    h = 1e-3
+
+    def e_at(delta):
+        return float(potential(distorted.at[1, 0].add(delta), cell, params, start)[0])
+
+    fd = -(-e_at(2 * h) + 8 * e_at(h) - 8 * e_at(-h) + e_at(-2 * h)) / (12 * h)
+    assert float(force[1, 0]) == pytest.approx(fd, abs=1e-7)

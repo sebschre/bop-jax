@@ -47,6 +47,51 @@ POWERLAW = Repulsion(
 )
 
 
+def exp_sum(p, r):
+    """Sum of stretched exponentials  sum_k c_k exp(-lambda_k r^n_k), with
+    p = [c_1, lambda_1, n_1, c_2, lambda_2, n_2, ...]; unused terms have c = 0.
+    Bond integrals and pair repulsion of Egorov et al., arXiv:2208.12973 (FeCo BOP)."""
+    terms = p.reshape(-1, 3)
+    return jnp.sum(terms[:, 0] * jnp.exp(-terms[:, 1] * r ** terms[:, 2]))
+
+
+def _egorov_pair(p, r):
+    """p = [c, lambda, n, p1, p2]: c exp(-lambda r^n) plus the short-range core
+    repulsion p2 (p1 - r)^3 / r exp(p1 - r) for r < p1."""
+    core = jnp.where(r < p[3], p[4] * jnp.clip(p[3] - r, 0.0) ** 3 / r * jnp.exp(p[3] - r), 0.0)
+    return p[0] * jnp.exp(-p[1] * r ** p[2]) + core
+
+
+def _gaussian_density(p, r):
+    """p = [p1, p2, p3]: p1 exp(-p2 (r - p3)^2)."""
+    return p[0] * jnp.exp(-p[1] * (r - p[2]) ** 2)
+
+
+# Egorov et al.: pair and core repulsion, square-root embedding of Gaussian
+# densities (embed row [-p1, 0.5], density row [1, p2, p3]; see models.iron_egorov)
+EGOROV = Repulsion(pair=_egorov_pair, density=_gaussian_density, embed=_power_embed)
+
+
+def yukawa_energy(yp, r, mask, species, sp_i, sp_j, nbr_origin, rcut, dcut):
+    """Environment-dependent Yukawa repulsion per atom (Znam et al., Phil. Mag. 83,
+    415 (2003); form of Egorov et al.):
+
+        E_i = 1/2 sum_j B / r_ij exp(-lambda_ij (r_ij - 2 r_core)),
+        lambda_ij = (lambda_i + lambda_j) / 2,
+        lambda_i = lambda0 + (sum_l C exp(-upsilon r_il))^(1/m),
+
+    all sums with the cosine cutoff of the second list.
+    """
+    from .hamiltonian import cosine_cutoff
+    fc = cosine_cutoff(r, rcut, dcut) * mask
+    env = jnp.sum(fc * yp["C"][sp_i, sp_j] * jnp.exp(-yp["upsilon"][sp_i, sp_j] * r), axis=1)
+    safe = jnp.where(env > 0.0, env, 1.0)
+    lam = yp["lambda0"][species] + jnp.where(env > 0.0, safe ** (1.0 / yp["m"][species]), 0.0)
+    lam_ij = 0.5 * (lam[:, None] + lam[nbr_origin])
+    return 0.5 * jnp.sum(fc * yp["B"][sp_i, sp_j] / r
+                         * jnp.exp(-lam_ij * (r - 2.0 * yp["r_core"][sp_i, sp_j])), axis=1)
+
+
 def taper(r1, r2, r):
     """Seventh-order polynomial switching off the Coulomb integral at r2."""
     d = (r2 - r1) ** 7

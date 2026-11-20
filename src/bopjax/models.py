@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import jax.numpy as jnp
+import numpy as np
 
 from . import pairwise as pw
 from .hamiltonian import CHANNELS
@@ -205,6 +206,71 @@ CARBON_CONFIG = dict(nmom=10, nexp=20, kernel="jackson", bandwidth="averaged",
                      repulsion=pw.V0, atomic_shifts=True, bandwidth_guard=True)
 
 
+# Fe part of the magnetic Fe-Co BOP of Egorov, Subramanyam, Yuan, Drautz and
+# Hammerschmidt, arXiv:2208.12973 (Supplemental Material, Table 1): d-valent,
+# bond integrals as sums of exponentials, square-root embedding of Gaussian
+# densities, pair, core and environment-dependent Yukawa repulsion
+IRON_EGOROV = {
+    "N": 6.98, "stoner": 0.751,
+    "dds": [(-20.10578, 1.68256, 0.83602), (-3.09201, 0.38260, 2.44521),
+            (3.20957, 0.29985, 6.02389)],
+    "ddp": [(29.59495, 1.47219, 1.27945), (13.96316, 0.94631, 1.76772)],
+    "ddd": [(-10.14975, 1.90305, 1.19157), (-42.05214, 2.58244, 1.07279)],
+    "embed": (4.36232, 0.26944, 0.03008),
+    "pair": (155.20896, 1.28421, 1.60531), "core": (1.5, 100.0),
+    "yukawa": {"B": 1.24913, "r_core": 1.06402, "lambda0": 1.99623, "C": 113.85788,
+               "upsilon": 1.78242, "m": 1.18487},
+}
+
+# BOPConfig settings of the Egorov Fe model (pass radial=pairwise.exp_sum): 9 moments,
+# Jackson kernel with 200 expansion coefficients and a constant terminator;
+# cutoffs 4.1 (1.0) A for the bond integrals, 6.0 (0.5) A for embedding and repulsion.
+# The paper does not name the bandwidth estimate; "findeminemax" reproduces its bcc Fe
+# values (V 11.45 A^3, 2.875 muB, B 184, C11 272, C12 140, C44 85 GPa; paper 11.45,
+# 2.88, 185, 269, 147, 90) and keeps the 200 Chebyshev moments bounded, which the
+# "averaged" estimate does not (split-off chain states outside the band grow without
+# bound in the expansion).
+IRON_EGOROV_CONFIG = dict(nmom=9, nexp=200, kernel="jackson", terminator="constantabn",
+                          bandwidth="findeminemax", rcut=4.1, dcut=1.0, rcut2=6.0, dcut2=0.5,
+                          repulsion=pw.EGOROV, yukawa=True)
+
+
+def iron_egorov(hubbard=8.0, **values):
+    """Parameters of the Egorov et al. Fe model (``IRON_EGOROV``, overridable by
+    keyword).  Use with ``BOPConfig(**IRON_EGOROV_CONFIG, spin=...)`` and
+    ``radial=pairwise.exp_sum``.  ``hubbard`` (not part of the published model)
+    keeps atoms close to charge neutrality in inhomogeneous structures."""
+    v = {k: val for k, val in IRON_EGOROV.items()}
+    v.update(values)
+
+    def channel(terms):
+        flat = [x for t in terms for x in t]
+        flat += [0.0, 1.0, 1.0] * (3 - len(terms))  # pad to three terms
+        return jnp.array([[flat]])
+
+    y = v["yukawa"]
+    return {
+        "onsite": jnp.array([[0.0]]),
+        "n0": jnp.array([[v["N"]]]),
+        "hubbard": jnp.array([hubbard]),
+        "stoner": jnp.array([[v["stoner"]]]),
+        "bond": {c: channel(v[c]) for c in ("dds", "ddp", "ddd")},
+        "repulsion": {
+            "pair": jnp.array([[[*v["pair"], *v["core"]]]]),
+            # E_emb = -p1 sqrt(sum_j exp(-p2 (r - p3)^2)): with p1 inside the square
+            # root, as Eqs. 6-7 of the paper read, bcc Fe binds by -4.9 eV/atom at
+            # a = 3.05 A; with p1 in front it binds by -8.30 eV/atom at 2.83 A, the
+            # DFT energy the model was fitted to (-8.31 eV/atom, a = 2.84 A)
+            "density": jnp.array([[[1.0, v["embed"][1], v["embed"][2]]]]),
+            "embed": jnp.array([[-v["embed"][0], 0.5]]),
+        },
+        "yukawa": {"B": jnp.array([[y["B"]]]), "r_core": jnp.array([[y["r_core"]]]),
+                   "C": jnp.array([[y["C"]]]), "upsilon": jnp.array([[y["upsilon"]]]),
+                   "lambda0": jnp.array([y["lambda0"]]), "m": jnp.array([y["m"]])},
+    }
+
+
+
 # --- iron-carbon: the d iron model and the sp carbon model with d-sp cross terms ---
 
 
@@ -226,132 +292,161 @@ def tapered_exp(p, r):
 TAPERED_V0 = pw.Repulsion(pair=tapered_exp, density=tapered_exp, embed=pw.V0.embed)
 
 
-# fitted cross parameters of the iron-carbon model (examples/fit_iron_carbon.py,
-# docs/iron-carbon.md)
+def tapered_exp_sum(p, r):
+    """Sum of three stretched exponentials (``pairwise.exp_sum``, p[:9]) switched
+    off between ``p[9] - p[10]`` and ``p[9]``: bond integrals of every pair of
+    species in one form, each with its own range."""
+    return pw.exp_sum(p[:9], r) * _taper(r, p[9], p[10])
+
+
+def _tapered_pair(p, r):
+    """Egorov pair and core repulsion (p[:5]) with a taper (p[5], p[6])."""
+    return pw.EGOROV.pair(p[:5], r) * _taper(r, p[5], p[6])
+
+
+def _tapered_density(p, r):
+    """Gaussian p0 exp(-p1 (r - p2)^2) plus exponential p3 exp(-p4 r), with a
+    taper (p[5], p[6]): Egorov's iron density and the carbon density in one form."""
+    return ((p[0] * jnp.exp(-p[1] * (r - p[2]) ** 2) + p[3] * jnp.exp(-p[4] * r))
+            * _taper(r, p[5], p[6]))
+
+
+# repulsion of the iron-carbon model: pair, core and embedding per pair of species
+FECARBON_REPULSION = pw.Repulsion(pair=_tapered_pair, density=_tapered_density,
+                                  embed=pw.V0.embed)
+
+NO_TAPER = (100.0, 1.0)  # leaves a pair to the global cosine cutoff
+
+
+# starting values of the Fe-C cross terms (examples/fit_iron_carbon.py,
+# docs/iron-carbon.md); replaced by the fit
 IRON_CARBON_FIT = {
-    "e_c": 3.0, "sss": -0.5, "sps": 1.0, "sds": -0.5, "pds": -0.8, "pdp": 0.4, "decay": 3.0,
-    "pair": 1.0, "pair_decay": 6.0, "rho_fe": 1.0, "rho_c": 1.0, "rho_decay": 3.0,
-    "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 2.0,
+    "e_c": 0.0, "sds": -0.5, "pds": -0.8, "pdp": 0.4, "decay": 3.0,
+    "pair": 1.0, "pair_decay": 6.0, "rho_fe": 0.3, "rho_c": 0.3, "rho_decay": 3.0,
+    "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 8.0,
 }
 
 FE, C = 0, 1  # species indices of the iron-carbon model
 
 
+def _exp_term(beta, decay, r0):
+    """beta exp(-decay (r / r0 - 1)) as one stretched-exponential term."""
+    return [beta * float(np.exp(decay)) if not hasattr(beta, "shape") else beta * jnp.exp(decay),
+            decay / r0, 1.0]
+
+
 def iron_carbon(iron_values=None, carbon_values=None, **values):
-    """Iron (species 0, the sd model ``IRON_SD_FIT``: 3d and 4s, 8 valence
-    electrons) and carbon (species 1, the sp model ``CARBON_FIT``) with
-    bonds between them.
+    """Iron (species 0, the d model of Egorov et al., ``iron_egorov``) and carbon
+    (species 1, the sp model ``CARBON_FIT``) with Fe 3d - C 2s, 2p bonds.
 
     Use with ``BOPConfig(**IRON_CARBON_CONFIG, spin=...)`` and
-    ``radial=models.tapered_exp``.  Fe-Fe and C-C interactions are exactly
-    those of ``iron(basis=("s", "d"))`` and ``carbon()``, with their own
-    cutoffs; ``iron_values`` and ``carbon_values`` override their
-    parameters.  Keyword arguments override entries of ``IRON_CARBON_FIT``,
-    the Fe-C terms:
+    ``radial=models.tapered_exp_sum``.  Fe-Fe and C-C interactions are exactly
+    those of ``iron_egorov()`` and ``carbon()``; ``iron_values`` and
+    ``carbon_values`` override their parameters.  Keyword arguments override
+    entries of ``IRON_CARBON_FIT``, the Fe-C terms:
 
       e_c                 shift of the carbon levels (2s and 2p together)
                           against the iron d level (eV)
-      sss, sps            Fe 4s - C 2s and Fe 4s - C 2p bond integrals at r0
       sds, pds, pdp       C 2s - Fe 3d and C 2p - Fe 3d bond integrals at r0,
-                          all ``beta * exp(-decay (r / r0 - 1))`` (eV)
+                          each ``beta * exp(-decay (r / r0 - 1))`` (eV)
       pair, pair_decay    Fe-C pair term ``pair * exp(-pair_decay (r / r0 - 1))``
       rho_fe, rho_c, rho_decay
                           embedding density that a C neighbour adds on Fe
                           (``rho_fe``) and an Fe neighbour adds on C
                           (``rho_c``), both ``* exp(-rho_decay (r / r0 - 1))``
       rcut, dcut          range of every Fe-C term (taper from rcut - dcut)
-      hubbard_c           onsite Coulomb integral of carbon (eV); in pure
-                          carbon phases it does nothing (no charge transfer)
+      hubbard_c           onsite Coulomb integral of carbon (eV); it does
+                          nothing in pure carbon (no charge transfer)
+
+    The Yukawa repulsion of iron acts between iron atoms only: carbon neither
+    feels it nor screens it.
     """
-    fe = dict(IRON_FIT, **IRON_SP_DEFAULTS)
-    fe.update(IRON_SD_FIT)
-    fe.update(iron_values or {})
+    fe = dict(IRON_EGOROV, **(iron_values or {}))
     cv = dict(CARBON_FIT, **(carbon_values or {}))
     v = dict(IRON_CARBON_FIT, **values)
-    fe_cut = (IRON_CONFIG["rcut"], IRON_CONFIG["dcut"])
-    c_cut = (CARBON_CONFIG["rcut"], CARBON_CONFIG["dcut"])
     x_cut = (v["rcut"], v["dcut"])
+    c_cut = (CARBON_CONFIG["rcut"], CARBON_CONFIG["dcut"])
+    zero_bond = [0.0, 1.0, 1.0] * 3 + list(NO_TAPER)
 
-    def row(amp, decay, r0, cut):
-        return [amp, decay, r0, cut[0], cut[1]]
+    def bond_row(terms, cut):
+        flat = [x for t in terms for x in t] + [0.0, 1.0, 1.0] * (3 - len(terms))
+        return flat + list(cut)
 
-    zero = row(0.0, 1.0, 1.0, (1.0, 0.5))
-
-    def table(entries):
-        """(2, 2, 5) parameter array from {(a, b): row}."""
+    def table(entries, zero):
         t = [[zero, zero], [zero, zero]]
-        for (a, b), r in entries.items():
-            t[a][b] = r
+        for (a, b), row in entries.items():
+            t[a][b] = row
         return jnp.array(t)
 
-    def fe_fe(c):
-        decay = fe["decay"] if c in ("dds", "ddp", "ddd") else fe["decay_sp"]
-        return row(fe[c], decay, fe["r0"], fe_cut)
+    def c_term(c):
+        return [_exp_term(cv[c], cv["decay"], cv["r0"])]
 
-    def c_c(c):
-        return row(cv[c], cv["decay"], cv["r0"], c_cut)
-
-    def x(c):
-        return row(v[c], v["decay"], v["r0"], x_cut)
+    def x_term(c):
+        return [_exp_term(v[c], v["decay"], v["r0"])]
 
     # mixed channels: entry [a, b] has the lower shell on a, the higher on b
-    bond = {
-        "dds": table({(FE, FE): fe_fe("dds")}),
-        "ddp": table({(FE, FE): fe_fe("ddp")}),
-        "ddd": table({(FE, FE): fe_fe("ddd")}),
-        "sss": table({(FE, FE): fe_fe("sss"), (C, C): c_c("sss"),
-                      (FE, C): x("sss"), (C, FE): x("sss")}),
-        "sds": table({(FE, FE): fe_fe("sds"), (C, FE): x("sds")}),
-        "sps": table({(C, C): c_c("sps"), (FE, C): x("sps")}),
-        "pps": table({(C, C): c_c("pps")}),
-        "ppp": table({(C, C): c_c("ppp")}),
-        "pds": table({(C, FE): x("pds")}),
-        "pdp": table({(C, FE): x("pdp")}),
-    }
+    bond = {c: table({(FE, FE): bond_row(fe[c], NO_TAPER)}, zero_bond)
+            for c in ("dds", "ddp", "ddd")}
+    for c in ("sss", "sps", "pps", "ppp"):
+        bond[c] = table({(C, C): bond_row(c_term(c), c_cut)}, zero_bond)
+    for c in ("sds", "pds", "pdp"):
+        bond[c] = table({(C, FE): bond_row(x_term(c), x_cut)}, zero_bond)
+
+    zero7 = [0.0, 1.0, 1.0, 0.0, 0.0] + list(NO_TAPER)
+    c_pair = _exp_term(cv["pair"], cv["pair_decay"], cv["r0"])
+    x_pair = _exp_term(v["pair"], v["pair_decay"], v["r0"])
+    pair = table({
+        (FE, FE): [*fe["pair"], *fe["core"], *NO_TAPER],
+        (C, C): [*c_pair, 0.0, 0.0, *c_cut],
+        (FE, C): [*x_pair, 0.0, 0.0, *x_cut],
+        (C, FE): [*x_pair, 0.0, 0.0, *x_cut]}, zero7)
+    c_rho = _exp_term(1.0, cv["density_decay"], cv["r0"])[:2]
+    density = table({
+        (FE, FE): [1.0, fe["embed"][1], fe["embed"][2], 0.0, 0.0, *NO_TAPER],
+        (C, C): [0.0, 1.0, 0.0, *c_rho, *c_cut],
+        (FE, C): [0.0, 1.0, 0.0, *_exp_term(v["rho_fe"], v["rho_decay"], v["r0"])[:2], *x_cut],
+        (C, FE): [0.0, 1.0, 0.0, *_exp_term(v["rho_c"], v["rho_decay"], v["r0"])[:2], *x_cut]},
+        zero7)
+    y = fe["yukawa"]
+
+    def fe_only(value):
+        return jnp.array([[value, 0.0], [0.0, 0.0]])
+
     e_c = v["e_c"]
     return {
-        # shells (s, p, d); iron has s and d, carbon s and p
-        "onsite": jnp.array([[fe["e_s"], 0.0, 0.0], [cv["e_s"] + e_c, e_c, 0.0]]),
-        # free-atom references: 3d7 4s1 and 2s2 2p2 (fix the zero of energy)
-        "n0": jnp.array([[1.0, 0.0, fe["n_el"] - 1.0], [2.0, 2.0, 0.0]]),
+        # shells (s, p, d); iron has only d, carbon only s and p
+        "onsite": jnp.array([[0.0, 0.0, 0.0], [cv["e_s"] + e_c, e_c, 0.0]]),
+        "n0": jnp.array([[0.0, 0.0, fe["N"]], [2.0, 2.0, 0.0]]),
         "hubbard": jnp.array([8.0, v["hubbard_c"]]),
         "stoner": jnp.array([[0.0, 0.0, fe["stoner"]], [0.0, 0.0, 0.0]]),
         "bond": bond,
-        "repulsion": {
-            "pair": table({
-                (FE, FE): row(fe["pair"], fe["pair_decay"], fe["r0"], fe_cut),
-                (C, C): row(cv["pair"], cv["pair_decay"], cv["r0"], c_cut),
-                (FE, C): row(v["pair"], v["pair_decay"], v["r0"], x_cut),
-                (C, FE): row(v["pair"], v["pair_decay"], v["r0"], x_cut)}),
-            # density[a, b]: what a neighbour of species b adds on an atom of a
-            "density": table({
-                (FE, FE): row(1.0, fe["density_decay"], fe["r0"], fe_cut),
-                (C, C): row(1.0, cv["density_decay"], cv["r0"], c_cut),
-                (FE, C): row(v["rho_fe"], v["rho_decay"], v["r0"], x_cut),
-                (C, FE): row(v["rho_c"], v["rho_decay"], v["r0"], x_cut)}),
-            "embed": jnp.array([[-fe["embed"], 0.5], [-cv["embed"], 0.5]]),
-        },
+        "repulsion": {"pair": pair, "density": density,
+                      "embed": jnp.array([[-fe["embed"][0], 0.5], [-cv["embed"], 0.5]])},
+        "yukawa": {"B": fe_only(y["B"]), "r_core": fe_only(y["r_core"]),
+                   "C": fe_only(y["C"]), "upsilon": fe_only(y["upsilon"]),
+                   "lambda0": jnp.array([y["lambda0"], 0.0]),
+                   "m": jnp.array([y["m"], 1.0])},
     }
 
 
 def _iron_carbon_config():
     from .bop import SpeciesSettings
 
-    fe = SpeciesSettings(basis=("s", "d"), nmom=IRON_CONFIG["nmom"],
-                         bandwidth=IRON_CONFIG["bandwidth"], kernel="none")
+    e = IRON_EGOROV_CONFIG
+    fe = SpeciesSettings(basis=("d",), nmom=e["nmom"], nexp=e["nexp"], kernel=e["kernel"],
+                         terminator=e["terminator"], bandwidth=e["bandwidth"])
     c = SpeciesSettings(basis=CARBON_CONFIG["basis"], nmom=CARBON_CONFIG["nmom"],
                         nexp=CARBON_CONFIG["nexp"], bandwidth=CARBON_CONFIG["bandwidth"],
-                        kernel=CARBON_CONFIG["kernel"],
+                        kernel=CARBON_CONFIG["kernel"], terminator="none",
                         bandwidth_guard=CARBON_CONFIG["bandwidth_guard"],
                         spin_polarized=False, atomic_shifts=True)
-    rmax = max(IRON_CONFIG["rcut"], CARBON_CONFIG["rcut"], 3.0)
-    # the global cutoff is a hard step at the longest range; every pair is
-    # tapered inside its own radial function
+    # global cutoffs are those of the iron model; carbon and Fe-C pairs taper
+    # off inside their own functions, well inside the global ones
     return dict(basis=("s", "p", "d"), species=(fe, c),
-                nmom=max(IRON_CONFIG["nmom"], CARBON_CONFIG["nmom"]),
-                rcut=rmax, dcut=0.0, rcut2=rmax, dcut2=0.0, repulsion=TAPERED_V0)
+                nmom=max(e["nmom"], CARBON_CONFIG["nmom"]),
+                rcut=e["rcut"], dcut=e["dcut"], rcut2=e["rcut2"], dcut2=e["dcut2"],
+                repulsion=FECARBON_REPULSION, yukawa=True)
 
 
-# BOPConfig settings of the iron-carbon model (pass radial=models.tapered_exp);
-# Fe-C terms must not reach beyond rcut
+# BOPConfig settings of the iron-carbon model (pass radial=models.tapered_exp_sum)
 IRON_CARBON_CONFIG = _iron_carbon_config()
