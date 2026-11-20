@@ -1,26 +1,40 @@
 # Iron-carbon
 
 A BOP for Fe-C (`bopjax.models.iron_carbon`, `IRON_CARBON_FIT`,
-`IRON_CARBON_CONFIG`) built from the two elemental models: iron is the
-magnetic sd model of [Iron](iron.md) (`IRON_SD_FIT`), carbon the sp model of
-[Carbon](carbon.md) (`CARBON_FIT`). Fe-Fe and C-C interactions are exactly
-those of the two models; only the Fe-C terms are new.
+`IRON_CARBON_CONFIG`, `radial=models.tapered_exp_sum`) built from two
+elemental models: iron is the Fe model of Egorov et al.
+([Iron](iron.md#the-egorov-et-al-fe-model-iron_egorov-iron_egorov_config):
+d-valent, Stoner integral 0.751 eV, 200-term Jackson expansion), carbon the
+sp model of [Carbon](carbon.md) (`CARBON_FIT`). Fe-Fe and C-C interactions
+are exactly those of the two models (to 1e-13 eV); only the Fe-C terms are
+new. As Egorov et al. did for Fe-Co, the elemental models are kept fixed
+and only the cross terms are fitted.
 
-**Status: the Fe-C cross parameters are not fitted.** The values in
-`IRON_CARBON_FIT` are starting guesses. The machinery is in place and
-tested, but magnetic self-consistency of carbon in iron is not robust
-enough for a fit yet; see [Open problem](#open-problem-magnetic-self-consistency).
+## Approach
 
-## Which coupling
+Two lessons from the Egorov iron model and the
+[potential self-consistency](formulation.md#potential-self-consistency)
+decided the approach, after the attempts described under
+[History](#history-what-did-not-work):
 
-The Fe-C bond couples C 2s and 2p to Fe 3d (`sds`; `pds`, `pdp`) and, with
-the sd iron model, to Fe 4s (`sss`, `sps`). A d-p model (no C 2s) would
-have meant dropping the s shell of the carbon model and refitting it; with
-d-sp the carbon model stays sp-valent, and the C 2s - Fe 3d sigma bond,
-which carbides have, is kept. The model was first built on the d iron
-model (`IRON_FIT`, d-sp coupling only); it moved to the sd model because
-without a 4s shell iron could only exchange charge with carbon through its
-d band, and the magnetic self-consistency ran away (below).
+- **A moderate Stoner integral and weaker dd bonds.** The earlier iron
+  models (`IRON_FIT`, `IRON_SD_FIT`: Stoner 1.16 eV, dd-sigma about twice
+  Egorov's) put iron next to carbon close to saturation, where the
+  self-consistency has nearly flat directions. Egorov's iron keeps bulk-like
+  moments in defect cores, and next to carbon (below) too.
+- **The potential condition** (shifts = dE_dc/dN, Anderson mixing) instead
+  of the stationary condition. The BOP bond energy is not exactly
+  variational in inhomogeneous cells; near saturation the stationary point
+  moves far away and Newton's method stalls, which is what every
+  stationary attempt for Fe16C ran into. With the potential condition the
+  tetrahedral Fe16C cell, which never converged before, converges in 25
+  iterations (about 1 minute including compilation). Each converged state
+  records its stationarity, max |dE/dshift| (about 0.08 eV in Fe16C at the
+  starting parameters), to which the energy is off to first order.
+
+The Fe-C bond couples C 2s and 2p to Fe 3d (`sds`; `pds`, `pdp`): d-sp,
+because the carbon model is sp-valent and carbides have a C 2s - Fe 3d sigma
+bond. A d-p model would have meant dropping the s shell of the carbon model.
 
 ## What it took in the code
 
@@ -33,12 +47,16 @@ d band, and the magnetic self-consistency ran away (below).
   expansion; both share one Fermi level. With these settings pure iron and
   pure carbon cells give the energies, moments and occupations of the
   elemental models to 1e-13 eV, including distorted cells.
-- **Per-pair cutoffs** (`models.tapered_exp`, `models.TAPERED_V0`). Every
-  bond integral, pair term and embedding density carries its own cosine
-  taper: Fe-Fe 3.0-3.4 A, C-C 1.9-2.2 A, Fe-C 2.5-3.0 A (bcc octahedral
-  site: 1.43 and 2.02 A; cementite: 1.9-2.1 A; the next Fe shell of the
-  octahedral site, 3.19 A, is outside). The global cutoff is a hard step at
-  3.4 A that no pair reaches.
+- **One functional form for all pairs, with per-pair ranges**
+  (`models.tapered_exp_sum`, `models.FECARBON_REPULSION`). Bond integrals
+  are sums of three stretched exponentials (Egorov's form; carbon's single
+  exponentials are one term); the pair term is Egorov's pair and core
+  repulsion; the embedding density is a Gaussian (Egorov) plus an
+  exponential (carbon). Each carries its own cosine taper: C-C 1.9-2.2 A,
+  Fe-C 2.5-3.0 A (bcc octahedral site: 1.43 and 2.02 A; cementite:
+  1.9-2.1 A; the next Fe shell of the octahedral site, 3.19 A, is
+  outside), while Fe-Fe keeps Egorov's global cutoffs (4.1/1.0 A bonds,
+  6.0/0.5 A repulsion). The Yukawa repulsion acts between iron atoms only.
 - **One onsite shift per atom for carbon** (`atomic_shifts`, globally in
   `CARBON_CONFIG` and per species in `SpeciesSettings`). With one shift per
   shell, the shift of C 2s against 2p has no restoring force (the Hubbard
@@ -56,29 +74,26 @@ d band, and the magnetic self-consistency ran away (below).
   (2s held 2.3 electrons at the tetrahedral site). The guard widens it
   where needed; carbon was refitted with it.
 
-## Self-consistency (`examples/_iron_carbon.py`)
+## Calculator (`examples/_iron_carbon.py`)
 
-Where it works, the 17-atom cells are solved by chord-Newton on the shifts (one dense
-Hessian, built from Hessian-vector products in batches of four and reused
-until convergence slows; Levenberg-Marquardt steps when Newton fails), from
-the previous solution during relaxations and fits. Newton-Krylov on these
-cells took about a minute per step. Cold starts are the delicate part:
-carbon can take or give most of an electron, which the Hubbard term
-answers with shifts of several eV, and joint Newton steps from zero land on
-spurious stationary points (occupations outside the capacity of a shell,
-energies hundreds of eV too high). The calculator therefore picks the
-carbon shift from a scan over physically sane states, converges iron with
-carbon fixed and carbon in capped steps, rejects any state with an
-occupation outside its shell, and starts magnetic cells from the
-non-magnetic levels plus a Stoner splitting, or by a continuation in the
-Stoner integral. A cold non-magnetic Fe16C takes 1-4 minutes on 4 cores,
-a magnetic one 5-20 minutes when it converges.
+`Calculator` wraps `make_potential(condition="potential")` with warm starts,
+rejects states with an occupation outside a shell, and records the
+stationarity. Exact forces (implicit differentiation, one GMRES adjoint
+solve) cost about 100 s and 12 GB for Fe16C with `remat`; inside the fit,
+forces and stress are partial derivatives at the converged shifts
+(`exact = False`: 5 s, error first order in the stationarity; 0.08 eV/A
+against the exact force at a relaxed tetrahedral cell). The breathing
+modes of the first two Fe shells around C relax in about 3 minutes.
 
-## Open problem: magnetic self-consistency
+## History: what did not work
 
-Non-magnetic Fe-C cells converge reliably, and pure iron and pure carbon
-are unchanged. Ferromagnetic cells with carbon do not converge reliably
-enough to fit:
+### Stationary self-consistency on the earlier iron models
+
+The model was first built on the d iron model (`IRON_FIT`) and then on the
+sd model (`IRON_SD_FIT`), with the stationary condition, solved by
+chord-Newton on the shifts and a series of cold-start strategies.
+Non-magnetic Fe-C cells converged reliably; ferromagnetic cells with
+carbon did not, on the earlier iron models:
 
 - With the d iron model: the octahedral Fe16C cell converged at some
   parameters (C -0.12 to -0.35 muB antiparallel to Fe, axial Fe neighbours
@@ -88,21 +103,20 @@ enough to fit:
   (Hubbard 8 eV) pushed the Fe moments to 2.7-2.8 muB, close to
   saturation, where the levels along the majority shifts are not unique;
   a weaker carbon Hubbard term (2 eV) let carbon take about four electrons.
-- With the sd iron model: the tetrahedral cell gets closer (residual
-  1.3e-3 against 0.09) but still fails, and accepting small residuals moved
+- With the sd iron model: the tetrahedral cell got closer (residual
+  1.3e-3 against 0.09) but still failed, and accepting small residuals moved
   the failure elsewhere rather than removing it.
 
-The pieces that were tried are in `examples/_iron_carbon.py`: chord-Newton
-with Levenberg-Marquardt, block cold starts, starts from the non-magnetic
-levels, a Stoner continuation, rejection of states whose occupations exceed
-their shells, and acceptance of residuals along flat modes. What remains
-looks like a property of the functional rather than of the solver: the
-truncated expansion does not satisfy the band-structure theorem exactly,
-so near-degenerate directions (saturated majority bands, the charge of a
-carbon atom whose 2p sits near the Fermi level) keep a residual that no
-choice of levels removes.
+Chord-Newton with Levenberg-Marquardt, block cold starts, starts from the
+non-magnetic levels, a Stoner continuation and acceptance of residuals along
+flat modes were tried (in the git history of `examples/_iron_carbon.py`).
+What remained was a property of the functional rather than of the solver:
+the truncated expansion does not satisfy the band-structure theorem
+exactly, so near-degenerate directions (saturated majority bands) keep a
+residual that no choice of levels removes. This is the delta of the
+[potential self-consistency](formulation.md#potential-self-consistency).
 
-### Expansion settings against exact tight binding
+### Expansion settings against exact tight binding (earlier iron models)
 
 `benchmarks/expansion_vs_exact.py` compares the band energy of the
 expansion (non-magnetic, zero shifts) with exact k-point diagonalisation of
@@ -127,17 +141,7 @@ with them (0.14 eV/atom in Fe16C, 0.34 eV in tet - oct) is the truncation at
 graphene - diamond (2.4 eV/atom) with the strong sigma integrals of the
 refit; as a fitted BOP it still reproduces its targets.
 
-Possible ways on, none tried yet:
-
-- fit the cross terms with non-magnetic iron and use them as a starting
-  point (the targets are ferromagnetic quantities, so only approximately);
-- more moments for both species (the remaining error is truncation), at a
-  cost that grows with the cluster of the 3.4 A iron cutoff;
-- a larger cell (Fe54C), where fewer iron atoms are near carbon;
-- local charge neutrality (a large Hubbard term on iron and carbon) with
-  the moments constrained, as some transition-metal BOPs do.
-
-## Targets (`examples/fit_iron_carbon.py`, prepared but not reached)
+## Targets (`examples/fit_iron_carbon.py`)
 
 | Property | Target | Tolerance | Source |
 |---|---|---|---|
@@ -148,7 +152,7 @@ Possible ways on, none tried yet:
 | pressure of cementite at the experimental lattice | 0 | 5 GPa | |
 | mean Fe moment of cementite | 1.95 muB | 0.15 | DFT, rounded |
 
-Fe16C cells (2x2x2 bcc, a = 2.855 A, the equilibrium of `IRON_SD_FIT`),
+Fe16C cells (2x2x2 bcc, a = 2.8394 A, the equilibrium of the Egorov iron),
 FM, the breathing modes of the first two Fe shells around C relaxed during
 the fit (all atoms at fixed cell for the report; a full relaxation needs
 fresh levels after almost every step and costs about an hour), C held on
@@ -159,12 +163,12 @@ relaxed at fixed cell for the report. The tolerances are loose: a 16-atom
 cell is not the dilute limit, and three of the targets were not checked
 against the papers.
 
-## Cross parameters (to be fitted)
+## Cross parameters
 
-`e_c` (C levels against Fe d), `sss`, `sps`, `sds`, `pds`, `pdp` and their
+`e_c` (C levels against Fe d), `sds`, `pds`, `pdp` and their
 common decay `decay` at r0 = 1.95 A, the Fe-C pair term (`pair`,
 `pair_decay`), the embedding densities a C neighbour adds on Fe (`rho_fe`)
 and an Fe neighbour on C (`rho_c`), decaying with `rho_decay` (fixed at 3),
 and the onsite Coulomb integral of carbon (`hubbard_c`), which does
-nothing in pure carbon. One more target keeps carbon's charge moderate
+nothing in pure carbon. 10 parameters, bounded least squares. One more target keeps carbon's charge moderate
 (+0.3 +- 0.4 electrons in the octahedral site).
