@@ -1,7 +1,7 @@
 """Iron-carbon cells and the calculator the Fe-C cross terms are fitted with.
 
-Used by ``examples/fit_iron_carbon.py``.  Species 0 is Fe (the sd model
-``IRON_SD_FIT``), species 1 is C (the sp model ``CARBON_FIT``).  Lengths in
+Used by ``examples/fit_iron_carbon.py``.  Species 0 is Fe (the d model of
+Egorov et al., ``iron_egorov``), species 1 is C (the sp model ``CARBON_FIT``).  Lengths in
 Angstrom, energies in eV, stresses in GPa, moments in Bohr magnetons.
 """
 
@@ -14,10 +14,10 @@ import jax.numpy as jnp
 import numpy as np
 
 import bopjax as bj
-from bopjax.models import FE, IRON_CARBON_CONFIG, C, iron_carbon, tapered_exp
+from bopjax.models import FE, IRON_CARBON_CONFIG, C, iron_carbon, tapered_exp_sum
 
 EV_A3_TO_GPA = 160.21766
-A_FE = 2.8550  # bcc FM equilibrium of the sd iron model (IRON_SD_FIT)
+A_FE = 2.8394  # bcc FM equilibrium of the Egorov iron model (V = 11.45 A^3)
 A_DIAMOND = 3.5653  # diamond equilibrium of CARBON_FIT
 
 
@@ -73,348 +73,78 @@ class Cell:
     fe_moment: float = 2.4  # starting moment of each Fe atom
 
 
-class _Chord:
-    """Newton's method for stationary levels in the subspace ``levels = B x``,
-    with a cached Hessian (a chord method) and a Levenberg-Marquardt fallback
-    on |g|^2 as in ``bopjax.make_scf``.
-
-    The Hessian is built once and reused across relaxation steps and nearby
-    parameters until the residual stops dropping fast; every iteration then
-    costs one gradient.
-    """
-
-    def __init__(self, energy, basis, shape):
-        self.basis = jnp.asarray(basis)
-
-        def e_of(x, pos, cell, params):
-            return energy((self.basis @ x).reshape(shape), pos, cell, params)
-
-        grad_x = jax.grad(lambda *a: e_of(*a)[0])
-
-        def hessian(x, pos, cell, params):
-            # columns in small batches: all tangents at once need ~20 GB
-            def column(v):
-                return jax.jvp(lambda y: grad_x(y, pos, cell, params), (x,), (v,))[1]
-            return jax.lax.map(column, jnp.eye(len(x), dtype=x.dtype), batch_size=4)
-
-        def columns(x, pos, cell, params, vs):
-            """H @ vs.T for a few directions vs (k, n)."""
-            def column(v):
-                return jax.jvp(lambda y: grad_x(y, pos, cell, params), (x,), (v,))[1]
-            return jax.lax.map(column, vs, batch_size=4).T
-
-        self._vg = jax.jit(jax.value_and_grad(e_of, has_aux=True))
-        self._hess = jax.jit(hessian)
-        self.columns = jax.jit(columns)
-        self.h = None
-        self.n_hessian = 0
-
-    def _new_hessian(self, x, pos, cell, params):
-        h = self._hess(x, pos, cell, params)
-        self.h = 0.5 * (h + h.T)
-        self.hinv = jnp.linalg.pinv(self.h, rtol=1e-10, hermitian=True)
-        self.normal = self.h @ self.h
-        self.n_hessian += 1
-
-    def __call__(self, x, pos, cell, params, tol, max_iter, verbose=False):
-        (e, aux), g = self._vg(x, pos, cell, params)
-        if self.h is None:
-            self._new_hessian(x, pos, cell, params)
-        fresh, stale = False, False
-        energies = [float(e)]
-        self.flat_accepted = None
-        for _ in range(max_iter):
-            if float(jnp.max(jnp.abs(g))) < tol:
-                break
-            norm = float(jnp.linalg.norm(g))
-            if stale and not fresh:
-                self._new_hessian(x, pos, cell, params)
-                fresh = True
-            accepted, damping = False, 0.0
-            scale = float(jnp.max(jnp.diag(self.normal)))
-            for _ in range(10):
-                if damping == 0.0:
-                    step = -(self.hinv @ g)
-                else:
-                    step = -jnp.linalg.solve(self.normal + damping * jnp.eye(len(x)),
-                                             self.h @ g)
-                (e_new, aux_new), g_new = self._vg(x + step, pos, cell, params)
-                norm_new = float(jnp.linalg.norm(g_new))
-                if np.isfinite(norm_new) and norm_new < 0.95 * norm:
-                    accepted = True
-                    break
-                damping = 1e-4 * scale if damping == 0.0 else 10.0 * damping
-            if not accepted and fresh:
-                # The residual lies along a soft mode (the C 2s level against
-                # 2p): Newton's step there is far too long and |g|^2 has a
-                # false minimum.  Search along the softest modes that carry it.
-                w, v = jnp.linalg.eigh(self.h)
-                proj = v.T @ g
-                carry = jnp.abs(proj) > 0.2 * jnp.linalg.norm(g)
-                order = jnp.argsort(jnp.where(carry, jnp.abs(w), jnp.inf))
-                best = (norm, None)
-                for k in [int(i) for i in order[:2] if bool(carry[int(i)])]:
-                    direction = -jnp.sign(proj[k]) * v[:, k]
-                    for t in (0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, -0.1, -0.4, -1.6):
-                        (e_t, aux_t), g_t = self._vg(x + t * direction, pos, cell, params)
-                        n_t = float(jnp.linalg.norm(g_t))
-                        if np.isfinite(n_t) and n_t < best[0]:
-                            best = (n_t, (t * direction, e_t, aux_t, g_t))
-                if best[1] is not None and best[0] < 0.95 * norm:
-                    step, e_new, aux_new, g_new = best[1]
-                    norm_new = best[0]
-                    accepted = True
-            if not accepted:
-                if fresh:
-                    # neither Newton nor damped steps reduce it any further
-                    flat = (self._flat_residual(g, energies)
-                            or float(jnp.max(jnp.abs(g))) < 3e-3)
-                    if flat:
-                        self.flat_accepted = float(jnp.max(jnp.abs(g)))
-                    break
-                stale = True
-                continue
-            if verbose:
-                print(f"  scf {len(x)} |g| {norm:.3e} -> {norm_new:.3e}  fresh={fresh}",
-                      flush=True)
-            stale = norm_new > 0.3 * norm  # slow with an old Hessian: rebuild
-            fresh = False
-            x, e, aux, g = x + step, e_new, aux_new, g_new
-            energies.append(float(e))
-            if len(energies) >= 4 and self._flat_residual(g, energies):
-                self.flat_accepted = float(jnp.max(jnp.abs(g)))
-                break
-        res = float(jnp.max(jnp.abs(g)))
-        if self.flat_accepted is not None:
-            res = 0.0  # accepted: what is left lies along flat modes
-        return x, e, aux, res
-
-    def _flat_residual(self, g, energies, gmax=0.1, lam=0.02, share=0.9, de=1e-4):
-        """True when what is left of the residual is small, lies along
-        near-null modes of the Hessian, and the energy has stopped moving.
-        Near a saturated majority d band the levels along those modes are
-        not unique and the truncated expansion leaves a residual there that
-        Newton cannot remove; the energy is flat along them."""
-        if self.h is None or float(jnp.max(jnp.abs(g))) > gmax or len(energies) < 3:
-            return False
-        if max(energies[-3:]) - min(energies[-3:]) > de:
-            return False
-        if float(jnp.max(jnp.abs(g))) < 3e-3 and max(energies[-3:]) - min(energies[-3:]) < 2e-5:
-            return True  # near-converged and the energy has stopped moving
-        w, v = jnp.linalg.eigh(self.h)
-        proj = v.T @ g
-        soft = jnp.abs(w) < lam * jnp.max(jnp.abs(w))
-        return float(jnp.sum(jnp.where(soft, proj**2, 0.0))) > share * float(g @ g)
-
-
 class Calculator:
     """Self-consistent energy, forces and stress of one cell.
 
-    The parameters are an argument, so a fit does not recompile.  The model
-    has one onsite shift per atom (and spin), so the unknowns are the
-    N (or 2N) shifts, solved by chord-Newton (``_Chord``) from the previous
-    solution.  Cold starts go by blocks (``_block_start``); magnetic cells
-    start from the non-magnetic levels plus a Stoner splitting on iron.
+    The parameters are an argument, so a fit does not recompile.  The onsite
+    shifts satisfy the potential condition (``make_potential(condition=
+    "potential")``: shifts = dE_dc/dN, Anderson mixing), which stays well
+    conditioned where the stationary condition stalls; forces and stress come
+    by implicit differentiation.  ``stationarity`` is max |dE/dshift| at the
+    converged state: the energy is off from the stationary one to first order
+    in it (docs/formulation.md), so it is checked.  States with an occupation
+    outside the capacity of a shell are rejected (a broken expansion).
     """
 
-    def __init__(self, c: Cell, skin=0.4, config=None):
+    def __init__(self, c: Cell, skin=0.4, config=None, mixing=0.1):
         self.c = c
         self.species = np.asarray(c.species)
         self._config = IRON_CARBON_CONFIG if config is None else config
         self.cfg = bj.BOPConfig(spin="collinear" if c.magnetic else "none", **self._config)
         topo = bj.build_topology(c.positions, c.species, self.cfg.rcut, self.cfg.nmom,
                                  c.cell, rcut2=self.cfg.rcut2, skin=skin)
-        energy = bj.make_energy_fn(topo, self.cfg, radial=tapered_exp)
-        shape = energy.shift_shape  # (N, 1) or (N, 2, 1)
-        size = int(np.prod(shape))
-        # unknowns: iron has one shift per shell (s, d) and spin; carbon one
-        # shift for both its shells and both spins
-        idx = np.arange(size).reshape(shape)
-        cols = []
-        for i, sp in enumerate(self.species):
-            if sp == FE:
-                for sh in (0, 2):
-                    if c.magnetic:
-                        cols += [[idx[i, 0, sh]], [idx[i, 1, sh]]]
-                    else:
-                        cols.append([idx[i, sh]])
-            else:
-                cols.append(list(idx[i][..., :2].ravel()))
-        basis = np.zeros((size, len(cols)))
-        for k, rows in enumerate(cols):
-            basis[rows, k] = 1.0
-        self._basis = jnp.asarray(basis)
-        self._solver = _Chord(energy, basis, shape)
-        self._is_c = np.array([self.species[np.unravel_index(rows[0], shape)[0]] == C
-                               for rows in cols])
-
-        def e_x(x, pos, cell, params):
-            return energy((self._basis @ x).reshape(shape), pos, cell, params)[0]
-
-        def strained(strain, x, pos, cell, params):
-            deform = jnp.eye(3) + 0.5 * (strain + strain.T)
-            return e_x(x, pos @ deform, cell @ deform, params)
-
-        self._dpos = jax.jit(jax.grad(e_x, argnums=1))
-        self._dstrain = jax.jit(jax.grad(strained))
+        energy = bj.make_energy_fn(topo, self.cfg, radial=tapered_exp_sum)
+        self.shape = energy.shift_shape
+        potential = bj.make_potential(energy, tol=1e-8, condition="potential",
+                                      mixing=mixing, max_iter=400)
+        self._potential = jax.jit(potential)
+        self._gshift = jax.jit(jax.grad(lambda x, pos, cell, p: energy(x, pos, cell, p)[0]))
+        self._forces = jax.jit(lambda pos, cell, p, x0: -jax.grad(
+            lambda q: potential(q, cell, p, x0)[0])(pos))
+        self._stress = jax.jit(bj.make_stress(potential))
         self.cell = jnp.asarray(c.cell)
         self.positions = jnp.asarray(c.positions)
         self.n_atoms = len(c.positions)
-        self._x = None  # last self-consistent shifts (flat)
-        self._nm = None  # non-magnetic twin for cold starts of magnetic cells
+        self._x = None  # last self-consistent shifts: the warm start
 
-    @property
-    def n_hessian(self):
-        return self._solver.n_hessian
+    def _start(self, params):
+        if not self.c.magnetic:
+            return jnp.zeros(self.shape)
+        m = np.zeros((self.n_atoms, self.shape[-1]))
+        m[self.species == FE, -1] = self.c.fe_moment
+        return bj.stoner_shifts(m, float(params["stoner"][FE, 2]))
 
-    def solve(self, params, positions=None, tol=1e-8, max_iter=60, verbose=False):
+    @staticmethod
+    def sane(aux):
+        """Shell occupations within their capacity (s 2, p 6, d 10)."""
+        n = np.asarray(aux["n_shell"])
+        return bool(np.all(n > -0.05) and np.all(n < np.array([2, 6, 10]) + 0.05))
+
+    def solve(self, params, positions=None, verbose=False):
         """(total energy, aux) at the given (default: current) positions."""
         pos = self.positions if positions is None else positions
-        x, cold = self._x, self._x is None
-        if cold:
-            x = (self._from_nonmagnetic(params, pos, verbose) if self.c.magnetic
-                 else self._block_start(params, pos, verbose))
-        x, e, aux, res = self._solver(x, pos, self.cell, params, tol, max_iter, verbose)
-        if (res > 1e-6 or not self.sane(aux)) and cold and self.c.magnetic:
-            x, e, aux, res = self._stoner_ramp(params, pos, tol, max_iter, verbose)
-        if (res > 1e-6 or not self.sane(aux)) and not cold:  # warm start failed
-            if verbose or getattr(self, "trace", False):
-                print(f"  warm start failed ({res:.2e}), cold restart", flush=True)
-            self._x = None
-            return self.solve(params, positions, tol, max_iter, verbose)
-        self.residual = res
-        if res > 1e-6 or not self.sane(aux):
+        starts = ([self._x] if self._x is not None else []) + [self._start(params)]
+        for x0 in starts:
+            e, aux = self._potential(pos, self.cell, params, x0)
+            res = float(aux["scf_residual"])
+            if res < 1e-6 and np.isfinite(float(e)) and self.sane(aux):
+                break
+            if verbose:
+                print(f"  {self.c.name}: start failed (residual {res:.1e})", flush=True)
+        else:
             self._x = None
             n = np.asarray(aux["n_shell"])
             raise RuntimeError(f"{self.c.name}: no self-consistent state ({res:.2e}, "
                                f"occupations {n.min(axis=0)} .. {n.max(axis=0)})")
-        self._x = x
+        self._x = aux["shifts"]
+        self.stationarity = float(jnp.max(jnp.abs(self._gshift(aux["shifts"], pos,
+                                                                  self.cell, params))))
         self.aux = aux
         return float(e), aux
 
-    def _stoner_ramp(self, params, pos, tol, max_iter, verbose=False,
-                     scales=(0.4, 0.55, 0.7, 0.8, 0.9, 1.0)):
-        """Continuation in the Stoner integral of iron from the non-magnetic
-        levels: the moments grow step by step, each step warm-started."""
-        x_nm = np.asarray(self._nm._x)
-        stoner = params["stoner"]
-        x, magnetic = None, False
-        for scale in scales:
-            p = dict(params, stoner=stoner * scale)
-            if not magnetic:  # the non-magnetic state is stationary too: seed a moment
-                x = jnp.asarray(self._spread(x_nm, 0.5 * float(p["stoner"][FE, 2]) * 1.5))
-            self._solver.h = None
-            x, e, aux, res = self._solver(x, pos, self.cell, p, tol, max_iter, verbose)
-            magnetic = float(jnp.mean(jnp.abs(aux["moment"]))) > 0.2
-            if verbose:
-                print(f"  Stoner x {scale}: |g| {res:.2e} "
-                      f"mean m {float(jnp.mean(jnp.abs(aux['moment']))):.2f}", flush=True)
-            if res > 1e-5:
-                break
-        return x, e, aux, res
-
-    def _from_nonmagnetic(self, params, pos, verbose=False):
-        """Cold start of a magnetic cell: the non-magnetic shifts plus the
-        Stoner splitting of the starting moment on iron."""
-        if self._nm is None:
-            self._nm = Calculator(Cell(self.c.name + " NM", self.c.cell, self.c.positions,
-                                       self.c.species, magnetic=False), config=self._config)
-        self._nm.positions = jnp.asarray(pos)
-        self._nm._x = None
-        self._nm.solve(params, verbose=verbose)
-        x_nm = np.asarray(self._nm._x)
-        split = 0.5 * float(params["stoner"][FE, 2]) * self.c.fe_moment
-        return jnp.asarray(self._spread(x_nm, split))
-
-    def _spread(self, x_nm, split):
-        """Magnetic unknowns from non-magnetic ones: iron s up and down
-        equal, iron d split by -/+ ``split``, carbon unchanged."""
-        x, k = [], 0
-        for sp in self.species:
-            if sp == FE:
-                xs, xd = x_nm[k], x_nm[k + 1]
-                x += [xs, xs, xd - split, xd + split]
-                k += 2
-            else:
-                x.append(x_nm[k])
-                k += 1
-        self._solver.h = None
-        return x
-
-    @staticmethod
-    def sane(aux):
-        """Shell occupations within their capacity (s 2, p 6, d 10): outside
-        it the expansion of the local density of states has broken down
-        (far-shifted levels) and a stationary point there is spurious."""
-        n = np.asarray(aux["n_shell"])
-        return bool(np.all(n > -0.05) and np.all(n < np.array([2, 6, 10]) + 0.05))
-
-    def _block_start(self, params, pos, verbose=False, cap=0.25):
-        """Shifts from a cold start, by blocks.  Carbon can take or give most
-        of an electron, which the Hubbard term answers with shifts of several
-        eV; joint Newton steps from zero can wander into levels where the
-        expansion of the C density of states breaks down and has spurious
-        stationary points.  So: pick the carbon shift from a scan of sane
-        states, converge the iron shifts with carbon fixed, take a capped,
-        backtracked Newton step for carbon, and repeat until the joint solver
-        can take over."""
-        n = len(self._is_c)
-        fe, cc = np.flatnonzero(~self._is_c), np.flatnonzero(self._is_c)
-        if len(fe) == 0 or len(cc) == 0:  # one element: the joint solver alone
-            self._solver.h = None
-            return jnp.zeros(n)
-        eye = np.eye(n)
-        vg, cols = self._solver._vg, self._solver.columns
-
-        def evaluate(x):
-            (_, aux), g = vg(jnp.asarray(x), pos, self.cell, params)
-            g = np.asarray(g)
-            ok = self.sane(aux) and np.all(np.isfinite(g))
-            return g, ok
-
-        best = (np.inf, None)
-        for shift in np.arange(-3.0, 3.01, 0.5):
-            x = np.where(self._is_c, shift, 0.0)
-            g, ok = evaluate(x)
-            if ok and np.max(np.abs(g[cc])) < best[0]:
-                best = (np.max(np.abs(g[cc])), x)
-        if best[1] is None:
-            raise RuntimeError(f"{self.c.name}: no sane starting levels")
-        x = best[1]
-        h_fe = None
-        for outer in range(40):
-            for it in range(15):  # iron block, cached Hessian, capped steps
-                g, ok = evaluate(x)
-                if np.max(np.abs(g[fe])) < 1e-4:
-                    break
-                if h_fe is None or it == 6:
-                    h = np.asarray(cols(jnp.asarray(x), pos, self.cell, params,
-                                        jnp.asarray(eye[fe])))[fe]
-                    h_fe = np.linalg.pinv(0.5 * (h + h.T), rcond=1e-10)
-                step = -h_fe @ g[fe]
-                x[fe] += step * min(1.0, cap / max(np.max(np.abs(step)), 1e-12))
-            if verbose:
-                print(f"  block {outer}: |g_Fe| {np.max(np.abs(g[fe])):.2e} "
-                      f"|g_C| {np.max(np.abs(g[cc])):.2e} sane={ok}", flush=True)
-            if np.max(np.abs(g)) < 1e-3 and ok:
-                break
-            h = np.asarray(cols(jnp.asarray(x), pos, self.cell, params,
-                                jnp.asarray(eye[cc])))[cc]
-            step = -np.linalg.pinv(0.5 * (h + h.T), rcond=1e-8) @ g[cc]
-            step *= min(1.0, cap / max(np.max(np.abs(step)), 1e-12))
-            for _ in range(5):  # stay among sane states
-                trial = x.copy()
-                trial[cc] += step
-                if evaluate(trial)[1]:
-                    break
-                step *= 0.5
-            x = trial
-        self._solver.h = None  # the joint solver builds its own Hessian here
-        return jnp.asarray(x)
-
     def forces(self, params, positions):
-        """Forces at the last self-consistent levels (call ``solve`` first)."""
-        return -self._dpos(self._x, positions, self.cell, params)
+        """Forces (implicit differentiation of the potential condition)."""
+        return self._forces(positions, self.cell, params, self._x)
 
     def relax(self, params, ftol=5e-3, steps=200, fixed=None, verbose=False):
         """Relax the atoms at fixed cell (FIRE), starting from the current
@@ -445,7 +175,7 @@ class Calculator:
             if longest > 0.1:  # no atom moves more than 0.1 A per step
                 step, v = step * 0.1 / longest, v * 0.1 / longest
             pos = pos + step
-            e, aux = self.solve(params, pos, tol=1e-7, verbose=verbose)
+            e, aux = self.solve(params, pos, verbose=verbose)
             f = self.forces(params, pos) * keep
             self.n_steps += 1
             if verbose:
@@ -487,13 +217,13 @@ class Calculator:
 
         def grad(u):
             pos = base + jnp.tensordot(jnp.asarray(u), modes, 1)
-            e, aux = self.solve(params, pos, tol=1e-7)
+            e, aux = self.solve(params, pos)
             g = -np.asarray(jnp.tensordot(modes, self.forces(params, pos), 2))
             if verbose:
                 m = np.asarray(aux["moment"])
                 print(f"  shells u {np.round(u, 4)} E {e:.5f} g {np.round(g, 3)} "
                       f"qC {float(aux['charge'][-1]):+.3f} m {np.round(m[[1, -1]], 2)} "
-                      f"hess {self.n_hessian}", flush=True)
+                      f"stat {self.stationarity:.1e}", flush=True)
             return e, g
 
         # gradient descent with Barzilai-Borwein steps, at most max_step A
@@ -518,8 +248,7 @@ class Calculator:
     def stress(self, params):
         """Stress (3, 3) in GPa at the current positions, positive tensile."""
         self.solve(params)
-        d = self._dstrain(jnp.zeros((3, 3)), self._x, self.positions, self.cell, params)
-        return np.asarray(d) / self.volume() * EV_A3_TO_GPA
+        return np.asarray(self._stress(self.positions, self.cell, params, self._x)) * EV_A3_TO_GPA
 
     def volume(self):
         return float(abs(np.linalg.det(np.asarray(self.cell))))
