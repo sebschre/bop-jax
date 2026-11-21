@@ -81,8 +81,10 @@ rejects states with an occupation outside a shell, and records the
 stationarity. Exact forces (implicit differentiation, one GMRES adjoint
 solve) cost about 100 s and 12 GB for Fe16C with `remat`; inside the fit,
 forces and stress are partial derivatives at the converged shifts
-(`exact = False`: 5 s, error first order in the stationarity; 0.08 eV/A
-against the exact force at a relaxed tetrahedral cell). The breathing
+(`exact = False`: 5 s, error first order in the stationarity: 0.08 eV/A
+against the exact force at the starting parameters, but 0.76 eV/A at the
+fitted ones, see Results). Exact forces of the octahedral cell need
+`batch=4` to fit in 15 GB. The breathing
 modes of the first two Fe shells around C relax in about 3 minutes.
 
 ## Results (`IRON_CARBON_FIT`)
@@ -91,46 +93,59 @@ Fitted with `examples/fit_iron_carbon.py`: 10 cross parameters, bounded
 least squares, two runs (98 + 80 evaluations, about 5 minutes each on 4
 cores; the first run was cut short by a container restart and the second
 started from its best point), cost 593 at the start, 15.0 at the end.
-FM Fe16C cells; "shell-relaxed" relaxes the breathing modes of the first two
-Fe shells around C, as in the fit; "relaxed" relaxes every atom at fixed
-cell (partial-derivative forces). Cementite at the experimental lattice,
-atoms relaxed.
+FM Fe16C cells; "shells" relaxes the breathing modes of the first two Fe
+shells around C, with partial-derivative forces as in the fit or with exact
+forces; "all atoms" relaxes every atom at fixed cell (partial-derivative
+forces). Cementite at the experimental lattice, atoms relaxed.
 
-| Property | Shell-relaxed (fitted) | Relaxed | Target |
-|---|---|---|---|
-| E_sol, octahedral, relative to diamond (eV) | 0.75 | 0.61 | 0.72 +- 0.15 |
-| E(tetrahedral) - E(octahedral) (eV) | 0.76 | 0.56 | 0.86 +- 0.10 |
-| dipole tensor, axial (eV) | 5.8 | 5.5 | 8.0 +- 1.5 |
-| dipole tensor, transverse (eV) | 7.5 | 7.2 | 3.4 +- 1.5 |
-| formation energy of Fe3C (eV/atom) | -0.013 | -0.013 | +0.03 +- 0.04 |
-| pressure of Fe3C at the experimental lattice (GPa) | -5.2 | -5.2 | 0 +- 5 |
-| mean Fe moment of Fe3C (muB) | 2.10 | 2.10 | 1.95 +- 0.15 |
-| electrons gained by octahedral C | -0.11 | -0.11 | +0.3 +- 0.4 |
-| Fe moment next to octahedral C (muB) | | 2.12 | (bulk 2.86) |
-| C charge in Fe3C (electrons gained) | | -0.13 | |
-| largest stationarity, max dE/dshift (eV) | | 0.15 | |
+| Property | Shells, exact forces | Shells (fitted) | All atoms | Target |
+|---|---|---|---|---|
+| E_sol, octahedral, relative to diamond (eV) | **0.715** | 0.75 | 0.61 | 0.72 +- 0.15 |
+| E(tetrahedral) - E(octahedral) (eV) | **0.794** | 0.76 | 0.56 | 0.86 +- 0.10 |
+| dipole tensor, axial (eV) | | 5.8 | 5.5 | 8.0 +- 1.5 |
+| dipole tensor, transverse (eV) | | 7.5 | 7.2 | 3.4 +- 1.5 |
+| formation energy of Fe3C (eV/atom) | | -0.013 | -0.013 | +0.03 +- 0.04 |
+| pressure of Fe3C at the experimental lattice (GPa) | | -5.2 | -5.2 | 0 +- 5 |
+| mean Fe moment of Fe3C (muB) | | 2.10 | 2.10 | 1.95 +- 0.15 |
+| electrons gained by octahedral C | -0.10 | -0.11 | -0.11 | +0.3 +- 0.4 |
+| Fe moment next to octahedral C (muB) | 2.11 | | 2.12 | (bulk 2.86) |
+| moment of octahedral C (muB) | -0.25 | | | antiparallel |
+| largest stationarity, max dE/dshift (eV) | 0.16 | | 0.15 | |
 
-- **Energetics.** The solution energy of octahedral carbon, the formation
-  energy of cementite and its Fe moment are close to their targets; the
-  octahedral site is the stable one. Cementite comes out marginally stable
+**Partial-derivative forces are not good enough at the fitted
+parameters.** At the start of the fit they were within 0.08 eV/A of the
+exact forces; at the fitted parameters the stationarity has grown (0.08 to
+0.14-0.16 eV) and at the octahedral geometry the fit relaxed to, the exact
+force is 0.76 eV/A where the partial one is about zero. Relaxed with exact
+forces the first shell moves out by 0.029 A instead of 0.073 A and the cell
+is 37 meV lower; the tetrahedral cell changes by 3 meV. The column with
+exact forces is therefore the reliable one, and the full relaxations and the
+dipole tensors (partial derivatives too) are uncertain at this level. Use
+exact forces (`Calculator.exact = True`, the default; `make_potential` with
+`jax.grad`) for anything with these parameters.
+
+- **Energetics.** The solution energy of octahedral carbon (0.715 eV), the
+  formation energy of cementite and its Fe moment are close to their
+  targets; the octahedral site is the stable one. Cementite comes out marginally stable
   against FM bcc iron and diamond (-13 meV/atom) where experiment and DFT
   have it marginally metastable.
-- **Migration barrier.** The tetrahedral site is 0.76 eV above the
-  octahedral one with the two-shell relaxation of the fit and 0.56 eV with
-  all atoms relaxed: the tetrahedral cell relaxes further than the shells
-  capture. Against the 0.86 eV of DFT and experiment the barrier is too low
-  by 0.3 eV.
+- **Migration barrier.** With exact forces the tetrahedral site is
+  0.79 eV above the octahedral one (target 0.86). With all atoms relaxed
+  (partial-derivative forces) it drops to 0.56 eV, so the barrier may be
+  0.1-0.3 eV low once every atom is relaxed with exact forces, which was not
+  done (about 100 s per force for Fe16C).
 - **Dipole tensor: wrong anisotropy.** Transverse comes out larger than
   axial, where carbon pushes its two axial neighbours (1.43 A) hardest. The
   Fe-C terms share one decay length for bond integrals and one for the pair
   term, which does not separate the 1.43 A and 2.02 A neighbours enough;
-  the stress is also a partial derivative at fixed shifts. Strain fields of
+  the stress is also a partial derivative at fixed shifts, which the force
+  comparison above shows is not reliable here. Strain fields of
   carbon (martensite tetragonality, carbon-dislocation interaction) are not
   reliable with these parameters.
 - **Magnetism and charge.** Iron next to carbon keeps a sizeable moment
-  (2.12 muB on the axial neighbours of the octahedral site, bulk 2.86), and
-  cementite averages 2.10 muB per Fe; carbon carried a small moment
-  antiparallel to iron in the cells checked during the fit, as in DFT. Carbon loses about 0.1 electron, where
+  (2.11 muB on the axial neighbours of the octahedral site, bulk 2.86), and
+  cementite averages 2.10 muB per Fe; octahedral carbon carries -0.25 muB,
+  antiparallel to iron, as in DFT. Carbon loses about 0.1 electron, where
   DFT charge analyses give it a gain; the tight-binding charge is not a
   Bader charge, and the target was loose.
 - **Self-consistency.** Every cell converges with the potential condition.

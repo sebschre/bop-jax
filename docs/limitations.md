@@ -26,8 +26,11 @@
 ## Caveats
 
 - The iron-carbon model needs the potential self-consistency (stationarity
-  up to 0.15 eV in Fe16C); its migration barrier is 0.3 eV low and the
-  carbon dipole tensor has the wrong anisotropy (see [Iron-carbon](iron-carbon.md)).
+  up to 0.16 eV in Fe16C), and with it exact (implicit-differentiation)
+  forces: partial derivatives at fixed shifts are off by up to 0.76 eV/A.
+  Its carbon dipole tensor has the wrong anisotropy, and the migration
+  barrier with every atom relaxed was not computed with exact forces (see
+  [Iron-carbon](iron-carbon.md)).
 - `bandwidth_guard` and `atomic_shifts` change a model's energies; a model
   fitted without them needs a refit with them, as carbon had.
 
