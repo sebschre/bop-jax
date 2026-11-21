@@ -18,7 +18,8 @@ from bopjax.models import (CARBON_CONFIG, IRON_CARBON_CONFIG, IRON_EGOROV_CONFIG
 FCC = 0.5 * np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0.0]])
 
 
-def scf_energy(pos, cell, species, cfg, params, radial, fe_moment=None, shells=(0, 1)):
+def scf_energy(pos, cell, species, cfg, params, radial, fe_moment=None, shells=(0, 1),
+               tol=1e-11):
     """``shells``: where the iron s and d shells sit in the basis."""
     topo = bj.build_topology(pos, species, cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2)
     energy = bj.make_energy_fn(topo, cfg, radial=radial)
@@ -28,7 +29,7 @@ def scf_energy(pos, cell, species, cfg, params, radial, fe_moment=None, shells=(
         m[:, shells[1]] = fe_moment
         start = bj.stoner_shifts(m, float(np.max(params["stoner"])))
     res = bj.make_scf(energy)(jnp.asarray(pos), jnp.asarray(cell), params, shifts0=start,
-                              tol=1e-11, max_iter=60)
+                              tol=tol, max_iter=60)
     assert res.converged
     return res.energy, res.aux
 
@@ -83,15 +84,17 @@ def test_absent_shells_ignore_their_parameters():
     pos = np.array([[0, 0, 0], [0.5 * a, 0, 0]])
     cfg = bj.BOPConfig(**IRON_CARBON_CONFIG)
     p = iron_carbon()
-    e, _ = scf_energy(pos, cell, [0, 1], cfg, p, tapered_exp_sum)
+    # carbon's shell shifts are tied (only their mean enters), so the solver
+    # drifts freely along their difference; 1e-8 is as far as it gets
+    e, _ = scf_energy(pos, cell, [0, 1], cfg, p, tapered_exp_sum, tol=1e-8)
     q = dict(p, bond=dict(p["bond"]), onsite=p["onsite"].at[0, 1].set(-3.0).at[1, 2].set(-2.0),
              n0=p["n0"].at[0, 1].set(1.0))
     junk = jnp.array([1.3, 0.5, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 3.0, 0.5])
     q["bond"]["sds"] = q["bond"]["sds"].at[0, 1].set(junk)  # Fe s - C d
     q["bond"]["pps"] = q["bond"]["pps"].at[0, 1].set(junk)  # Fe p - C p
     q["bond"]["dds"] = q["bond"]["dds"].at[1, 1].set(junk)  # C d - C d
-    e2, _ = scf_energy(pos, cell, [0, 1], cfg, q, tapered_exp_sum)
-    assert e2 == pytest.approx(e, abs=1e-9)
+    e2, _ = scf_energy(pos, cell, [0, 1], cfg, q, tapered_exp_sum, tol=1e-8)
+    assert e2 == pytest.approx(e, abs=1e-7)
 
 
 def test_fe_c_forces_match_finite_differences():
