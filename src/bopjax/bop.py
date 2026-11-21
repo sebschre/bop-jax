@@ -34,6 +34,33 @@ G_SPIN = 2.00231930436  # electron spin g-factor
 
 
 @dataclass(frozen=True)
+class SpeciesSettings:
+    """Shells and expansion settings of one species (``BOPConfig.species``).
+
+    ``basis`` is the subset of ``BOPConfig.basis`` this species carries; its
+    other shells are absent: no hopping into or out of them, no electrons and
+    no energy.  Entries left at None take the value of the ``BOPConfig``.
+    ``nmom`` may not exceed ``BOPConfig.nmom``, which sets how far the
+    moments are walked for every atom.
+    """
+
+    basis: tuple[str, ...]
+    nmom: int | None = None
+    nexp: int | None = None
+    bandwidth: str | None = None
+    terminator: str | None = None
+    kernel: str | None = None
+    bandwidth_guard: bool | None = None
+    # in magnetic calculations: False gives the species one onsite shift for
+    # both spin channels (no exchange splitting of its own; a moment can
+    # still be induced through its neighbours)
+    spin_polarized: bool = True
+    # one onsite shift for all shells of the species (their mean), as
+    # BOPConfig.atomic_shifts does for every species
+    atomic_shifts: bool = False
+
+
+@dataclass(frozen=True)
 class BOPConfig:
     nmom: int = 6  # moments calculated exactly
     nexp: int | None = None  # length of the Chebyshev expansion (default nmom)
@@ -42,6 +69,9 @@ class BOPConfig:
     terminator: str = "none"  # see expansion.TERMINATORS
     alpha_weight: float = 1.0  # for terminator = "weighted"
     kernel: str = "none"  # "none" or "jackson"
+    # widen b_inf where the scaled recursion chain has eigenvalues outside
+    # [-1, 1], where the Chebyshev expansion would diverge
+    bandwidth_guard: bool = False
     rcut: float = 3.0  # bond integrals
     dcut: float = 0.0
     rcut2: float | None = None  # repulsion, embedding, Coulomb
@@ -57,6 +87,12 @@ class BOPConfig:
     remat: bool = False  # recompute the moment walks in the backward pass (memory)
     kT: float = 0.0  # electronic temperature (eV); the energy is then the free energy
     smearing_nodes: int = 24  # quadrature nodes of the Fermi kernel (kT > 0)
+    # per-species shells and expansion settings, one SpeciesSettings per
+    # species; None: every species has all of ``basis`` and the settings above
+    species: tuple[SpeciesSettings, ...] | None = None
+    # one onsite shift per atom (and spin) for all its shells, instead of one
+    # per shell: self-consistency in the atomic charge (and moment) only
+    atomic_shifts: bool = False
 
     @property
     def n_expansion(self) -> int:
@@ -67,13 +103,14 @@ class BOPConfig:
         return self.spin != "none"
 
 
-def _per_atom(fn, topo: Topology, batch: int, remat: bool = False):
-    """Apply ``fn(cluster_origin_i, cluster_nbr_i)`` to every atom, in batches
-    so that memory stays bounded for large cells.  With ``remat`` the walk of
-    each batch is recomputed in the backward pass instead of being stored."""
+def _per_atom(fn, topo: Topology, batch: int, remat: bool = False, *extra):
+    """Apply ``fn(cluster_origin_i, cluster_nbr_i, *extra_i)`` to every atom, in
+    batches so that memory stays bounded for large cells.  With ``remat`` the
+    walk of each batch is recomputed in the backward pass instead of being
+    stored."""
     if remat:
         fn = jax.checkpoint(fn)
-    xs = (jnp.asarray(topo.cluster_origin), jnp.asarray(topo.cluster_nbr))
+    xs = (jnp.asarray(topo.cluster_origin), jnp.asarray(topo.cluster_nbr)) + extra
     if topo.n_atoms <= batch:
         return jax.vmap(fn)(*xs)
     return jax.lax.map(lambda x: fn(*x), xs, batch_size=batch)
@@ -87,7 +124,7 @@ def _walk(topo: Topology, nmom: int, start, hop):
     non-zero, so each step works on the smallest cluster that holds them.
     """
     sizes = topo.cluster_sizes
-    def run(origin, nbr):
+    def run(origin, nbr, start=start):
         ws = [start[None]]
         for a in range((nmom + 1) // 2):
             n_in, n_out = sizes[a], sizes[a + 1]
@@ -100,11 +137,14 @@ def _walk(topo: Topology, nmom: int, start, hop):
     return run
 
 
-def moments(hblk, onsite, topo: Topology, nmom: int, batch: int = 64, remat: bool = False):
+def moments(hblk, onsite, topo: Topology, nmom: int, batch: int = 64, remat: bool = False,
+            starts=None):
     """Diagonal moments <i a|H^n|i a> for all unit-cell orbitals, (N, norb, nmom+1).
 
     hblk   : (N, K, norb, norb) hopping blocks of the unit-cell atoms
     onsite : (N, norb) onsite levels
+    starts : optional (N, norb, ncol) start vectors of each atom; the result
+             is then <start_c|H^n|start_c>, shape (N, ncol, nmom+1)
     """
     norb = onsite.shape[1]
     sizes = topo.cluster_sizes
@@ -115,15 +155,17 @@ def moments(hblk, onsite, topo: Topology, nmom: int, batch: int = 64, remat: boo
 
     walk = _walk(topo, nmom, jnp.eye(norb, dtype=hblk.dtype), hop)
 
-    def one(origin, nbr):
-        ws = walk(origin, nbr)
+    def one(origin, nbr, *start):
+        ws = walk(origin, nbr, *start)
         mu = []
         for k in range(nmom + 1):
             a, b = k // 2, k - k // 2
             mu.append(jnp.einsum("cbd,cbd->d", ws[a], ws[b][: sizes[a]]))
         return jnp.stack(mu, axis=-1)
 
-    return _per_atom(one, topo, batch, remat)
+    if starts is None:
+        return _per_atom(one, topo, batch, remat)
+    return _per_atom(one, topo, batch, remat, jnp.asarray(starts, dtype=hblk.dtype))
 
 
 PAULI = np.array(
@@ -242,6 +284,60 @@ def moments_noncollinear(hblk, onsite, axes, topo: Topology, nmom: int, batch: i
     return jax.lax.map(lambda x: one(*x), xs, batch_size=batch)
 
 
+@dataclass(frozen=True)
+class _SpeciesLayout:
+    """Static bookkeeping of ``BOPConfig.species``."""
+
+    shells: tuple  # per species: indices of its shells in cfg.basis
+    orb_mask: np.ndarray  # (nspecies, norb) 1 for the orbitals a species has
+    shell_mask: np.ndarray  # (nspecies, nshell)
+    starts: np.ndarray  # (N, norb, ncol) start vectors of each atom
+    columns: tuple  # per species, per own shell: start columns of that shell
+    atoms: tuple  # per species: its atoms in the unit cell
+    settings: tuple  # per species: (nmom, nexp, bandwidth, terminator, kernel, guard)
+
+
+def _species_layout(cfg: BOPConfig, species: np.ndarray) -> _SpeciesLayout:
+    slices, norb = shell_slices(cfg.basis)
+    if species.size and species.max() >= len(cfg.species):
+        raise ValueError("BOPConfig.species has fewer entries than the topology has species")
+    shells, orbs, settings = [], [], []
+    for st in cfg.species:
+        if not set(st.basis) <= set(cfg.basis):
+            raise ValueError(f"species basis {st.basis} is not part of {cfg.basis}")
+        own = tuple(k for k, sh in enumerate(cfg.basis) if sh in st.basis)
+        shells.append(own)
+        orbs.append([o for k in own for o in range(*slices[k])])
+        nmom = cfg.nmom if st.nmom is None else st.nmom
+        if nmom > cfg.nmom:
+            raise ValueError("a species' nmom may not exceed BOPConfig.nmom")
+        nexp = st.nexp if st.nexp is not None else (cfg.nexp if st.nmom is None else None)
+        nexp = nmom if nexp is None else max(nexp, nmom)
+        settings.append((nmom, nexp,
+                         cfg.bandwidth if st.bandwidth is None else st.bandwidth,
+                         cfg.terminator if st.terminator is None else st.terminator,
+                         cfg.kernel if st.kernel is None else st.kernel,
+                         cfg.bandwidth_guard if st.bandwidth_guard is None
+                         else st.bandwidth_guard))
+    nsp = len(cfg.species)
+    orb_mask = np.zeros((nsp, norb))
+    shell_mask = np.zeros((nsp, len(cfg.basis)))
+    for s_, (own, o) in enumerate(zip(shells, orbs)):
+        orb_mask[s_, o] = 1.0
+        shell_mask[s_, list(own)] = 1.0
+    # each atom walks only from its own orbitals: column c of species s starts
+    # on orbital orbs[s][c]; spare columns start from zero and are ignored
+    ncol = max(len(o) for o in orbs)
+    starts = np.zeros((len(species), norb, ncol))
+    for i, s_ in enumerate(species):
+        starts[i, orbs[s_], np.arange(len(orbs[s_]))] = 1.0
+    columns = tuple(tuple([c for c, o in enumerate(orbs[s_]) if slices[k][0] <= o < slices[k][1]]
+                          for k in shells[s_]) for s_ in range(nsp))
+    atoms = tuple(np.nonzero(species == s_)[0] for s_ in range(nsp))
+    return _SpeciesLayout(tuple(shells), orb_mask, shell_mask, starts, columns, atoms,
+                          tuple(settings))
+
+
 def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
                    screening_radial=None):
     """Return ``energy(shifts, positions, cell, params) -> (E, aux)``.
@@ -306,7 +402,13 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     energy is the free energy E - TS, still variational in the shifts.
 
     ``shifts`` has shape ``energy.shift_shape``: (N, nshell), or (N, 2, nshell)
-    for magnetic calculations (spin up, spin down).
+    for magnetic calculations (spin up, spin down).  With
+    ``cfg.atomic_shifts`` the last axis has length 1: every shell of an atom
+    is shifted by the same amount (per spin channel), so that only the atomic
+    charge and moment are made self-consistent.  With several shells the
+    relative position of their levels is then fixed by ``onsite``; with one
+    shift per shell it is a further unknown that, in a truncated expansion,
+    need not have a stationary point (seen for carbon in iron).
     """
     if cfg.spin not in SPIN_MODES:
         raise ValueError(f"unknown spin mode {cfg.spin!r}")
@@ -316,7 +418,6 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     nshell = len(cfg.basis)
     nspin = 2 if cfg.magnetic else 1
     nexp = cfg.n_expansion
-    kernel = ex.jackson_kernel(nexp) if cfg.kernel == "jackson" else np.ones(nexp + 1)
     # electrons a full shell holds per spin channel
     degeneracy = np.array([(2.0 / nspin) * (2 * L_OF[s] + 1) for s in cfg.basis])
     species = topo.species
@@ -332,6 +433,29 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
     needs_pairs = cfg.repulsion is not None or cfg.coulomb != "diagonal" or cfg.yukawa
     if needs_pairs and topo.nbr2_mask is None:
         raise ValueError("build the topology with rcut2 for repulsion or Coulomb terms")
+    layout = None if cfg.species is None else _species_layout(cfg, np.asarray(species))
+    unpolarized = (np.array([not cfg.species[s_].spin_polarized for s_ in species])
+                   if layout is not None else np.zeros(len(species), bool))
+    tied_shells = (np.array([cfg.species[s_].atomic_shifts for s_ in species])
+                   if layout is not None and not cfg.atomic_shifts
+                   else np.zeros(len(species), bool))
+    if layout is not None:
+        nexp = max(st[1] for st in layout.settings)
+
+    def expansion_fn(nmom_, nexp_, bandwidth_, terminator_, kernel_, guard_=False):
+        kern = ex.jackson_kernel(nexp_) if kernel_ == "jackson" else np.ones(nexp_ + 1)
+
+        def local(mu_):
+            a, b = ex.recursion_coefficients(mu_, nmom_)
+            ainf, binf = ex.band_centre_and_width(a, b, nmom_, bandwidth_, cfg.global_ab)
+            if guard_:
+                binf = ex.guarded_width(a, b, ainf, binf, nmom_, nexp_, terminator_,
+                                        cfg.alpha_weight)
+            sigma = ex.sigma_coefficients(a, b, ainf, binf, nmom_, nexp_, kern,
+                                          terminator_, cfg.alpha_weight)
+            return ainf, binf, sigma, sigma[1] / kern[1]
+
+        return jnp.vectorize(local, signature="(m)->(),(),(k),()")
 
     if cfg.kT < 0.0:
         raise ValueError("kT must not be negative")
@@ -340,16 +464,29 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
         smear_offsets, smear_weights = ex.fermi_nodes(cfg.kT, cfg.smearing_nodes)
 
     def local_expansion(mu):
-        a, b = ex.recursion_coefficients(mu, cfg.nmom)
-        ainf, binf = ex.band_centre_and_width(a, b, cfg.nmom, cfg.bandwidth, cfg.global_ab)
-        sigma = ex.sigma_coefficients(a, b, ainf, binf, cfg.nmom, nexp, kernel,
-                                      cfg.terminator, cfg.alpha_weight)
-        return ainf, binf, sigma
+        """(a_inf, b_inf, sigma, gamma0), each (N, nspin, nshell[, nexp + 1])."""
+        if layout is None:
+            return expansion_fn(cfg.nmom, nexp, cfg.bandwidth, cfg.terminator,
+                                cfg.kernel, cfg.bandwidth_guard)(mu)
+        # absent shells: sigma = 0, i.e. no states; a_inf, b_inf only keep
+        # the Fermi-level bracket finite
+        shape = mu.shape[:3]
+        ainf, binf = jnp.zeros(shape, mu.dtype), jnp.ones(shape, mu.dtype)
+        sigma = jnp.zeros(shape + (nexp + 1,), mu.dtype)
+        gamma0 = jnp.zeros(shape, mu.dtype)
+        for atoms, own, st in zip(layout.atoms, layout.shells, layout.settings):
+            if len(atoms) == 0:
+                continue
+            idx = np.ix_(atoms, np.arange(shape[1]), np.asarray(own))
+            a_s, b_s, sig_s, g_s = expansion_fn(*st)(mu[idx][..., : st[0] + 1])
+            ainf, binf, gamma0 = ainf.at[idx].set(a_s), binf.at[idx].set(b_s), \
+                gamma0.at[idx].set(g_s)
+            sigma = sigma.at[idx].set(jnp.pad(sig_s, [(0, 0)] * 3 + [(0, nexp - st[1])]))
+        return ainf, binf, sigma, gamma0
 
     def occupations(loc, ef):
         """Electrons and bond energy per atom, spin channel and shell."""
-        ainf, binf, sigma = loc
-        gamma0 = sigma[..., 1] / kernel[1]
+        ainf, binf, sigma, gamma0 = loc
         if cfg.kT > 0.0:
             def smeared(sig, a_, b_, e_, g_):
                 return ex.smeared_filling_and_bond_energy(sig, a_, b_, e_, g_,
@@ -426,7 +563,10 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
         """The part of the energy that depends on the occupations (N, nspin,
         nshell) explicitly: onsite and intersite Coulomb, Stoner."""
         n_shell = jnp.sum(occupations, axis=1)
-        charge = jnp.sum(n_shell - params["n0"][species], axis=1)
+        n0_ = params["n0"][species]
+        if layout is not None:
+            n0_ = n0_ * layout.shell_mask[species]
+        charge = jnp.sum(n_shell - n0_, axis=1)
         e = 0.5 * jnp.sum(params["hubbard"][species] * charge**2)
         if cfg.magnetic:
             moment = occupations[:, 0] - occupations[:, 1]
@@ -445,6 +585,19 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
         the shifts.  For exact tight binding the stationary point of the
         energy has shifts == potential_target(occupations)."""
         grad = jax.grad(double_counting)(occupations, positions, cell, params)
+        grad = grad.reshape(topo.n_atoms, nspin, nshell)
+        # the same tying of shifts as in the energy: one per atom, per own
+        # shells of a species, or one for both spins
+        if cfg.atomic_shifts:
+            grad = jnp.mean(grad, axis=2, keepdims=True)
+        elif layout is not None and tied_shells.any():
+            own = jnp.asarray(layout.shell_mask[species], grad.dtype)
+            mean = (jnp.sum(grad * own[:, None, :], axis=2, keepdims=True)
+                    / jnp.sum(own, axis=1)[:, None, None])
+            grad = jnp.where(tied_shells[:, None, None], mean, grad)
+        if layout is not None and cfg.magnetic and unpolarized.any():
+            grad = jnp.where(unpolarized[:, None, None], jnp.mean(grad, axis=1, keepdims=True),
+                             grad)
         return grad.reshape((topo.n_atoms,) + energy.shift_shape[1:])
 
     def energy(shifts, positions, cell, params):
@@ -458,8 +611,25 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
         hblk = bond_blocks(rij, topo.nbr_mask, species_i,
                            species[topo.nbr_origin], params["bond"], cfg.basis,
                            cfg.rcut, cfg.dcut, radial, dd_screen)
+        starts = None
+        if layout is not None:
+            om = layout.orb_mask
+            hblk = hblk * (om[species][:, None, :, None] * om[species[topo.nbr_origin]][:, :, None, :])
+            starts = layout.starts
         e0 = params["onsite"][species]  # (N, nshell)
-        levels = e0[:, None, :] + shifts.reshape(topo.n_atoms, nspin, nshell)
+        nshift = 1 if cfg.atomic_shifts else nshell
+        shifts = shifts.reshape(topo.n_atoms, nspin, nshift)
+        if layout is not None and tied_shells.any():
+            # one shift for the species' own shells: their mean
+            own = jnp.asarray(layout.shell_mask[species], shifts.dtype)  # (N, nshell)
+            mean = (jnp.sum(shifts * own[:, None, :], axis=2, keepdims=True)
+                    / jnp.sum(own, axis=1)[:, None, None])
+            shifts = jnp.where(tied_shells[:, None, None], mean, shifts)
+        if layout is not None and cfg.magnetic and unpolarized.any():
+            # one shift for both spins: their mean, so the difference is idle
+            mean = jnp.mean(shifts, axis=1, keepdims=True)
+            shifts = jnp.where(unpolarized[:, None, None], mean, shifts)
+        levels = e0[:, None, :] + shifts
         h_field, b_field = _field_sources(params, topo.n_atoms, rij.dtype)
         if (h_field is not None or b_field is not None) and not cfg.magnetic:
             raise ValueError("a magnetic field needs a magnetic calculation (cfg.spin)")
@@ -493,13 +663,24 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
                                           cfg.remat)
         else:
             mu_orb = jax.vmap(lambda lev: moments(hblk, lev, topo, cfg.nmom, cfg.batch,
-                                                  cfg.remat),
+                                                  cfg.remat, starts),
                               in_axes=1, out_axes=1)(orb_levels)
         # average over the orbitals of each shell: (N, nspin, nshell, nmom+1)
-        mu = jnp.stack([jnp.mean(mu_orb[:, :, a:b], axis=2) for a, b in slices], axis=2)
+        if layout is None:
+            mu = jnp.stack([jnp.mean(mu_orb[:, :, a:b], axis=2) for a, b in slices], axis=2)
+        else:
+            if cfg.spin == "noncollinear":  # walked from every orbital: pick own
+                mu_orb = jnp.einsum("nsom,noc->nscm", mu_orb,
+                                    jnp.asarray(layout.starts, mu_orb.dtype))
+            mu = jnp.zeros(mu_orb.shape[:2] + (nshell, mu_orb.shape[-1]), mu_orb.dtype)
+            for atoms, own, cols in zip(layout.atoms, layout.shells, layout.columns):
+                for k, c in zip(own, cols):
+                    mu = mu.at[atoms, :, k].set(jnp.mean(mu_orb[atoms][:, :, np.asarray(c)], axis=2))
 
-        loc = jnp.vectorize(local_expansion, signature="(m)->(),(),(k)")(mu)
+        loc = local_expansion(mu)
         n0 = params["n0"][species]
+        if layout is not None:
+            n0 = n0 * layout.shell_mask[species]
         ef = fermi_level(loc, jnp.sum(n0))
         n_spin, u_bond = occupations(loc, ef)  # (N, nspin, nshell)
 
@@ -530,7 +711,8 @@ def make_energy_fn(topo: Topology, cfg: BOPConfig, radial=powerlaw,
                    sigma=squeeze(loc[2]), moments=squeeze(mu))
         return jnp.sum(e_atom), aux
 
-    energy.shift_shape = (topo.n_atoms, 2, nshell) if cfg.magnetic else (topo.n_atoms, nshell)
+    nshift = 1 if cfg.atomic_shifts else nshell
+    energy.shift_shape = (topo.n_atoms, 2, nshift) if cfg.magnetic else (topo.n_atoms, nshift)
     energy.config = cfg
     energy.topology = topo
     energy.double_counting = double_counting

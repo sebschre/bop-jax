@@ -25,6 +25,12 @@
 
 ## Caveats
 
+- The iron-carbon model needs the potential self-consistency (stationarity
+  up to 0.15 eV in Fe16C); its migration barrier is 0.3 eV low and the
+  carbon dipole tensor has the wrong anisotropy (see [Iron-carbon](iron-carbon.md)).
+- `bandwidth_guard` and `atomic_shifts` change a model's energies; a model
+  fitted without them needs a refit with them, as carbon had.
+
 - Bond integrals for mixed shells (sp, sd, pd) are checked against the
   Slater-Koster table, for hermiticity and rotation invariance, but have not
   been compared with BOPfox.

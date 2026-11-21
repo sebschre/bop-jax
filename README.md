@@ -97,9 +97,10 @@ This prints -6.0112485448437 eV per atom, the BOPfox value to all 13 digits.
 
 | Feature | Options |
 |---|---|
-| Basis | s, p, d shells in any combination, several species |
+| Basis | s, p, d shells in any combination, several species, each with its own shells and expansion settings (`BOPConfig(species=...)`) |
 | Bond integrals | power law, BOPfox `v0`; any `radial(p, r)` callable |
-| Bandwidth | `azero`, `lowest`, `highest`, `avgan_maxbn`, `averaged`, `global`, `findeminemax`, `gershgorin`, `beerpettiforaoki` |
+| Bandwidth | `azero`, `lowest`, `highest`, `avgan_maxbn`, `averaged`, `global`, `findeminemax`, `gershgorin`, `beerpettiforaoki`; optional guard against a diverging expansion (`bandwidth_guard`) |
+| Self-consistency | one onsite shift per shell, or per atom (`atomic_shifts`) |
 | Terminator | `none`/`constantabn`, `oscillation`, `weighted`; Jackson kernel |
 | Magnetism | `collinear`, `noncollinear` (prescribed local spin axes, torques from the gradient) |
 | [Spin-orbit coupling](docs/spin-orbit.md) | onsite `xi L.S` for p and d shells in non-collinear calculations (`BOPConfig(spin_orbit=True)`); no reference code to compare with |
@@ -131,6 +132,7 @@ This prints -6.0112485448437 eV per atom, the BOPfox value to all 13 digits.
 | [Screening](docs/screening.md) | environment-dependent d-d bond integrals |
 | [Iron](docs/iron.md) | magnetic d-band iron models: the fit of this repository, and the Fe model of Egorov et al. used for dislocations |
 | [Carbon](docs/carbon.md) | sp-valent carbon model: fit, diamond, graphene and dense phases, elastic constants |
+| [Iron-carbon](docs/iron-carbon.md) | Fe-C on the Egorov iron and sp carbon models: fitted cross terms, C in bcc Fe, cementite |
 | [Limitations](docs/limitations.md) | what is not implemented, caveats |
 
 ## References
