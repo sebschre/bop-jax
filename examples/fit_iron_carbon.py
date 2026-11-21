@@ -68,70 +68,113 @@ FREE = {
 }
 
 
+def _cell_worker(name, exact, gtol, conn):
+    """One cell in its own process: its compiled functions (exact forces and
+    stress of Fe16C take several GB to compile) and its warm starts stay
+    there.  Commands are parameter dicts; the answer is a dict of results."""
+    config = dict(IRON_CARBON_CONFIG, batch=4)  # exact forces otherwise need > 15 GB
+    geometry = {"oct": fe_with_carbon("octahedral"), "tet": fe_with_carbon("tetrahedral"),
+                "cem": cementite()}[name]
+    calc = Calculator(Cell(name, *geometry), config=config)
+    calc.exact = exact
+    while True:
+        msg = conn.recv()
+        if msg is None:
+            break
+        values, mode = msg
+        p = iron_carbon(**values)
+        try:
+            if mode == "relax":  # every atom (report); the tetrahedral C stays on its site
+                e, aux = calc.relax(p, fixed=[16] if name == "tet" else None)
+            elif name == "cem":
+                e, aux = calc.solve(p)
+            else:
+                e, aux = calc.relax_shells(p, gtol=gtol)
+            out = {"energy": e, "moment": np.asarray(aux["moment"]),
+                   "charge": np.asarray(aux["charge"]),
+                   "positions": np.asarray(calc.positions),
+                   "amplitudes": np.asarray(getattr(calc, "amplitudes", [])),
+                   "stationarity": calc.stationarity, "volume": calc.volume()}
+            if name in ("oct", "cem"):
+                out["stress"] = calc.stress(p)
+            conn.send(out)
+        except Exception as err:  # noqa: BLE001
+            conn.send({"error": str(err)})
+
+
 class Model:
     def __init__(self, exact=True, checkpoint=None):
-        # batch=4: exact forces of Fe16C otherwise need more than 15 GB
-        config = dict(IRON_CARBON_CONFIG, batch=4)
-        self.oct = Calculator(Cell("oct", *fe_with_carbon("octahedral")), config=config)
-        self.tet = Calculator(Cell("tet", *fe_with_carbon("tetrahedral")), config=config)
-        self.cem = Calculator(Cell("Fe3C", *cementite()), config=config)
+        import multiprocessing as mp
+
         # exact (implicit-differentiation) forces and stress, or partial
         # derivatives at fixed shifts: those are off by up to 0.76 eV/A at
-        # the parameters of the first fit
-        for calc in (self.oct, self.tet, self.cem):
-            calc.exact = exact
-        # exact gradients carry noise from the adjoint solve (about 0.1)
-        self.gtol = 0.15 if exact else 2e-3
+        # the parameters of the first fit.  Exact gradients carry noise from
+        # the adjoint solve (about 0.1), hence the loose tolerance.
+        gtol = 0.15 if exact else 2e-3
+        ctx = mp.get_context("spawn")
+        self.workers = {}
+        for name in ("oct", "tet", "cem"):
+            here, there = ctx.Pipe()
+            proc = ctx.Process(target=_cell_worker, args=(name, exact, gtol, there),
+                               daemon=True)
+            proc.start()
+            self.workers[name] = (here, proc)
         self.checkpoint = checkpoint
         p = iron_carbon()
         self.e_fe = Calculator(Cell("bcc Fe", *bcc_fe())).solve(p)[0] / 2
         self.e_c = Calculator(Cell("diamond", *diamond(), magnetic=False)).solve(p)[0] / 2
         host = Calculator(Cell("Fe16", *bcc_supercell()))
-        host.exact = False
+        host.exact = False  # perfect crystal: partial and exact derivatives agree
         host.solve(p)
         self.host_stress = host.stress(p)  # zero up to the precision of A_FE
+        self.species = np.array(cementite()[2])
         self.n_eval = 0
         self.best = (np.inf, None)
 
-    def properties(self, values, relax_cementite=True, full=False):
-        """Fit quantities.  During the fit (``full`` False) only the
-        breathing modes of the first two Fe shells around C are relaxed;
-        the report relaxes every atom."""
-        p = iron_carbon(**values)
-        out = {}
-        if full:
-            e_oct, aux_oct = self.oct.relax(p)
-            e_tet, _ = self.tet.relax(p, fixed=[16])  # the saddle: C stays on the site
-        else:
-            e_oct, aux_oct = self.oct.relax_shells(p, gtol=self.gtol)
-            e_tet, _ = self.tet.relax_shells(p, gtol=self.gtol)
-            out["u oct"], out["u tet"] = self.oct.amplitudes, self.tet.amplitudes
-        out["E_sol oct"] = e_oct - 16 * self.e_fe - self.e_c
-        out["E tet - oct"] = e_tet - e_oct
-        dp = -(self.oct.stress(p) - self.host_stress) * self.oct.volume() / 160.21766
+    def _ask(self, name, values, mode="fit"):
+        conn = self.workers[name][0]
+        conn.send(({k: float(v) if v is not None else None for k, v in values.items()},
+                   mode))
+        out = conn.recv()
+        if "error" in out:
+            raise RuntimeError(out["error"])
+        return out
+
+    def properties(self, values, relax_cementite=False, full=False):
+        """Fit quantities.  The fit relaxes the breathing modes of the first
+        two Fe shells around C; with ``full`` every atom is relaxed.
+        Cementite stays at the experimental positions (``relax_cementite``
+        relaxes it)."""
+        mode = "relax" if full else "fit"
+        o = self._ask("oct", values, mode)
+        t = self._ask("tet", values, mode)
+        c = self._ask("cem", values, "relax" if relax_cementite else "fit")
+        out = {"u oct": o["amplitudes"], "u tet": t["amplitudes"]}
+        out["E_sol oct"] = o["energy"] - 16 * self.e_fe - self.e_c
+        out["E tet - oct"] = t["energy"] - o["energy"]
+        dp = -(o["stress"] - self.host_stress) * o["volume"] / 160.21766
         out["P axial"] = dp[2, 2]
         out["P transverse"] = 0.5 * (dp[0, 0] + dp[1, 1])
         # moment of the two Fe neighbours of C at a/2, along its axis
-        d = np.array(self.oct.positions[:16] - self.oct.positions[16])
-        d -= np.round(d / np.diag(np.asarray(self.oct.cell))) * np.diag(np.asarray(self.oct.cell))
+        pos, box = o["positions"], np.diag(fe_with_carbon("octahedral")[0])
+        d = pos[:16] - pos[16]
+        d -= np.round(d / box) * box
         nn = np.argsort(np.linalg.norm(d, axis=1))[:2]
-        out["m Fe nn oct"] = float(np.asarray(aux_oct["moment"])[nn].mean())
-        e_cem, aux_cem = (self.cem.relax(p) if relax_cementite else self.cem.solve(p))
-        out["dH Fe3C"] = (e_cem - 12 * self.e_fe - 4 * self.e_c) / 16
-        out["p Fe3C"] = -float(np.trace(self.cem.stress(p))) / 3
-        out["m Fe3C"] = float(np.mean(fe_moments(aux_cem, self.cem.species)))
-        out["charge C oct"] = float(aux_oct["charge"][16])
-        out["charge C Fe3C"] = float(np.mean(np.asarray(aux_cem["charge"])[12:]))
-        out["stationarity"] = max(self.oct.stationarity, self.tet.stationarity,
-                                  self.cem.stationarity)
+        out["m Fe nn oct"] = float(o["moment"][nn].mean())
+        out["m C oct"] = float(o["moment"][16])
+        out["dH Fe3C"] = (c["energy"] - 12 * self.e_fe - 4 * self.e_c) / 16
+        out["p Fe3C"] = -float(np.trace(c["stress"])) / 3
+        out["m Fe3C"] = float(np.mean(c["moment"][self.species == 0]))
+        out["charge C oct"] = float(o["charge"][16])
+        out["charge C Fe3C"] = float(np.mean(c["charge"][12:]))
+        out["stationarity"] = max(o["stationarity"], t["stationarity"], c["stationarity"])
         return out
 
     def residuals(self, x):
         values = dict(zip(FREE, x))
         try:
-            # cementite at its experimental positions during the fit (relaxed
-            # in the report): its relaxation costs as much as the rest together
-            out = self.properties(values, relax_cementite=False)
+            # cementite at its experimental positions during the fit
+            out = self.properties(values)
         except Exception as err:  # noqa: BLE001 (a failed evaluation is a bad point)
             print("failed:", err, file=sys.stderr)
             return np.full(len(TARGETS), 1e2)
@@ -153,26 +196,21 @@ class Model:
         return r
 
 
-def report(model, values):
-    out = model.properties(values, full=False)
-    print("shell relaxation (as fitted): u oct", np.round(out["u oct"], 3),
-          "u tet", np.round(out["u tet"], 3))
+def report(model, values, full=True):
+    """Properties as fitted (shell relaxation) and, with ``full``, with every
+    atom relaxed and cementite relaxed (exact forces: hours)."""
+    rows = [("shells (fitted)", model.properties(values))]
+    if full:
+        rows.append(("all atoms", model.properties(values, relax_cementite=True, full=True)))
+    print("u oct", np.round(rows[0][1]["u oct"], 3), "u tet", np.round(rows[0][1]["u tet"], 3))
+    print(f"{'property':14s} " + " ".join(f"{n:>16s}" for n, _ in rows) + f" {'target':>9s}")
     for k, (t, _) in TARGETS.items():
-        print(f"  {k:14s} {out[k]:9.4f} {t:9.4f}")
-    print("full relaxation:")
-    out = model.properties(values, full=True)
-    print(f"{'property':14s} {'model':>9s} {'target':>9s}")
-    for k, (t, _) in TARGETS.items():
-        print(f"{k:14s} {out[k]:9.4f} {t:9.4f}")
-    for k in ("m Fe nn oct", "charge C Fe3C", "stationarity"):
-        print(f"{k:14s} {out[k]:9.4f}")
-    # the relaxations used partial-derivative forces; exact residual force:
-    model.oct.exact = True
-    f = np.asarray(model.oct.forces(iron_carbon(**values), model.oct.positions))
-    model.oct.exact = False
-    print(f"exact residual force, octahedral cell: {np.max(np.abs(f)):.3f} eV/A")
-    cost = sum(((out[k] - t) / tol) ** 2 for k, (t, tol) in TARGETS.items())
-    print(f"cost {cost:.3f}")
+        print(f"{k:14s} " + " ".join(f"{o[k]:16.4f}" for _, o in rows) + f" {t:9.4f}")
+    for k in ("m Fe nn oct", "m C oct", "charge C Fe3C", "stationarity"):
+        print(f"{k:14s} " + " ".join(f"{o[k]:16.4f}" for _, o in rows))
+    for name, out in rows:
+        cost = sum(((out[k] - t) / tol) ** 2 for k, (t, tol) in TARGETS.items())
+        print(f"cost ({name}) {cost:.3f}")
 
 
 def main():
@@ -185,6 +223,8 @@ def main():
                     help="partial-derivative forces and stress (fast, inaccurate)")
     ap.add_argument("--checkpoint", help="JSON file the best point is written to")
     ap.add_argument("--start", help="JSON checkpoint to start from")
+    ap.add_argument("--no-full-report", action="store_true",
+                    help="report the fitted (shell-relaxed) properties only")
     args = ap.parse_args()
 
     model = Model(exact=not args.partial, checkpoint=args.checkpoint)
@@ -204,7 +244,7 @@ def main():
         least_squares(model.residuals, x0, bounds=(lo, hi), x_scale="jac", diff_step=3e-3,
                       max_nfev=args.max_nfev)
     values = dict(start, **model.best[1])
-    report(model, values)
+    report(model, values, full=not args.no_full_report)
     shown = {k: values[k] for k in FREE}
     print("IRON_CARBON_FIT =", json.dumps({k: round(float(v), 5) for k, v in shown.items()},
                                           indent=4))
