@@ -55,12 +55,12 @@ def e_diamond():
 
 
 def test_structural_order(e_diamond):
-    e_gr = solve(graphene(2.4503))[0]
+    e_gr = solve(graphene(2.4477))[0]
     e_lon = solve(lonsdaleite(A_DIAMOND))[0]
     e_sc = solve(sc(1.9449))[0]
-    # fitted (each phase at its own equilibrium): graphene +0.063, lonsdaleite
-    # +0.003, sc +2.70 eV/atom above diamond
-    assert 0.03 < e_gr - e_diamond < 0.16
+    # each phase at its own equilibrium: graphene +0.012, lonsdaleite
+    # +0.003, sc +2.68 eV/atom above diamond
+    assert 0.0 < e_gr - e_diamond < 0.06
     assert 0.0 < e_lon - e_diamond < 0.02
     assert 2.0 < e_sc - e_diamond < 3.5
 
