@@ -159,7 +159,8 @@ def report(model, values):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="evaluate the start only")
-    ap.add_argument("--max-nfev", type=int, default=40)
+    ap.add_argument("--max-nfev", type=int, default=4,
+                    help="least-squares iterations; each costs about 11 evaluations")
     args = ap.parse_args()
 
     model = Model()

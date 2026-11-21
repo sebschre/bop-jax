@@ -319,11 +319,11 @@ NO_TAPER = (100.0, 1.0)  # leaves a pair to the global cosine cutoff
 
 
 # fitted Fe-C cross terms (examples/fit_iron_carbon.py, docs/iron-carbon.md):
-# two runs, 98 + 58 evaluations, cost 15.5
+# two runs, 98 + 80 evaluations, cost 15.0
 IRON_CARBON_FIT = {
-    "e_c": 3.2444, "sds": -0.2680, "pds": -0.5873, "pdp": 0.6590, "decay": 4.2594,
-    "pair": 1.5273, "pair_decay": 5.6947, "rho_fe": 0.3743, "rho_c": 0.7053, "rho_decay": 3.0,
-    "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 9.8137,
+    "e_c": 3.1324, "sds": -0.2622, "pds": -0.5674, "pdp": 0.6585, "decay": 4.2942,
+    "pair": 1.5242, "pair_decay": 5.7070, "rho_fe": 0.3719, "rho_c": 0.7177, "rho_decay": 3.0,
+    "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 10.0152,
 }
 
 FE, C = 0, 1  # species indices of the iron-carbon model
