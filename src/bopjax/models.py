@@ -318,13 +318,12 @@ FECARBON_REPULSION = pw.Repulsion(pair=_tapered_pair, density=_tapered_density,
 NO_TAPER = (100.0, 1.0)  # leaves a pair to the global cosine cutoff
 
 
-# Fe-C cross terms (examples/fit_iron_carbon.py, docs/iron-carbon.md): best
-# point of the first fit run (98 evaluations, cost 18.2; the run was cut
-# short by a restart), the start of the next
+# fitted Fe-C cross terms (examples/fit_iron_carbon.py, docs/iron-carbon.md):
+# two runs, 98 + 58 evaluations, cost 15.5
 IRON_CARBON_FIT = {
-    "e_c": 3.4410, "sds": -0.2261, "pds": -0.6033, "pdp": 0.6695, "decay": 4.2374,
-    "pair": 1.5307, "pair_decay": 5.7114, "rho_fe": 0.3778, "rho_c": 0.6810, "rho_decay": 3.0,
-    "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 9.5951,
+    "e_c": 3.2444, "sds": -0.2680, "pds": -0.5873, "pdp": 0.6590, "decay": 4.2594,
+    "pair": 1.5273, "pair_decay": 5.6947, "rho_fe": 0.3743, "rho_c": 0.7053, "rho_decay": 3.0,
+    "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 9.8137,
 }
 
 FE, C = 0, 1  # species indices of the iron-carbon model
