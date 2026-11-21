@@ -20,6 +20,8 @@ import time
 import numpy as np
 from _iron_carbon import (Calculator, Cell, bcc_fe, bcc_supercell, cementite, diamond,
                           fe_moments, fe_with_carbon, iron_carbon)
+
+from bopjax.models import IRON_CARBON_CONFIG
 from scipy.optimize import least_squares
 
 from bopjax.models import IRON_CARBON_FIT
@@ -60,16 +62,27 @@ FREE = {
     "rho_fe": (0.0, 5.0),
     "rho_c": (0.0, 5.0),
     "hubbard_c": (2.0, 12.0),
+    "decay_pi": (1.0, 8.0),  # decay of pdp alone
+    "core": (0.0, 40.0),  # short-range Fe-C core repulsion: the axial neighbours
+    "core_r": (1.5, 1.95),
 }
 
 
 class Model:
-    def __init__(self):
-        self.oct = Calculator(Cell("oct", *fe_with_carbon("octahedral")))
-        self.tet = Calculator(Cell("tet", *fe_with_carbon("tetrahedral")))
-        self.cem = Calculator(Cell("Fe3C", *cementite()))
+    def __init__(self, exact=True, checkpoint=None):
+        # batch=4: exact forces of Fe16C otherwise need more than 15 GB
+        config = dict(IRON_CARBON_CONFIG, batch=4)
+        self.oct = Calculator(Cell("oct", *fe_with_carbon("octahedral")), config=config)
+        self.tet = Calculator(Cell("tet", *fe_with_carbon("tetrahedral")), config=config)
+        self.cem = Calculator(Cell("Fe3C", *cementite()), config=config)
+        # exact (implicit-differentiation) forces and stress, or partial
+        # derivatives at fixed shifts: those are off by up to 0.76 eV/A at
+        # the parameters of the first fit
         for calc in (self.oct, self.tet, self.cem):
-            calc.exact = False  # partial-derivative forces and stress (cheap)
+            calc.exact = exact
+        # exact gradients carry noise from the adjoint solve (about 0.1)
+        self.gtol = 0.15 if exact else 2e-3
+        self.checkpoint = checkpoint
         p = iron_carbon()
         self.e_fe = Calculator(Cell("bcc Fe", *bcc_fe())).solve(p)[0] / 2
         self.e_c = Calculator(Cell("diamond", *diamond(), magnetic=False)).solve(p)[0] / 2
@@ -90,8 +103,8 @@ class Model:
             e_oct, aux_oct = self.oct.relax(p)
             e_tet, _ = self.tet.relax(p, fixed=[16])  # the saddle: C stays on the site
         else:
-            e_oct, aux_oct = self.oct.relax_shells(p)
-            e_tet, _ = self.tet.relax_shells(p)
+            e_oct, aux_oct = self.oct.relax_shells(p, gtol=self.gtol)
+            e_tet, _ = self.tet.relax_shells(p, gtol=self.gtol)
             out["u oct"], out["u tet"] = self.oct.amplitudes, self.tet.amplitudes
         out["E_sol oct"] = e_oct - 16 * self.e_fe - self.e_c
         out["E tet - oct"] = e_tet - e_oct
@@ -128,6 +141,12 @@ class Model:
         cost = float(r @ r)
         if cost < self.best[0]:
             self.best = (cost, values)
+            if self.checkpoint:  # survives a restart of the machine
+                with open(self.checkpoint, "w") as fh:
+                    json.dump({"cost": cost, "values": {k: float(v) for k, v in values.items()},
+                               "properties": {k: float(np.asarray(out[k]).ravel()[0])
+                                              if np.ndim(out[k]) else float(out[k])
+                                              for k in TARGETS}}, fh, indent=1)
             print(f"[{self.n_eval:4d}] cost {cost:9.3f}  "
                   + " ".join(f"{k}={v:.4f}" for k, v in values.items()), flush=True)
             print("       " + " ".join(f"{k}={out[k]:.3f}" for k in TARGETS), flush=True)
@@ -160,11 +179,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="evaluate the start only")
     ap.add_argument("--max-nfev", type=int, default=4,
-                    help="least-squares iterations; each costs about 11 evaluations")
+                    help="least-squares iterations; each costs one evaluation per free "
+                         "parameter and one more")
+    ap.add_argument("--partial", action="store_true",
+                    help="partial-derivative forces and stress (fast, inaccurate)")
+    ap.add_argument("--checkpoint", help="JSON file the best point is written to")
+    ap.add_argument("--start", help="JSON checkpoint to start from")
     args = ap.parse_args()
 
-    model = Model()
-    x0 = np.array([IRON_CARBON_FIT[k] for k in FREE])
+    model = Model(exact=not args.partial, checkpoint=args.checkpoint)
+    start = dict(IRON_CARBON_FIT)
+    if start.get("decay_pi") is None:
+        start["decay_pi"] = start["decay"]
+    if args.start:
+        with open(args.start) as fh:
+            start.update(json.load(fh)["values"])
+    x0 = np.array([start[k] for k in FREE])
     lo, hi = np.array([b[0] for b in FREE.values()]), np.array([b[1] for b in FREE.values()])
     x0 = np.clip(x0, lo + 1e-6, hi - 1e-6)
     t = time.time()
@@ -173,7 +203,7 @@ def main():
     if not args.quick:
         least_squares(model.residuals, x0, bounds=(lo, hi), x_scale="jac", diff_step=3e-3,
                       max_nfev=args.max_nfev)
-    values = dict(IRON_CARBON_FIT, **model.best[1])
+    values = dict(start, **model.best[1])
     report(model, values)
     shown = {k: values[k] for k in FREE}
     print("IRON_CARBON_FIT =", json.dumps({k: round(float(v), 5) for k, v in shown.items()},

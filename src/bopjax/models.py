@@ -313,6 +313,7 @@ IRON_CARBON_FIT = {
     "e_c": 3.1324, "sds": -0.2622, "pds": -0.5674, "pdp": 0.6585, "decay": 4.2942,
     "pair": 1.5242, "pair_decay": 5.7070, "rho_fe": 0.3719, "rho_c": 0.7177, "rho_decay": 3.0,
     "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 10.0152,
+    "decay_pi": None, "core": 0.0, "core_r": 1.7,
 }
 
 FE, C = 0, 1  # species indices of the iron-carbon model
@@ -338,7 +339,14 @@ def iron_carbon(iron_values=None, carbon_values=None, **values):
                           against the iron d level (eV)
       sds, pds, pdp       C 2s - Fe 3d and C 2p - Fe 3d bond integrals at r0,
                           each ``beta * exp(-decay (r / r0 - 1))`` (eV)
+      decay_pi            decay of ``pdp`` alone (None: ``decay``)
       pair, pair_decay    Fe-C pair term ``pair * exp(-pair_decay (r / r0 - 1))``
+      core, core_r        short-range Fe-C core repulsion
+                          ``core (core_r - r)^3 / r exp(core_r - r)`` for
+                          r < core_r (Egorov's core form); with core_r
+                          between the two neighbour distances of the
+                          octahedral site (1.43 and 2.02 A) it acts on the
+                          axial neighbours only
       rho_fe, rho_c, rho_decay
                           embedding density that a C neighbour adds on Fe
                           (``rho_fe``) and an Fe neighbour adds on C
@@ -371,7 +379,8 @@ def iron_carbon(iron_values=None, carbon_values=None, **values):
         return [_exp_term(cv[c], cv["decay"], cv["r0"])]
 
     def x_term(c):
-        return [_exp_term(v[c], v["decay"], v["r0"])]
+        decay = v["decay_pi"] if (c == "pdp" and v.get("decay_pi") is not None) else v["decay"]
+        return [_exp_term(v[c], decay, v["r0"])]
 
     # mixed channels: entry [a, b] has the lower shell on a, the higher on b
     bond = {c: table({(FE, FE): bond_row(fe[c], NO_TAPER)}, zero_bond)
@@ -387,8 +396,8 @@ def iron_carbon(iron_values=None, carbon_values=None, **values):
     pair = table({
         (FE, FE): [*fe["pair"], *fe["core"], *NO_TAPER],
         (C, C): [*c_pair, 0.0, 0.0, *c_cut],
-        (FE, C): [*x_pair, 0.0, 0.0, *x_cut],
-        (C, FE): [*x_pair, 0.0, 0.0, *x_cut]}, zero7)
+        (FE, C): [*x_pair, v["core_r"], v["core"], *x_cut],
+        (C, FE): [*x_pair, v["core_r"], v["core"], *x_cut]}, zero7)
     c_rho = _exp_term(1.0, cv["density_decay"], cv["r0"])[:2]
     density = table({
         (FE, FE): [1.0, fe["embed"][1], fe["embed"][2], 0.0, 0.0, *NO_TAPER],
