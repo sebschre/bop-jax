@@ -25,9 +25,9 @@
 
 ## Caveats
 
-- The iron-carbon model has no fitted cross terms: magnetic
-  self-consistency of carbon in iron is not robust enough to fit (see
-  [Iron-carbon](iron-carbon.md)). Pure iron and pure carbon are unaffected.
+- The iron-carbon model needs the potential self-consistency (stationarity
+  up to 0.15 eV in Fe16C); its migration barrier is 0.3 eV low and the
+  carbon dipole tensor has the wrong anisotropy (see [Iron-carbon](iron-carbon.md)).
 - `bandwidth_guard` and `atomic_shifts` change a model's energies; a model
   fitted without them needs a refit with them, as carbon had.
 

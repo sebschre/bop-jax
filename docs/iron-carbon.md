@@ -85,6 +85,60 @@ forces and stress are partial derivatives at the converged shifts
 against the exact force at a relaxed tetrahedral cell). The breathing
 modes of the first two Fe shells around C relax in about 3 minutes.
 
+## Results (`IRON_CARBON_FIT`)
+
+Fitted with `examples/fit_iron_carbon.py`: 10 cross parameters, bounded
+least squares, two runs (98 + 80 evaluations, about 5 minutes each on 4
+cores; the first run was cut short by a container restart and the second
+started from its best point), cost 593 at the start, 15.0 at the end.
+FM Fe16C cells; "shell-relaxed" relaxes the breathing modes of the first two
+Fe shells around C, as in the fit; "relaxed" relaxes every atom at fixed
+cell (partial-derivative forces). Cementite at the experimental lattice,
+atoms relaxed.
+
+| Property | Shell-relaxed (fitted) | Relaxed | Target |
+|---|---|---|---|
+| E_sol, octahedral, relative to diamond (eV) | 0.75 | 0.61 | 0.72 +- 0.15 |
+| E(tetrahedral) - E(octahedral) (eV) | 0.76 | 0.56 | 0.86 +- 0.10 |
+| dipole tensor, axial (eV) | 5.8 | 5.5 | 8.0 +- 1.5 |
+| dipole tensor, transverse (eV) | 7.5 | 7.2 | 3.4 +- 1.5 |
+| formation energy of Fe3C (eV/atom) | -0.013 | -0.013 | +0.03 +- 0.04 |
+| pressure of Fe3C at the experimental lattice (GPa) | -5.2 | -5.2 | 0 +- 5 |
+| mean Fe moment of Fe3C (muB) | 2.10 | 2.10 | 1.95 +- 0.15 |
+| electrons gained by octahedral C | -0.11 | -0.11 | +0.3 +- 0.4 |
+| Fe moment next to octahedral C (muB) | | 2.12 | (bulk 2.86) |
+| C charge in Fe3C (electrons gained) | | -0.13 | |
+| largest stationarity, max dE/dshift (eV) | | 0.15 | |
+
+- **Energetics.** The solution energy of octahedral carbon, the formation
+  energy of cementite and its Fe moment are close to their targets; the
+  octahedral site is the stable one. Cementite comes out marginally stable
+  against FM bcc iron and diamond (-13 meV/atom) where experiment and DFT
+  have it marginally metastable.
+- **Migration barrier.** The tetrahedral site is 0.76 eV above the
+  octahedral one with the two-shell relaxation of the fit and 0.56 eV with
+  all atoms relaxed: the tetrahedral cell relaxes further than the shells
+  capture. Against the 0.86 eV of DFT and experiment the barrier is too low
+  by 0.3 eV.
+- **Dipole tensor: wrong anisotropy.** Transverse comes out larger than
+  axial, where carbon pushes its two axial neighbours (1.43 A) hardest. The
+  Fe-C terms share one decay length for bond integrals and one for the pair
+  term, which does not separate the 1.43 A and 2.02 A neighbours enough;
+  the stress is also a partial derivative at fixed shifts. Strain fields of
+  carbon (martensite tetragonality, carbon-dislocation interaction) are not
+  reliable with these parameters.
+- **Magnetism and charge.** Iron next to carbon keeps a sizeable moment
+  (2.12 muB on the axial neighbours of the octahedral site, bulk 2.86), and
+  cementite averages 2.10 muB per Fe; carbon carried a small moment
+  antiparallel to iron in the cells checked during the fit, as in DFT. Carbon loses about 0.1 electron, where
+  DFT charge analyses give it a gain; the tight-binding charge is not a
+  Bader charge, and the target was loose.
+- **Self-consistency.** Every cell converges with the potential condition.
+  The stationarity, at most 0.15 eV, means energies are off from the
+  stationary ones to first order in it; differences between similar cells
+  (octahedral and tetrahedral) should be less affected than absolute
+  energies.
+
 ## History: what did not work
 
 ### Stationary self-consistency on the earlier iron models
@@ -164,6 +218,17 @@ cell is not the dilute limit, and three of the targets were not checked
 against the papers.
 
 ## Cross parameters
+
+| e_c | sds | pds | pdp | decay | pair | pair_decay | rho_fe | rho_c | hubbard_c |
+|---|---|---|---|---|---|---|---|---|---|
+| 3.13 | -0.262 | -0.567 | 0.659 | 4.29 | 1.52 | 5.71 | 0.372 | 0.718 | 10.0 |
+
+(eV, at r0 = 1.95 A; decays dimensionless; rho_decay fixed at 3, Fe-C range
+2.5-3.0 A.) The carbon levels sit 3.1 eV above the iron d level, the
+C 2p - Fe 3d pi bond (`pdp`) is larger than the C 2s - Fe 3d sigma bond, and
+the carbon Hubbard term (10 eV) keeps carbon near neutral.
+
+What the parameters are:
 
 `e_c` (C levels against Fe d), `sds`, `pds`, `pdp` and their
 common decay `decay` at r0 = 1.95 A, the Fe-C pair term (`pair`,
