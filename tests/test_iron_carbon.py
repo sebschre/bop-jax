@@ -5,13 +5,15 @@ import numpy as np
 import pytest
 
 import bopjax as bj
+from bopjax import pairwise as pw
 from bopjax.hamiltonian import v0_bond
-from bopjax.models import (CARBON_CONFIG, IRON_CARBON_CONFIG, IRON_CONFIG, carbon, iron,
-                           iron_carbon, tapered_exp)
+from bopjax.models import (CARBON_CONFIG, IRON_CARBON_CONFIG, IRON_EGOROV_CONFIG, carbon,
+                           iron_carbon, iron_egorov, tapered_exp_sum)
 
-# The Fe-C cross parameters are not fitted (see docs/iron-carbon.md); these
-# tests check the machinery: per-species shells, shifts and spin, and that
-# the elemental models are reproduced.
+# Machinery of the iron-carbon model: per-species shells, shifts and spin,
+# the elemental models reproduced, forces of the potential self-consistency.
+# The fitted Fe-C properties need 17-atom cells and are checked by
+# examples/fit_iron_carbon.py (docs/iron-carbon.md).
 
 FCC = 0.5 * np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0.0]])
 
@@ -31,27 +33,25 @@ def scf_energy(pos, cell, species, cfg, params, radial, fe_moment=None, shells=(
     return res.energy, res.aux
 
 
-def test_pure_iron_is_the_sd_iron_model():
-    a = 2.855
+def test_pure_iron_is_the_egorov_model():
+    a = 2.8394
     cell, pos = a * np.eye(3), a * np.array([[0, 0, 0], [0.5, 0.5, 0.5]])
     e_ref, aux_ref = scf_energy(pos, cell, [0, 0],
-                                bj.BOPConfig(spin="collinear", **dict(IRON_CONFIG,
-                                                                      basis=("s", "d"))),
-                                iron(basis=("s", "d")), v0_bond, 2.5)
-    e, aux = scf_energy(pos, cell, [0, 0],
-                        bj.BOPConfig(spin="collinear", **IRON_CARBON_CONFIG),
-                        iron_carbon(), tapered_exp, 2.5, shells=(0, 2))
+                                bj.BOPConfig(spin="collinear", **IRON_EGOROV_CONFIG),
+                                iron_egorov(), pw.exp_sum, 2.8, shells=(0, 0))
+    e, aux = scf_energy(pos, cell, [0, 0], bj.BOPConfig(spin="collinear", **IRON_CARBON_CONFIG),
+                        iron_carbon(), tapered_exp_sum, 2.8, shells=(0, 2))
     assert e == pytest.approx(e_ref, abs=1e-9)
     assert np.allclose(aux["moment"], aux_ref["moment"], atol=1e-8)
 
 
 def test_pure_carbon_is_the_carbon_model():
-    a = 3.5651
+    a = 3.5653
     cell, pos = a * FCC, a * np.array([[0, 0, 0], [0.25, 0.25, 0.25]])
     e_ref, aux_ref = scf_energy(pos, cell, [0, 0], bj.BOPConfig(**CARBON_CONFIG), carbon(),
                                 v0_bond)
     e, aux = scf_energy(pos, cell, [1, 1], bj.BOPConfig(**IRON_CARBON_CONFIG), iron_carbon(),
-                        tapered_exp)
+                        tapered_exp_sum)
     assert e == pytest.approx(e_ref, abs=1e-9)
     assert np.allclose(aux["n_shell"][:, :2], aux_ref["n_shell"], atol=1e-8)
     assert np.allclose(aux["n_shell"][:, 2], 0.0)  # carbon has no d shell
@@ -64,7 +64,7 @@ def test_species_atomic_shifts_and_spin_polarization():
     cell, pos = a * FCC, np.array([[0, 0, 0], [0.5 * a, 0, 0]])
     cfg = bj.BOPConfig(spin="collinear", **IRON_CARBON_CONFIG)
     topo = bj.build_topology(pos, [0, 1], cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2)
-    energy = bj.make_energy_fn(topo, cfg, radial=tapered_exp)
+    energy = bj.make_energy_fn(topo, cfg, radial=tapered_exp_sum)
     x = np.zeros(energy.shift_shape)
     x[0, 0, 2], x[0, 1, 2] = -1.0, 1.0  # iron d split
     x[1, :, :2] = 0.3
@@ -83,32 +83,42 @@ def test_absent_shells_ignore_their_parameters():
     pos = np.array([[0, 0, 0], [0.5 * a, 0, 0]])
     cfg = bj.BOPConfig(**IRON_CARBON_CONFIG)
     p = iron_carbon()
-    e, _ = scf_energy(pos, cell, [0, 1], cfg, p, tapered_exp)
+    e, _ = scf_energy(pos, cell, [0, 1], cfg, p, tapered_exp_sum)
     q = dict(p, bond=dict(p["bond"]), onsite=p["onsite"].at[0, 1].set(-3.0).at[1, 2].set(-2.0),
              n0=p["n0"].at[0, 1].set(1.0))
-    junk = jnp.array([1.3, 1.0, 2.0, 3.0, 0.5])
+    junk = jnp.array([1.3, 0.5, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 3.0, 0.5])
     q["bond"]["sds"] = q["bond"]["sds"].at[0, 1].set(junk)  # Fe s - C d
     q["bond"]["pps"] = q["bond"]["pps"].at[0, 1].set(junk)  # Fe p - C p
     q["bond"]["dds"] = q["bond"]["dds"].at[1, 1].set(junk)  # C d - C d
-    e2, _ = scf_energy(pos, cell, [0, 1], cfg, q, tapered_exp)
+    e2, _ = scf_energy(pos, cell, [0, 1], cfg, q, tapered_exp_sum)
     assert e2 == pytest.approx(e, abs=1e-9)
 
 
 def test_fe_c_forces_match_finite_differences():
-    """Rock-salt FeC with carbon off its site, non-magnetic (keeps it quick)."""
+    """Rock-salt FeC with carbon off its site, ferromagnetic, potential
+    self-consistency (as the model is used): forces by implicit
+    differentiation against finite differences of the energy."""
+    import jax
+
     a = 4.0
     cell = a * FCC
     pos = np.array([[0, 0, 0], [0.5 * a + 0.12, 0.05, -0.08]])
-    cfg = bj.BOPConfig(**IRON_CARBON_CONFIG)
+    cfg = bj.BOPConfig(spin="collinear", **IRON_CARBON_CONFIG)
     topo = bj.build_topology(pos, [0, 1], cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2, skin=0.1)
-    pot = bj.make_potential(bj.make_energy_fn(topo, cfg, radial=tapered_exp), tol=1e-11)
+    energy = bj.make_energy_fn(topo, cfg, radial=tapered_exp_sum)
+    pot = bj.make_potential(energy, tol=1e-12, condition="potential", max_iter=600)
     p = iron_carbon()
-    import jax
-    f = -jax.grad(lambda q: pot(q, jnp.asarray(cell), p)[0])(jnp.asarray(pos))
+    m = np.zeros(energy.shift_shape[::2])
+    m[0, 2] = 2.5
+    start = bj.stoner_shifts(m, float(p["stoner"][0, 2]))
+    e, aux = pot(jnp.asarray(pos), jnp.asarray(cell), p, start)
+    assert float(aux["scf_residual"]) < 1e-10
+    x0 = aux["shifts"]
+    f = -jax.grad(lambda q: pot(q, jnp.asarray(cell), p, x0)[0])(jnp.asarray(pos))
     h = 1e-4
     for i, k in [(1, 0), (1, 2)]:
         dp = np.zeros_like(pos)
         dp[i, k] = h
-        num = -(float(pot(jnp.asarray(pos + dp), jnp.asarray(cell), p)[0])
-                - float(pot(jnp.asarray(pos - dp), jnp.asarray(cell), p)[0])) / (2 * h)
+        num = -(float(pot(jnp.asarray(pos + dp), jnp.asarray(cell), p, x0)[0])
+                - float(pot(jnp.asarray(pos - dp), jnp.asarray(cell), p, x0)[0])) / (2 * h)
         assert float(f[i, k]) == pytest.approx(num, abs=1e-5)

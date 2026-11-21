@@ -281,17 +281,6 @@ def _taper(r, rc, dc):
     return jnp.where(r < rc, 0.5 * (1.0 + jnp.cos(jnp.pi * x)), 0.0)
 
 
-def tapered_exp(p, r):
-    """``p[0] * exp(-p[1] (r / p[2] - 1))`` switched off between ``p[3] - p[4]``
-    and ``p[3]``: an exponential with a cutoff of its own, so that each pair
-    of species can have its own range under one global cutoff."""
-    return p[0] * jnp.exp(-p[1] * (r / p[2] - 1.0)) * _taper(r, p[3], p[4])
-
-
-# repulsion and embedding density with per-pair cutoffs (rows as tapered_exp)
-TAPERED_V0 = pw.Repulsion(pair=tapered_exp, density=tapered_exp, embed=pw.V0.embed)
-
-
 def tapered_exp_sum(p, r):
     """Sum of three stretched exponentials (``pairwise.exp_sum``, p[:9]) switched
     off between ``p[9] - p[10]`` and ``p[9]``: bond integrals of every pair of

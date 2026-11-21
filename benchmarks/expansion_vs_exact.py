@@ -22,7 +22,7 @@ sys.path.insert(0, "examples")
 import bopjax as bj  # noqa: E402
 from bopjax.geometry import bond_vectors  # noqa: E402
 from bopjax.hamiltonian import bond_blocks, shell_slices  # noqa: E402
-from bopjax.models import IRON_CARBON_CONFIG, iron_carbon, tapered_exp  # noqa: E402
+from bopjax.models import IRON_CARBON_CONFIG, iron_carbon, tapered_exp_sum  # noqa: E402
 from _iron_carbon import bcc_fe, diamond, fe_with_carbon  # noqa: E402
 
 FCC_PRIM = 0.5 * np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0.0]])
@@ -72,10 +72,10 @@ def exact_band_energy(cell, pos, species, mesh, params, smearing=0.05):
     hblk = np.asarray(bond_blocks(rij, topo.nbr_mask, np.broadcast_to(sp[:, None],
                                   topo.nbr_origin.shape), sp[topo.nbr_origin],
                                   params["bond"], cfg.basis, cfg.rcut, cfg.dcut,
-                                  tapered_exp))
+                                  tapered_exp_sum))
     rij = np.asarray(rij)
     slices, norb = shell_slices(cfg.basis)
-    own = {0: [0, 2], 1: [0, 1]}  # shells of Fe (s, d) and C (s, p)
+    own = {0: [2], 1: [0, 1]}  # shells of Fe (d) and C (s, p)
     orbs = [[o for k in own[s] for o in range(*slices[k])] for s in sp]
     offsets = np.cumsum([0] + [len(o) for o in orbs])
     level = np.asarray(params["onsite"])  # (species, shell)
@@ -114,7 +114,7 @@ def exact_band_energy(cell, pos, species, mesh, params, smearing=0.05):
 def bop_band_energy(cell, pos, species, params, settings):
     cfg = bj.BOPConfig(**dict(IRON_CARBON_CONFIG, species=settings))
     topo = bj.build_topology(pos, species, cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2)
-    energy = bj.make_energy_fn(topo, cfg, radial=tapered_exp)
+    energy = bj.make_energy_fn(topo, cfg, radial=tapered_exp_sum)
     _, aux = energy(jnp.zeros(energy.shift_shape), jnp.asarray(pos), jnp.asarray(cell), params)
     sp = np.asarray(species)
     e0 = np.asarray(params["onsite"])[sp]
