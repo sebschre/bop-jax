@@ -139,6 +139,18 @@ pub struct Yukawa {
     pub m: Vec<f64>,
 }
 
+/// Parameters of the d-d screening (`bopjax` `params["screening"]`): the
+/// sd-sigma bond integral and overlaps; for "sds*" the entry [a][b] has the
+/// s orbital on species a.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScreeningParams {
+    pub sds: ChannelParams,
+    pub sds_overlap: ChannelParams,
+    pub dds_overlap: ChannelParams,
+    pub ddp_overlap: ChannelParams,
+    pub ddd_overlap: ChannelParams,
+}
+
 fn default_coulomb() -> Coulomb {
     Coulomb::Diagonal
 }
@@ -219,6 +231,12 @@ pub struct Model {
     pub repulsion: Option<Repulsion>,
     #[serde(default)]
     pub yukawa: Option<Yukawa>,
+    /// screening of the d-d bond integrals
+    #[serde(default)]
+    pub screening: Option<ScreeningParams>,
+    /// radial form of the screening integrals (default: `radial`)
+    #[serde(default)]
+    pub screening_radial: Option<Radial>,
     #[serde(default = "default_coulomb")]
     pub coulomb: Coulomb,
     /// taper R1, R2 of the intersite Coulomb integrals [species][species]
@@ -286,6 +304,9 @@ impl Model {
             && self.rcut2.is_none()
         {
             return Err("repulsion, Yukawa and intersite Coulomb need rcut2".into());
+        }
+        if self.screening.is_some() && !self.basis.contains(&Shell::D) {
+            return Err("screening acts on d-d bond integrals; the basis has no d shell".into());
         }
         if self.coulomb == Coulomb::Frauenheim && self.taper.len() != ns {
             return Err("intersite Coulomb needs taper [species][species][R1, R2]".into());

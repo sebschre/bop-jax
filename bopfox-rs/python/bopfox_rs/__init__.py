@@ -121,23 +121,27 @@ def _tolist(x):
     return np.asarray(x, dtype=float).tolist()
 
 
-def model_from_bopjax(cfg, params, radial="powerlaw") -> dict:
+_RADIAL = {"powerlaw": "powerlaw", "v0_bond": "v0", "exp_sum": "exp_sum"}
+
+
+def model_from_bopjax(cfg, params, radial="powerlaw", screening_radial=None) -> dict:
     """Model dict from a ``bopjax.BOPConfig`` and a bopjax parameter dict.
 
     For ``spin="noncollinear"`` the spin axes are not part of the model:
     pass ``params["spin_axes"]`` as ``axes`` to ``compute`` / ``scf``; fields
     (``params["magnetic_field"]`` etc.) likewise go to ``compute`` / ``scf``.
 
+    ``screening_radial`` is the radial form of the screening integrals
+    (bopjax ``make_energy_fn(screening_radial=...)``; default ``radial``).
+
     ``radial`` names the bond-integral form: "powerlaw"
     (``bopjax.hamiltonian.powerlaw``), "v0" (``v0_bond``) or "exp_sum"
     (``pairwise.exp_sum``); a function is accepted and mapped by name.
     """
     if callable(radial):
-        radial = {"powerlaw": "powerlaw", "v0_bond": "v0", "exp_sum": "exp_sum"}[radial.__name__]
-    unsupported = [name for name, on in [
-        ("screening", cfg.screening)] if on]
-    if unsupported:
-        raise NotImplementedError("not in bopfox-rs yet: " + ", ".join(unsupported))
+        radial = _RADIAL[radial.__name__]
+    if callable(screening_radial):
+        screening_radial = _RADIAL[screening_radial.__name__]
     model = {
         "nmom": cfg.nmom, "nexp": cfg.nexp, "bandwidth": cfg.bandwidth,
         "global_ab": list(cfg.global_ab), "terminator": cfg.terminator,
@@ -149,6 +153,10 @@ def model_from_bopjax(cfg, params, radial="powerlaw") -> dict:
         "hubbard": _tolist(params["hubbard"]),
         "bond": {k: _tolist(v) for k, v in params["bond"].items()},
     }
+    if cfg.screening:
+        model["screening"] = {k: _tolist(v) for k, v in params["screening"].items()}
+        if screening_radial is not None:
+            model["screening_radial"] = screening_radial
     model["coulomb"] = cfg.coulomb
     if cfg.coulomb != "diagonal":
         model["taper"] = _tolist(params["taper"])

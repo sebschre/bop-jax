@@ -361,3 +361,59 @@ def test_intersite_coulomb():
     assert out["converged"]
     assert out["energy"] == pytest.approx(float(e_p), abs=1e-8)
     np.testing.assert_allclose(out["forces"], -np.asarray(g), atol=1e-7)
+
+
+@pytest.mark.parametrize("spin", ["none", "collinear", "noncollinear"])
+def test_screening(spin):
+    """Screened d-d integrals with bopjax's screening test functions:
+    derivatives at given shifts (and spin axes), then self-consistency."""
+    def channel(prefactor, power):
+        return jnp.broadcast_to(jnp.array([prefactor, 2.5, power]), (1, 1, 3))
+
+    params = dict(canonical_d(hubbard=8.0), screening={
+        "sds": channel(-1.2, 3.5), "sds_overlap": channel(0.18, 3.0),
+        "dds_overlap": channel(-0.06, 4.0), "ddp_overlap": channel(0.04, 4.0),
+        "ddd_overlap": channel(-0.01, 4.0)})
+    a = 3.5
+    pos = a * np.array([[0, 0, 0], [0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]])
+    pos[0] += [0.15, -0.08, 0.05]
+    pos[2] += [-0.05, 0.10, 0.02]
+    cell = a * np.eye(3)
+    n = 4
+    cfg = bj.BOPConfig(nmom=7, rcut=3.3, dcut=0.5, screening=True, spin=spin)
+    axes = None
+    if spin != "none":
+        params["stoner"] = jnp.array([[0.8]])
+    if spin == "noncollinear":
+        axes = np.array([[0.0, 0.0, 1.0], [0.2, 0.1, 0.9], [-0.1, 0.2, 0.9], [0.1, -0.2, 1.0]])
+        params["spin_axes"] = jnp.array(axes)
+    shape = (n, 1) if spin == "none" else (n, 2, 1)
+    shifts = RNG.normal(scale=0.02, size=shape)
+    if spin != "none":
+        shifts[:, 0] -= 0.4
+        shifts[:, 1] += 0.4
+    topo = bj.build_topology(pos, [0] * n, cfg.rcut, cfg.nmom, cell)
+    energy = bj.make_energy_fn(topo, cfg)
+    p, c, s = jnp.array(pos), jnp.array(cell), jnp.array(shifts)
+    e_ref = energy(s, p, c, params)[0]
+    g_s, g_p = jax.grad(lambda s_, p_: energy(s_, p_, c, params)[0], argnums=(0, 1))(s, p)
+    virial = jax.grad(lambda eps: energy(s, p @ (jnp.eye(3) + 0.5 * (eps + eps.T)),
+                                         c @ (jnp.eye(3) + 0.5 * (eps + eps.T)), params)[0])(
+        jnp.zeros((3, 3)))
+    rs = bopfox_rs.Potential(bopfox_rs.model_from_bopjax(cfg, params))
+    out = rs.compute(pos, [0] * n, cell, shifts, axes=axes)
+    assert out["energy"] == pytest.approx(float(e_ref), abs=1e-9)
+    np.testing.assert_allclose(out["forces"], -np.asarray(g_p), atol=1e-8)
+    np.testing.assert_allclose(out["virial"], np.asarray(virial), atol=1e-7)
+    np.testing.assert_allclose(out["shift_gradient"].reshape(shape), np.asarray(g_s), atol=1e-8)
+    if axes is not None:
+        g_a = jax.grad(lambda a_: energy(s, p, c, dict(params, spin_axes=a_))[0])(jnp.array(axes))
+        np.testing.assert_allclose(out["axes_gradient"], np.asarray(g_a), atol=1e-8)
+    o = rs.scf(pos, [0] * n, cell, shifts, tol=1e-10, axes=axes)
+    assert o["converged"]
+    if spin == "none":
+        # (bopjax's Newton solver does not converge the weak moments of the
+        # magnetic variants of this made-up model)
+        ref = bj.make_scf(energy)(p, c, params, shifts0=s, tol=1e-10)
+        assert ref.converged
+        assert o["energy"] == pytest.approx(ref.energy, abs=1e-9)

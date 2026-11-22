@@ -252,26 +252,49 @@ impl<'a> Bop<'a> {
 
     /// Hopping blocks and their derivatives with respect to the bond vector,
     /// for every bond: (`n_bonds * norb^2`, `n_bonds * 3 * norb^2`).
-    fn blocks(&self, pos: &[[f64; 3]], cell: &Cell, with_deriv: bool) -> (Vec<f64>, Vec<f64>) {
+    /// Components of the derivative of a bond block: the bond vector, and
+    /// with screening the scale and shift of the three d-d integrals.
+    fn dh_width(&self) -> usize {
+        if self.model.screening.is_some() {
+            9
+        } else {
+            3
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn blocks(
+        &self,
+        pos: &[[f64; 3]],
+        cell: &Cell,
+        with_deriv: bool,
+    ) -> (Vec<f64>, Vec<f64>, Option<Screened>) {
         let nl = &self.topo.nbr;
         let nn = self.norb * self.norb;
         let owners = nl.owners();
         let m = self.model;
         let sp = &self.topo.species;
+        let screened = m.screening.as_ref().map(|_| {
+            let vectors: Vec<[f64; 3]> = (0..nl.n_bonds())
+                .map(|b| nl.vector(b, owners[b], pos, cell.as_ref()))
+                .collect();
+            let sc = crate::screening::compute(m, nl, sp, &vectors);
+            Screened { sc, vectors }
+        });
+        let nd = self.dh_width();
         let per_bond: Vec<(Vec<f64>, Vec<f64>)> = (0..nl.n_bonds())
             .into_par_iter()
             .map(|b| {
                 let i = owners[b];
                 let r = nl.vector(b, i, pos, cell.as_ref());
                 let (si, sj) = (sp[i], sp[nl.j[b]]);
-                if with_deriv {
-                    let rd = [
-                        Dual::<3>::var(r[0], 0),
-                        Dual::<3>::var(r[1], 1),
-                        Dual::<3>::var(r[2], 2),
-                    ];
+                let factors = screened.as_ref().map(|s| s.sc.factors[b]);
+                if with_deriv && factors.is_none() {
+                    let rd = [0, 1, 2].map(|x| Dual::<3>::var(r[x], x));
                     let mut out = vec![Dual::<3>::zero(); nn];
-                    bond_block(rd, si, sj, &m.basis, m, m.radial, m.rcut, m.dcut, &mut out);
+                    bond_block(
+                        rd, si, sj, &m.basis, m, m.radial, m.rcut, m.dcut, None, &mut out,
+                    );
                     let v = out.iter().map(|x| x.v).collect();
                     let mut d = vec![0.0; 3 * nn];
                     for x in 0..3 {
@@ -280,20 +303,75 @@ impl<'a> Bop<'a> {
                         }
                     }
                     (v, d)
+                } else if with_deriv {
+                    // derivatives with respect to the bond vector (0..3) and
+                    // the d-d scale (3..6) and shift (6..9) of the screening
+                    type D9 = Dual<9>;
+                    let rd = [0, 1, 2].map(|x| D9::var(r[x], x));
+                    let dd = factors.map(|(sc, sh)| {
+                        (
+                            [0, 1, 2].map(|t| D9::var(sc[t], 3 + t)),
+                            [0, 1, 2].map(|t| D9::var(sh[t], 6 + t)),
+                        )
+                    });
+                    let mut out = vec![D9::zero(); nn];
+                    bond_block(
+                        rd, si, sj, &m.basis, m, m.radial, m.rcut, m.dcut, dd, &mut out,
+                    );
+                    let v = out.iter().map(|x| x.v).collect();
+                    let mut d = vec![0.0; nd * nn];
+                    for x in 0..nd {
+                        for e in 0..nn {
+                            d[x * nn + e] = out[e].d[x];
+                        }
+                    }
+                    (v, d)
                 } else {
                     let mut out = vec![0.0; nn];
-                    bond_block(r, si, sj, &m.basis, m, m.radial, m.rcut, m.dcut, &mut out);
+                    bond_block(
+                        r, si, sj, &m.basis, m, m.radial, m.rcut, m.dcut, factors, &mut out,
+                    );
                     (out, Vec::new())
                 }
             })
             .collect();
         let mut h = Vec::with_capacity(nl.n_bonds() * nn);
-        let mut dh = Vec::with_capacity(if with_deriv { nl.n_bonds() * 3 * nn } else { 0 });
+        let mut dh = Vec::with_capacity(if with_deriv {
+            nl.n_bonds() * nd * nn
+        } else {
+            0
+        });
         for (v, d) in per_bond {
             h.extend(v);
             dh.extend(d);
         }
-        (h, dh)
+        (h, dh, screened)
+    }
+
+    /// Gradients with respect to the bond vectors from the contracted block
+    /// derivatives (`[0..3]` bond vector, `[3..9]` screening factors).
+    fn bond_vector_gradient(&self, fw: &Forward, gbond: &[[f64; 9]]) -> Vec<[f64; 3]> {
+        let mut g: Vec<[f64; 3]> = gbond.iter().map(|x| [x[0], x[1], x[2]]).collect();
+        if let Some(s) = &fw.screened {
+            let sbar: Vec<[f64; 6]> = gbond
+                .iter()
+                .map(|x| [x[3], x[4], x[5], x[6], x[7], x[8]])
+                .collect();
+            let extra = crate::screening::backward(
+                self.model,
+                &self.topo.nbr,
+                &self.topo.species,
+                &s.vectors,
+                &s.sc,
+                &sbar,
+            );
+            for (a, b) in g.iter_mut().zip(extra) {
+                for x in 0..3 {
+                    a[x] += b[x];
+                }
+            }
+        }
+        g
     }
 
     /// Onsite levels per spin channel, `[spin][atom * norb + orbital]`.
@@ -470,7 +548,7 @@ impl<'a> Bop<'a> {
             self.shift_len(),
             "shifts must have n_atoms * nspin * nshell entries"
         );
-        let (h, dh) = self.blocks(pos, cell, with_derivatives);
+        let (h, dh, screened) = self.blocks(pos, cell, with_derivatives);
         let levels = self.onsite_levels(shifts);
         let keep = keep && self.walk_size() <= WALK_BUDGET;
         let (mut proj, mut onsite_c, mut swalks) = (Vec::new(), Vec::new(), Vec::new());
@@ -525,6 +603,7 @@ impl<'a> Bop<'a> {
             })
             .sum();
         Forward {
+            screened,
             coulomb: self.coulomb_integrals(pos, cell),
             h,
             dh,
@@ -887,11 +966,12 @@ impl<'a> Bop<'a> {
             let nb = topo.nbr.n_bonds();
             let owners = topo.nbr.owners();
             let chunk = n.div_ceil(rayon::current_num_threads() * 4).max(1);
-            let partial: Vec<(Vec<[f64; 3]>, Vec<f64>)> = (0..n)
+            let nd = self.dh_width();
+            let partial: Vec<(Vec<[f64; 9]>, Vec<f64>)> = (0..n)
                 .collect::<Vec<_>>()
                 .par_chunks(chunk)
                 .map(|atoms| {
-                    let mut gbond = vec![[0.0; 3]; if forces { nb } else { 0 }];
+                    let mut gbond = vec![[0.0; 9]; if forces { nb } else { 0 }];
                     let mut obar = vec![0.0; ns * n * norb];
                     for &i in atoms {
                         for s in 0..ns {
@@ -911,8 +991,8 @@ impl<'a> Bop<'a> {
                             };
                             let ob = &mut obar[s * n * norb..(s + 1) * n * norb];
                             let mut contract = |b: usize, hbar: &[f64]| {
-                                let dblk = &dh[b * 3 * nn..(b + 1) * 3 * nn];
-                                for x in 0..3 {
+                                let dblk = &dh[b * nd * nn..(b + 1) * nd * nn];
+                                for x in 0..nd {
                                     let mut acc = 0.0;
                                     for e in 0..nn {
                                         acc += hbar[e] * dblk[x * nn + e];
@@ -927,18 +1007,23 @@ impl<'a> Bop<'a> {
                     (gbond, obar)
                 })
                 .collect();
-            let mut gbond = vec![[0.0; 3]; if forces { nb } else { 0 }];
+            let mut gbond9 = vec![[0.0; 9]; if forces { nb } else { 0 }];
             let mut obar = vec![0.0; ns * n * norb];
             for (g, o) in partial {
                 for b in 0..g.len() {
-                    for x in 0..3 {
-                        gbond[b][x] += g[b][x];
+                    for x in 0..nd {
+                        gbond9[b][x] += g[b][x];
                     }
                 }
                 for (t, v) in obar.iter_mut().zip(o) {
                     *t += v;
                 }
             }
+            let gbond = if forces {
+                self.bond_vector_gradient(fw, &gbond9)
+            } else {
+                Vec::new()
+            };
             for b in 0..gbond.len() {
                 let i = owners[b];
                 let j = topo.nbr.j[b];
@@ -1079,7 +1164,14 @@ fn slices_for_so(model: &Model) -> Vec<(usize, usize)> {
     shell_slices(&model.basis).0
 }
 
+/// Screening data of a forward pass: the factors and the bond vectors.
+pub struct Screened {
+    sc: crate::screening::Screening,
+    vectors: Vec<[f64; 3]>,
+}
+
 pub struct Forward {
+    screened: Option<Screened>,
     /// intersite Coulomb integral and its radial derivative per entry of the
     /// second neighbour list (empty unless coulomb = frauenheim)
     coulomb: Vec<(f64, f64)>,
@@ -1328,12 +1420,13 @@ impl<'a> Bop<'a> {
         );
         let sd = self.spinor_data(&fw.h, &fw.onsite_c);
         let chunk = n.div_ceil(rayon::current_num_threads() * 4).max(1);
-        type Part = (Vec<[f64; 3]>, Vec<C64>, Vec<(usize, [[C64; 4]; 2])>);
+        let nd = self.dh_width();
+        type Part = (Vec<[f64; 9]>, Vec<C64>, Vec<(usize, [[C64; 4]; 2])>);
         let partial: Vec<Part> = (0..n)
             .collect::<Vec<_>>()
             .par_chunks(chunk)
             .map(|atoms| {
-                let mut gbond = vec![[0.0; 3]; if forces { nb } else { 0 }];
+                let mut gbond = vec![[0.0; 9]; if forces { nb } else { 0 }];
                 let mut obar = vec![ZERO; n * mm];
                 let mut mproj = Vec::new();
                 for &i in atoms {
@@ -1370,8 +1463,8 @@ impl<'a> Bop<'a> {
                     }
                     mproj.push((i, ms));
                     let mut contract = |b: usize, hbar: &[f64]| {
-                        let dblk = &dh[b * 3 * nn..(b + 1) * 3 * nn];
-                        for x in 0..3 {
+                        let dblk = &dh[b * nd * nn..(b + 1) * nd * nn];
+                        for x in 0..nd {
                             let mut acc = 0.0;
                             for e in 0..nn {
                                 acc += hbar[e] * dblk[x * nn + e];
@@ -1385,13 +1478,13 @@ impl<'a> Bop<'a> {
                 (gbond, obar, mproj)
             })
             .collect();
-        let mut gbond = vec![[0.0; 3]; if forces { nb } else { 0 }];
+        let mut gbond9 = vec![[0.0; 9]; if forces { nb } else { 0 }];
         let mut obar = vec![ZERO; n * mm];
         let mut ms = vec![[[ZERO; 4]; 2]; n];
         for (g, o, mp) in partial {
             for b in 0..g.len() {
-                for x in 0..3 {
-                    gbond[b][x] += g[b][x];
+                for x in 0..nd {
+                    gbond9[b][x] += g[b][x];
                 }
             }
             for (t, v) in obar.iter_mut().zip(o) {
@@ -1405,6 +1498,11 @@ impl<'a> Bop<'a> {
             shifts: vec![0.0; n * 2 * nsh],
             pos: vec![[0.0; 3]; n],
             ..Default::default()
+        };
+        let gbond = if forces {
+            self.bond_vector_gradient(fw, &gbond9)
+        } else {
+            Vec::new()
         };
         let owners = topo.nbr.owners();
         for b in 0..gbond.len() {

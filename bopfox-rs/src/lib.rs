@@ -20,6 +20,7 @@ pub mod pairwise;
 mod python;
 pub mod real;
 pub mod scf;
+pub mod screening;
 pub mod spinor;
 
 pub use energy::{Bop, Cell, Mode, Results, G_SPIN, MU_B};

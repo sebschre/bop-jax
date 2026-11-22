@@ -213,6 +213,7 @@ pub fn bond_block<T: Real, P: BondParams + ?Sized>(
     radial: Radial,
     rcut: f64,
     dcut: f64,
+    dd_screen: Option<([T; 3], [T; 3])>,
     out: &mut [T],
 ) {
     let (slices, norb) = shell_slices(basis);
@@ -227,10 +228,15 @@ pub fn bond_block<T: Real, P: BondParams + ?Sized>(
             let (b0, b1) = slices[ib];
             let (na, nb) = (a1 - a0, b1 - b0);
             if la.l() <= lb.l() {
-                let v: Vec<T> = channels(la, lb)
+                let mut v: Vec<T> = channels(la, lb)
                     .iter()
                     .map(|c| radial.eval(&params.channel(c)[si][sj], r))
                     .collect();
+                if let (Some((scale, shift)), Shell::D, Shell::D) = (dd_screen, la, lb) {
+                    for t in 0..3 {
+                        v[t] = v[t] * scale[t] + shift[t];
+                    }
+                }
                 block_upper(la, lb, u, &v, &mut tmp);
                 for x in 0..na {
                     for y in 0..nb {

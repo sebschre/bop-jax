@@ -324,6 +324,82 @@ fn spd_coulomb_yukawa() -> Model {
     m
 }
 
+/// Screened d-d bond integrals: two species, d and sd bases, periodic and finite.
+fn screened(basis: &[&str]) -> Model {
+    let ch = |p: f64, q: f64| {
+        json!([
+            [[p, 2.081, 5.0], [p * q, 2.081, 5.0]],
+            [[p * q, 2.081, 5.0], [p * q * q, 2.081, 5.0]]
+        ])
+    };
+    let ov = |p: f64| {
+        json!([
+            [[p, 2.081, 4.0], [p * 0.9, 2.081, 4.0]],
+            [[p * 0.9, 2.081, 4.0], [p * 0.8, 2.081, 4.0]]
+        ])
+    };
+    let sd = basis.contains(&"s");
+    let mut bond =
+        json!({"dds": ch(-1.458, 0.95), "ddp": ch(0.972, 0.95), "ddd": ch(-0.243, 0.95)});
+    if sd {
+        bond["sss"] = ch(-0.4, 0.9);
+        bond["sds"] = ch(-0.3, 0.9);
+    }
+    serde_json::from_value(json!({
+        "nmom": 7, "rcut": 3.3, "dcut": 0.5, "basis": basis, "spin": "collinear",
+        "bandwidth": "averaged",
+        "onsite": if sd { json!([[1.0, 0.0], [1.2, 0.3]]) } else { json!([[0.0], [0.3]]) },
+        "n0": if sd { json!([[1.0, 6.0], [1.0, 4.8]]) } else { json!([[7.0], [4.8]]) },
+        "hubbard": [8.0, 9.0],
+        "stoner": if sd { json!([[0.0, 0.9], [0.0, 0.7]]) } else { json!([[0.9], [0.7]]) },
+        "bond": bond,
+        "screening": {"sds": ch(-0.5, 0.9), "sds_overlap": ov(0.3), "dds_overlap": ov(0.12),
+                      "ddp_overlap": ov(-0.08), "ddd_overlap": ov(0.02)}
+    }))
+    .unwrap()
+}
+
+#[test]
+fn screening_derivatives() {
+    for basis in [&["d"][..], &["s", "d"][..]] {
+        let m = screened(basis);
+        m.validate().unwrap();
+        let nsh = basis.len();
+        let x: Vec<f64> = (0..4 * 2 * nsh)
+            .map(|q| if (q / nsh) % 2 == 0 { -0.3 } else { 0.3 } + 0.01 * (q % 5) as f64)
+            .collect();
+        check_fd(&m, &distorted(), &[0, 1, 0, 1], &cubic(A), &x, 1e-7);
+        let pos = vec![
+            [0.0, 0.0, 0.0],
+            [1.75, 1.7, 0.05],
+            [1.7, -0.1, 1.8],
+            [-0.05, 1.72, 1.68],
+            [3.4, 1.8, 1.7],
+        ];
+        let x: Vec<f64> = (0..5 * 2 * nsh)
+            .map(|q| if (q / nsh) % 2 == 0 { -0.3 } else { 0.3 })
+            .collect();
+        check_fd(&m, &pos, &[0, 1, 0, 1, 0], &None, &x, 1e-7);
+    }
+}
+
+#[test]
+fn screening_changes_the_integrals() {
+    let m = screened(&["d"]);
+    let mut plain = m.clone();
+    plain.screening = None;
+    let pos = distorted();
+    let topo = Topology::build(&pos, &[0, 1, 0, 1], cubic(A).as_ref(), m.rcut, m.nmom, None);
+    let x = [-0.3, 0.3, -0.3, 0.3, -0.3, 0.3, -0.3, 0.3];
+    let a = Bop::new(&m, &topo)
+        .compute(&pos, &cubic(A), &x, false)
+        .energy;
+    let b = Bop::new(&plain, &topo)
+        .compute(&pos, &cubic(A), &x, false)
+        .energy;
+    assert!((a - b).abs() > 1e-3, "{a} {b}");
+}
+
 #[test]
 fn coulomb_and_yukawa_derivatives() {
     let m = spd_coulomb_yukawa();
