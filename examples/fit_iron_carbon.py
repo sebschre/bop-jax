@@ -75,7 +75,7 @@ FREE = {
     "rho_c": (0.0, 5.0),
     "hubbard_c": (2.0, 12.0),
     "decay_pi": (1.0, 8.0),  # decay of pdp alone
-    "core": (0.0, 40.0),  # short-range Fe-C core repulsion: the axial neighbours
+    "core": (0.0, 3000.0),  # short-range Fe-C core repulsion: the axial neighbours
     "core_r": (1.5, 1.95),
 }
 
