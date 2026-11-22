@@ -112,6 +112,37 @@ impl Repulsion {
     }
 }
 
+/// Coulomb interaction between the charges of different atoms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Coulomb {
+    /// onsite Hubbard J only
+    Diagonal,
+    /// Frauenheim integrals between atoms with a polynomial taper
+    Frauenheim,
+}
+
+/// Environment-dependent Yukawa repulsion (Znam et al.; form of Egorov et al.):
+/// `E_i = 1/2 sum_j B / r exp(-lambda_ij (r - 2 r_core))`,
+/// `lambda_ij = (lambda_i + lambda_j) / 2`,
+/// `lambda_i = lambda0 + (sum_l C exp(-upsilon r_il))^(1/m)`, all with the
+/// cutoff of the second list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Yukawa {
+    #[serde(rename = "B")]
+    pub b: Vec<Vec<f64>>,
+    pub r_core: Vec<Vec<f64>>,
+    #[serde(rename = "C")]
+    pub c: Vec<Vec<f64>>,
+    pub upsilon: Vec<Vec<f64>>,
+    pub lambda0: Vec<f64>,
+    pub m: Vec<f64>,
+}
+
+fn default_coulomb() -> Coulomb {
+    Coulomb::Diagonal
+}
+
 fn default_bandwidth() -> Bandwidth {
     Bandwidth::Lowest
 }
@@ -186,6 +217,13 @@ pub struct Model {
     pub bond: BTreeMap<String, ChannelParams>,
     #[serde(default)]
     pub repulsion: Option<Repulsion>,
+    #[serde(default)]
+    pub yukawa: Option<Yukawa>,
+    #[serde(default = "default_coulomb")]
+    pub coulomb: Coulomb,
+    /// taper R1, R2 of the intersite Coulomb integrals [species][species]
+    #[serde(default)]
+    pub taper: Vec<Vec<[f64; 2]>>,
 }
 
 impl BondParams for Model {
@@ -244,8 +282,13 @@ impl Model {
         if self.kt < 0.0 {
             return Err("kT must not be negative".into());
         }
-        if self.repulsion.is_some() && self.rcut2.is_none() {
-            return Err("repulsion needs rcut2".into());
+        if (self.repulsion.is_some() || self.yukawa.is_some() || self.coulomb != Coulomb::Diagonal)
+            && self.rcut2.is_none()
+        {
+            return Err("repulsion, Yukawa and intersite Coulomb need rcut2".into());
+        }
+        if self.coulomb == Coulomb::Frauenheim && self.taper.len() != ns {
+            return Err("intersite Coulomb needs taper [species][species][R1, R2]".into());
         }
         for (i, la) in self.basis.iter().enumerate() {
             for lb in &self.basis[i..] {

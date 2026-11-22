@@ -15,6 +15,7 @@ pub mod geometry;
 pub mod hamiltonian;
 pub mod model;
 pub mod moments;
+pub mod pairwise;
 #[cfg(feature = "python")]
 mod python;
 pub mod real;

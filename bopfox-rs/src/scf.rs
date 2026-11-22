@@ -529,6 +529,9 @@ impl<'a> Bop<'a> {
             for s in 0..ns {
                 for k in 0..nsh {
                     let mut v = m.hubbard[sp] * res.charge[i];
+                    if !res.coulomb_potential.is_empty() {
+                        v += res.coulomb_potential[i];
+                    }
                     if ns == 2 {
                         let mk = res.occupations[i][0][k] - res.occupations[i][1][k];
                         v += if s == 0 { -0.5 } else { 0.5 } * m.stoner[sp][k] * mk;
@@ -828,17 +831,40 @@ impl<'a> Bop<'a> {
         let (mut res, p) = self.assemble(&fw, true);
         let mut grad = vec![[0.0; 3]; n];
         let mut virial = [[0.0; 3]; 3];
-        if let Some(rep) = &self.model.repulsion {
-            let (e_rep, g_rep, w_rep) = self.repulsion(rep, pos, cell, true);
+        self.add_pair_terms(
+            pos,
+            cell,
+            true,
+            &mut res.energy_atom,
+            &mut grad,
+            &mut virial,
+        );
+        let coulomb = Bop::has_coulomb(&fw);
+        if coulomb {
+            let (g, w) = self.coulomb_gradient(&fw, pos, cell, &res.charge, &res.charge);
             for i in 0..n {
-                res.energy_atom[i] += e_rep[i];
                 for c in 0..3 {
-                    grad[i][c] += g_rep[i][c];
+                    grad[i][c] += g[i][c];
                 }
             }
-            add3(&mut virial, &w_rep);
+            add3(&mut virial, &w);
         }
         res.energy = res.energy_atom.iter().sum();
+        let per_atom = n_shift / n.max(1);
+        // the full kernel dV/dN: onsite (Hubbard, Stoner) and intersite Coulomb
+        let kernel = |pc: &Precond, u_full: &[f64]| -> Vec<f64> {
+            let mut v = pc.kernel(u_full);
+            if coulomb {
+                let per: Vec<f64> = (0..n)
+                    .map(|i| u_full[i * per_atom..(i + 1) * per_atom].iter().sum())
+                    .collect();
+                let inter = self.coulomb_apply(&fw, &per);
+                for (q, x) in v.iter_mut().enumerate() {
+                    *x += inter[q / per_atom];
+                }
+            }
+            v
+        };
         let mut ge = self.seeded_backward(&fw, pos, cell, 1.0, &p, true);
         self.add_explicit_zeeman(&res.moment, &mut ge);
         let (mut spin_field_grad, mut orbital_field_grad) =
@@ -865,7 +891,7 @@ impl<'a> Bop<'a> {
         };
         let restrict = |full: &[f64]| -> Vec<f64> { index.iter().map(|&q| full[q]).collect() };
         let a_t = |u: &[f64]| -> Vec<f64> {
-            let v = pc.kernel(&embed(u));
+            let v = kernel(&pc, &embed(u));
             let chi_t = self
                 .seeded_backward(&fw, pos, cell, 0.0, &self.unflatten(&v), false)
                 .shifts;
@@ -883,9 +909,25 @@ impl<'a> Bop<'a> {
         let adjoint_ok = z.is_some();
         let u = m_inv(&z.unwrap_or_else(|| vec![0.0; rhs.len()]));
         // u^T dr/dR = d(v.N)/dR with v = K u
-        let v = pc.kernel(&embed(&u));
+        let u_full = embed(&u);
+        let v = kernel(&pc, &u_full);
         let gs = self.seeded_backward(&fw, pos, cell, 0.0, &self.unflatten(&v), true);
-        let (g_s, w_s) = (gs.pos, gs.virial);
+        let (mut g_s, mut w_s) = (gs.pos.clone(), gs.virial);
+        if coulomb {
+            // the target V_i = sum_j J_ij(R) q_j also depends on R directly
+            let per: Vec<f64> = (0..n)
+                .map(|i| u_full[i * per_atom..(i + 1) * per_atom].iter().sum())
+                .collect();
+            for (l, r) in [(&per, &res.charge), (&res.charge, &per)] {
+                let (g, w) = self.coulomb_gradient(&fw, pos, cell, l, r);
+                for i in 0..n {
+                    for c in 0..3 {
+                        g_s[i][c] += g[i][c];
+                    }
+                }
+                add3(&mut w_s, &w);
+            }
+        }
         for i in 0..n {
             for c in 0..3 {
                 grad[i][c] -= g_s[i][c];

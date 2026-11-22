@@ -308,6 +308,91 @@ fn spd_model() -> Model {
     .unwrap()
 }
 
+/// The spd model with Yukawa repulsion and intersite Coulomb.
+fn spd_coulomb_yukawa() -> Model {
+    let mut m = spd_model();
+    m.coulomb = bopfox_rs::model::Coulomb::Frauenheim;
+    m.taper = vec![vec![[0.0, 3.4], [0.0, 3.5]], vec![[0.0, 3.5], [0.0, 3.3]]];
+    m.yukawa = Some(
+        serde_json::from_value(json!({
+            "B": [[1.2, 1.0], [1.0, 1.4]], "r_core": [[1.0, 1.05], [1.05, 1.1]],
+            "C": [[110.0, 90.0], [90.0, 120.0]], "upsilon": [[1.8, 1.7], [1.7, 1.9]],
+            "lambda0": [2.0, 1.8], "m": [1.2, 1.1]
+        }))
+        .unwrap(),
+    );
+    m
+}
+
+#[test]
+fn coulomb_and_yukawa_derivatives() {
+    let m = spd_coulomb_yukawa();
+    m.validate().unwrap();
+    let pos = vec![
+        [0.0, 0.0, 0.0],
+        [1.45, 1.4, 0.05],
+        [1.4, -0.1, 1.5],
+        [-0.05, 1.42, 1.38],
+        [2.8, 1.5, 1.4],
+    ];
+    let mut shifts = vec![0.0; 5 * 2 * 3];
+    for (q, s) in shifts.iter_mut().enumerate() {
+        *s = 0.02 * ((q * 7 % 5) as f64 - 2.0) + if (q / 3) % 2 == 0 { -0.3 } else { 0.3 };
+    }
+    check_fd(&m, &pos, &[0, 1, 0, 1, 0], &None, &shifts, 2e-7);
+    let pos = distorted()
+        .iter()
+        .map(|p| [p[0] * 0.8, p[1] * 0.8, p[2] * 0.8])
+        .collect::<Vec<_>>();
+    check_fd(
+        &m,
+        &pos,
+        &[0, 1, 1, 0],
+        &cubic(0.8 * A),
+        &shifts[..24],
+        2e-7,
+    );
+}
+
+#[test]
+fn potential_condition_with_intersite_coulomb() {
+    use bopfox_rs::ScfOptions;
+    let m = spd_coulomb_yukawa();
+    let pos = distorted()
+        .iter()
+        .map(|p| [p[0] * 0.8, p[1] * 0.8, p[2] * 0.8])
+        .collect::<Vec<_>>();
+    let cell = cubic(0.8 * A);
+    let species = [0, 1, 1, 0];
+    let x0: Vec<f64> = (0..24)
+        .map(|q| if (q / 3) % 2 == 0 { -0.4 } else { 0.4 })
+        .collect();
+    let opt = ScfOptions {
+        tol: 1e-11,
+        ..ScfOptions::potential()
+    };
+    let run = |p: &[[f64; 3]], s0: &[f64]| {
+        let topo = Topology::build(p, &species, cell.as_ref(), m.rcut, m.nmom, m.rcut2);
+        let r = Bop::new(&m, &topo).scf(p, &cell, Some(s0), &opt);
+        assert!(r.converged, "residual {}", r.residual);
+        r
+    };
+    let r = run(&pos, &x0);
+    assert!(r.results.coulomb_potential.iter().any(|v| v.abs() > 1e-4));
+    let e = |t: f64| {
+        let mut p = pos.clone();
+        p[1][2] += t;
+        run(&p, &r.shifts).results.energy
+    };
+    let h = 1e-4;
+    let fd = -(-e(2.0 * h) + 8.0 * e(h) - 8.0 * e(-h) + e(-2.0 * h)) / (12.0 * h);
+    assert!(
+        (r.results.forces[1][2] - fd).abs() < 1e-6,
+        "{} vs {fd}",
+        r.results.forces[1][2]
+    );
+}
+
 #[test]
 fn spd_magnetic_two_species_cluster() {
     let m = spd_model();

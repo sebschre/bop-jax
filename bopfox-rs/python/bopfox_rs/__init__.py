@@ -135,8 +135,7 @@ def model_from_bopjax(cfg, params, radial="powerlaw") -> dict:
     if callable(radial):
         radial = {"powerlaw": "powerlaw", "v0_bond": "v0", "exp_sum": "exp_sum"}[radial.__name__]
     unsupported = [name for name, on in [
-        ("screening", cfg.screening), ("yukawa", cfg.yukawa),
-        ("coulomb != diagonal", cfg.coulomb != "diagonal")] if on]
+        ("screening", cfg.screening)] if on]
     if unsupported:
         raise NotImplementedError("not in bopfox-rs yet: " + ", ".join(unsupported))
     model = {
@@ -150,6 +149,12 @@ def model_from_bopjax(cfg, params, radial="powerlaw") -> dict:
         "hubbard": _tolist(params["hubbard"]),
         "bond": {k: _tolist(v) for k, v in params["bond"].items()},
     }
+    model["coulomb"] = cfg.coulomb
+    if cfg.coulomb != "diagonal":
+        model["taper"] = _tolist(params["taper"])
+    if cfg.yukawa:
+        y = params["yukawa"]
+        model["yukawa"] = {k: _tolist(y[k]) for k in ("B", "r_core", "C", "upsilon", "lambda0", "m")}
     if cfg.magnetic:
         model["stoner"] = _tolist(params["stoner"])
     if cfg.spin_orbit:

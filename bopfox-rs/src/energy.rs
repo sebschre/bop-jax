@@ -14,6 +14,7 @@ use crate::complex::{pauli, projector_derivatives, spin_projectors, C64, ZERO};
 use crate::expansion::{self, local_derivs, Local};
 use crate::geometry::Topology;
 use crate::hamiltonian::{angular_momentum, bond_block, cosine_cutoff, shell_slices};
+use crate::model::Coulomb;
 use crate::model::Model;
 use crate::moments::{backward, moments, moments_tangent, walk, HamiltonianData, Walk};
 use crate::real::{Dual, Real};
@@ -64,6 +65,8 @@ pub struct Results {
     pub moments: Vec<Vec<Vec<Vec<f64>>>>,
     pub a_inf: Vec<Vec<Vec<f64>>>,
     pub b_inf: Vec<Vec<Vec<f64>>>,
+    /// intersite Coulomb potential `dE_coul/dq_i` per atom (frauenheim)
+    pub coulomb_potential: Vec<f64>,
     /// local density of states at the Fermi level, dN/d(ef) [atom][spin][shell]
     pub dos: Vec<Vec<Vec<f64>>>,
     /// dN_{i s k} / d(level_{i s' k'}) at fixed Fermi level, the response of
@@ -522,6 +525,7 @@ impl<'a> Bop<'a> {
             })
             .sum();
         Forward {
+            coulomb: self.coulomb_integrals(pos, cell),
             h,
             dh,
             levels,
@@ -554,15 +558,22 @@ impl<'a> Bop<'a> {
         let n = self.topo.n_atoms;
         let mut forces_grad = vec![[0.0; 3]; n]; // dE/dpos
         let mut virial = [[0.0; 3]; 3];
-        if let Some(rep) = &self.model.repulsion {
-            let (e_rep, g_rep, w_rep) = self.repulsion(rep, pos, cell, forces);
+        self.add_pair_terms(
+            pos,
+            cell,
+            forces,
+            &mut res.energy_atom,
+            &mut forces_grad,
+            &mut virial,
+        );
+        if forces && !fw.coulomb.is_empty() {
+            let (g, w) = self.coulomb_gradient(&fw, pos, cell, &res.charge, &res.charge);
             for i in 0..n {
-                res.energy_atom[i] += e_rep[i];
                 for x in 0..3 {
-                    forces_grad[i][x] += g_rep[i][x];
+                    forces_grad[i][x] += g[i][x];
                 }
             }
-            add3(&mut virial, &w_rep);
+            add3(&mut virial, &w);
         }
         res.energy = res.energy_atom.iter().sum();
         if gradients {
@@ -688,6 +699,27 @@ impl<'a> Bop<'a> {
                     .map(|sp| sp.iter().map(|l| l.binf).collect())
                     .collect(),
             );
+        }
+        if !fw.coulomb.is_empty() {
+            // E_coul = 1/2 sum over the second list of q_i J_ij q_j
+            let nl = topo.nbr2.as_ref().unwrap();
+            let mut v = vec![0.0; n];
+            for i in 0..n {
+                for b in nl.bonds(i) {
+                    let (j, jij) = (nl.j[b], fw.coulomb[b].0);
+                    v[i] += 0.5 * jij * res.charge[j];
+                    v[j] += 0.5 * jij * res.charge[i];
+                    res.energy_atom[i] += 0.5 * res.charge[i] * jij * res.charge[j];
+                }
+            }
+            for i in 0..n {
+                for s in 0..ns {
+                    for k in 0..nsh {
+                        p[i][s][k] += v[i];
+                    }
+                }
+            }
+            res.coulomb_potential = v;
         }
         if ns == 1 {
             res.moment.clear();
@@ -1048,6 +1080,9 @@ fn slices_for_so(model: &Model) -> Vec<(usize, usize)> {
 }
 
 pub struct Forward {
+    /// intersite Coulomb integral and its radial derivative per entry of the
+    /// second neighbour list (empty unless coulomb = frauenheim)
+    coulomb: Vec<(f64, f64)>,
     h: Vec<f64>,
     dh: Vec<f64>,
     levels: Vec<Vec<f64>>,
@@ -1504,5 +1539,226 @@ impl<'a> Bop<'a> {
                 grad.spin_field[i][2] += m;
             }
         }
+    }
+}
+
+// --- pair terms: repulsion, Yukawa, intersite Coulomb ------------------------------
+
+impl<'a> Bop<'a> {
+    /// Repulsion, embedding and Yukawa energies per atom added to `energy`,
+    /// their dE/dpos to `grad` and virial to `virial` (with `forces`).
+    pub(crate) fn add_pair_terms(
+        &self,
+        pos: &[[f64; 3]],
+        cell: &Cell,
+        forces: bool,
+        energy: &mut [f64],
+        grad: &mut [[f64; 3]],
+        virial: &mut [[f64; 3]; 3],
+    ) {
+        let mut add = |(e, g, w): (Vec<f64>, Vec<[f64; 3]>, [[f64; 3]; 3])| {
+            for i in 0..energy.len() {
+                energy[i] += e[i];
+                for x in 0..3 {
+                    grad[i][x] += g[i][x];
+                }
+            }
+            add3(virial, &w);
+        };
+        if let Some(rep) = &self.model.repulsion {
+            add(self.repulsion(rep, pos, cell, forces));
+        }
+        if let Some(y) = &self.model.yukawa {
+            add(self.yukawa(y, pos, cell, forces));
+        }
+    }
+
+    /// Turns dE/dr of every entry of the second list into dE/dpos and virial.
+    fn radial_to_cartesian(
+        &self,
+        pos: &[[f64; 3]],
+        cell: &Cell,
+        de_dr: &[f64],
+    ) -> (Vec<[f64; 3]>, [[f64; 3]; 3]) {
+        let nl = self.topo.nbr2.as_ref().unwrap();
+        let n = self.topo.n_atoms;
+        let mut grad = vec![[0.0; 3]; n];
+        let mut vir = [[0.0; 3]; 3];
+        for i in 0..n {
+            for b in nl.bonds(i) {
+                let r = nl.vector(b, i, pos, cell.as_ref());
+                let rr = (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt();
+                let j = nl.j[b];
+                for x in 0..3 {
+                    let gx = de_dr[b] * r[x] / rr;
+                    grad[j][x] += gx;
+                    grad[i][x] -= gx;
+                    for y in 0..3 {
+                        vir[x][y] += gx * r[y];
+                    }
+                }
+            }
+        }
+        (grad, vir)
+    }
+
+    /// Yukawa repulsion per atom, and with `gradients` its dE/dpos and virial.
+    fn yukawa(
+        &self,
+        y: &crate::model::Yukawa,
+        pos: &[[f64; 3]],
+        cell: &Cell,
+        gradients: bool,
+    ) -> (Vec<f64>, Vec<[f64; 3]>, [[f64; 3]; 3]) {
+        type D1 = Dual<1>;
+        let m = self.model;
+        let nl = self
+            .topo
+            .nbr2
+            .as_ref()
+            .expect("topology built without rcut2");
+        let sp = &self.topo.species;
+        let n = self.topo.n_atoms;
+        let (rcut2, dcut2) = (m.rcut2.unwrap(), m.dcut2);
+        let dist = |b: usize, i: usize| {
+            let r = nl.vector(b, i, pos, cell.as_ref());
+            (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt()
+        };
+        // environment and lambda per atom, with d(lambda_i)/d(env_i)
+        let mut lam = vec![0.0; n];
+        let mut dlam_denv = vec![0.0; n];
+        for i in 0..n {
+            let mut env = 0.0;
+            for b in nl.bonds(i) {
+                let r = D1::cst(dist(b, i));
+                let s = (sp[i], sp[nl.j[b]]);
+                env += (cosine_cutoff(r, rcut2, dcut2)
+                    * (-r * y.upsilon[s.0][s.1]).exp()
+                    * y.c[s.0][s.1])
+                    .v;
+            }
+            lam[i] = y.lambda0[sp[i]];
+            if env > 0.0 {
+                let e = D1::var(env, 0).powf(1.0 / y.m[sp[i]]);
+                lam[i] += e.v;
+                dlam_denv[i] = e.d[0];
+            }
+        }
+        let mut energy = vec![0.0; n];
+        let mut de_dr = vec![0.0; nl.n_bonds()];
+        let mut de_dlam = vec![0.0; n];
+        for i in 0..n {
+            for b in nl.bonds(i) {
+                let j = nl.j[b];
+                let s = (sp[i], sp[j]);
+                // f(r, lambda_ij) with derivatives in r and lambda_ij
+                let r = Dual::<2>::var(dist(b, i), 0);
+                let l = Dual::<2>::var(0.5 * (lam[i] + lam[j]), 1);
+                let f = cosine_cutoff(r, rcut2, dcut2)
+                    * r.powf(-1.0)
+                    * y.b[s.0][s.1]
+                    * (-(r - 2.0 * y.r_core[s.0][s.1]) * l).exp()
+                    * 0.5;
+                energy[i] += f.v;
+                de_dr[b] += f.d[0];
+                de_dlam[i] += 0.5 * f.d[1];
+                de_dlam[j] += 0.5 * f.d[1];
+            }
+        }
+        if !gradients {
+            return (energy, vec![[0.0; 3]; n], [[0.0; 3]; 3]);
+        }
+        // lambda_i depends on the distances of i's entries through env_i
+        for i in 0..n {
+            if dlam_denv[i] == 0.0 {
+                continue;
+            }
+            for b in nl.bonds(i) {
+                let r = D1::var(dist(b, i), 0);
+                let s = (sp[i], sp[nl.j[b]]);
+                let t = cosine_cutoff(r, rcut2, dcut2)
+                    * (-r * y.upsilon[s.0][s.1]).exp()
+                    * y.c[s.0][s.1];
+                de_dr[b] += de_dlam[i] * dlam_denv[i] * t.d[0];
+            }
+        }
+        let (g, w) = self.radial_to_cartesian(pos, cell, &de_dr);
+        (energy, g, w)
+    }
+
+    /// Intersite Coulomb integrals `J_ij` and `dJ_ij/dr` per entry of the
+    /// second list: Frauenheim integral times the taper, zero beyond rcut2.
+    fn coulomb_integrals(&self, pos: &[[f64; 3]], cell: &Cell) -> Vec<(f64, f64)> {
+        let m = self.model;
+        if m.coulomb != Coulomb::Frauenheim {
+            return Vec::new();
+        }
+        let nl = self
+            .topo
+            .nbr2
+            .as_ref()
+            .expect("topology built without rcut2");
+        let sp = &self.topo.species;
+        let rcut2 = m.rcut2.unwrap();
+        let mut out = vec![(0.0, 0.0); nl.n_bonds()];
+        for i in 0..self.topo.n_atoms {
+            for b in nl.bonds(i) {
+                let rv = nl.vector(b, i, pos, cell.as_ref());
+                let r = (rv[0] * rv[0] + rv[1] * rv[1] + rv[2] * rv[2]).sqrt();
+                if r >= rcut2 {
+                    continue;
+                }
+                let (si, sj) = (sp[i], sp[nl.j[b]]);
+                let [r1, r2] = m.taper[si][sj];
+                let rd = Dual::<1>::var(r, 0);
+                let jij = crate::pairwise::taper(r1, r2, rd)
+                    * crate::pairwise::frauenheim(m.hubbard[si], m.hubbard[sj], rd);
+                out[b] = (jij.v, jij.d[0]);
+            }
+        }
+        out
+    }
+
+    /// Gradient of `1/2 sum over the second list of left_i J_ij right_j`
+    /// with respect to positions and strain (the J_ij at fixed charges).
+    pub(crate) fn coulomb_gradient(
+        &self,
+        fw: &Forward,
+        pos: &[[f64; 3]],
+        cell: &Cell,
+        left: &[f64],
+        right: &[f64],
+    ) -> (Vec<[f64; 3]>, [[f64; 3]; 3]) {
+        let nl = self.topo.nbr2.as_ref().unwrap();
+        let mut de_dr = vec![0.0; nl.n_bonds()];
+        for i in 0..self.topo.n_atoms {
+            for b in nl.bonds(i) {
+                de_dr[b] = 0.5 * fw.coulomb[b].1 * left[i] * right[nl.j[b]];
+            }
+        }
+        self.radial_to_cartesian(pos, cell, &de_dr)
+    }
+
+    /// `sum_j dV_i/dq_j u_j`, the intersite part of the Coulomb kernel applied
+    /// to per-atom values (`V_i = dE_coul/dq_i`); empty without it.
+    pub(crate) fn coulomb_apply(&self, fw: &Forward, u: &[f64]) -> Vec<f64> {
+        if fw.coulomb.is_empty() {
+            return Vec::new();
+        }
+        let nl = self.topo.nbr2.as_ref().unwrap();
+        let mut out = vec![0.0; self.topo.n_atoms];
+        for i in 0..self.topo.n_atoms {
+            for b in nl.bonds(i) {
+                let (j, jij) = (nl.j[b], fw.coulomb[b].0);
+                out[i] += 0.5 * jij * u[j];
+                out[j] += 0.5 * jij * u[i];
+            }
+        }
+        out
+    }
+
+    /// Whether the forward pass holds intersite Coulomb integrals.
+    pub(crate) fn has_coulomb(fw: &Forward) -> bool {
+        !fw.coulomb.is_empty()
     }
 }

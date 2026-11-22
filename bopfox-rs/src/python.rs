@@ -273,6 +273,9 @@ fn results_dict(py: Python<'_>, r: crate::Results, gradients: bool) -> PyResult<
             d.set_item("orbital_field_gradient", r.orbital_field_gradient)?;
         }
         d.set_item("occupations", r.occupations)?;
+        if !r.coulomb_potential.is_empty() {
+            d.set_item("coulomb_potential", r.coulomb_potential)?;
+        }
         Ok(d)
     }
 }

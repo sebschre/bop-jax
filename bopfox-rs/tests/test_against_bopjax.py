@@ -299,3 +299,65 @@ def test_electronic_temperature():
     shifts0[:, 0], shifts0[:, 1] = -1.3, 1.3
     compare(cfg, iron(), hamiltonian.v0_bond, pos, cell, shifts0 + 0.01)
     compare_scf(cfg, iron(), hamiltonian.v0_bond, pos, cell, shifts0)
+
+
+def test_egorov_iron_with_yukawa():
+    cfg = bj.BOPConfig(spin="collinear", **IRON_EGOROV_CONFIG)
+    pos, cell = lattice(BCC, 2.84, 2, 0.03)
+    shifts = np.zeros((len(pos), 2, 1))
+    shifts[:, 0], shifts[:, 1] = -1.0, 1.0
+    compare(cfg, iron_egorov(), pairwise.exp_sum, pos, cell, shifts)
+
+
+def _iron_tungsten():
+    def channel(aa, bb, ab):
+        return jnp.array([[[aa, 2.081, 5.0], [ab, 2.081, 5.0]],
+                          [[ab, 2.081, 5.0], [bb, 2.081, 5.0]]])
+
+    return {
+        "onsite": jnp.array([[0.0], [0.3]]), "n0": jnp.array([[7.0], [4.8]]),
+        "hubbard": jnp.array([8.0, 10.0]),
+        "bond": {"dds": channel(-1.458, -1.458, -1.3), "ddp": channel(0.972, 0.972, 0.9),
+                 "ddd": channel(-0.243, -0.243, -0.2)},
+        "taper": jnp.broadcast_to(jnp.array([0.0, 5.0]), (2, 2, 2)),
+    }
+
+
+def test_intersite_coulomb():
+    """bopjax's two-species intersite Coulomb reference (tests/test_features.py),
+    then derivatives at given shifts and the potential condition against bopjax."""
+    a = 3.5
+    pos = a * np.array([[0, 0, 0], [0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]])
+    pos[0] += [0.15, -0.08, 0.05]
+    pos[2] += [-0.05, 0.10, 0.02]
+    cell = a * np.eye(3)
+    species = [0, 1, 0, 1]
+    cfg = bj.BOPConfig(nmom=9, rcut=3.3, dcut=0.5, rcut2=5.0, bandwidth="averaged",
+                       coulomb="frauenheim")
+    params = _iron_tungsten()
+    rs = bopfox_rs.Potential(bopfox_rs.model_from_bopjax(cfg, params))
+    out = rs.scf(pos, species, cell, tol=1e-11)
+    assert out["converged"]
+    assert out["energy"] / 4 == pytest.approx(-5.095995780783055, abs=1e-10)
+    e_coul = 0.5 * np.mean(out["charge"] * out["coulomb_potential"])
+    assert e_coul == pytest.approx(-0.0848227152736586, abs=1e-10)
+    np.testing.assert_allclose(out["charge"], [-0.15452859, 0.14704056, -0.13454386, 0.14203189],
+                               atol=1e-8)
+
+    topo = bj.build_topology(pos, species, cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2)
+    energy = bj.make_energy_fn(topo, cfg)
+    p, c = jnp.array(pos), jnp.array(cell)
+    s = jnp.array(RNG.normal(scale=0.02, size=(4, 1)))
+    e_ref = energy(s, p, c, params)[0]
+    g_s, g_p = jax.grad(lambda s_, p_: energy(s_, p_, c, params)[0], argnums=(0, 1))(s, p)
+    o = rs.compute(pos, species, cell, np.asarray(s))
+    assert o["energy"] == pytest.approx(float(e_ref), abs=1e-9)
+    np.testing.assert_allclose(o["forces"], -np.asarray(g_p), atol=1e-8)
+    np.testing.assert_allclose(o["shift_gradient"].reshape(4, 1), np.asarray(g_s), atol=1e-8)
+
+    pot = bj.make_potential(energy, condition="potential", tol=1e-11)
+    (e_p, aux), g = jax.value_and_grad(lambda r: pot(r, c, params), has_aux=True)(p)
+    out = rs.scf(pos, species, cell, condition="potential", tol=1e-11)
+    assert out["converged"]
+    assert out["energy"] == pytest.approx(float(e_p), abs=1e-8)
+    np.testing.assert_allclose(out["forces"], -np.asarray(g), atol=1e-7)
