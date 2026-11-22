@@ -165,7 +165,7 @@ fn backward_impl<N: Dim, F: FnMut(usize, &[f64])>(
     wk: &Walk,
     gmu: &[f64],
     onsite_bar: &mut [f64],
-    bond_grad: &mut F,
+    mut bond_grad: Option<&mut F>,
 ) {
     let n = dim.n();
     let nn = n * n;
@@ -199,18 +199,24 @@ fn backward_impl<N: Dim, F: FnMut(usize, &[f64])>(
                 let dst = &mut wbar_a[c2 * nn..(c2 + 1) * nn];
                 for al in 0..n {
                     for be in 0..n {
-                        let mut acc = 0.0;
-                        for d in 0..n {
-                            acc += gc[al * n + d] * src[be * n + d];
-                        }
-                        hbar[al * n + be] = acc;
                         let hv = blk[al * n + be];
                         for d in 0..n {
                             dst[be * n + d] += hv * gc[al * n + d];
                         }
                     }
                 }
-                bond_grad(b, &hbar);
+                if let Some(f) = bond_grad.as_mut() {
+                    for al in 0..n {
+                        for be in 0..n {
+                            let mut acc = 0.0;
+                            for d in 0..n {
+                                acc += gc[al * n + d] * src[be * n + d];
+                            }
+                            hbar[al * n + be] = acc;
+                        }
+                    }
+                    f(b, &hbar);
+                }
             }
             if c < n_in {
                 let o = cl.origin[c];
@@ -233,16 +239,101 @@ fn backward_impl<N: Dim, F: FnMut(usize, &[f64])>(
 /// Backward pass.  `gmu[d * (nmom+1) + k]` is dE/dmu_k of start orbital d.
 /// Calls `bond_grad(b, hbar)` with the contribution `dE/dH_b` (row-major,
 /// `norb * norb`) of every application of bond block `b`, and adds dE/d(onsite)
-/// to `onsite_bar` (`n_atoms * norb`).
-pub fn backward(
+/// to `onsite_bar` (`n_atoms * norb`).  Without `bond_grad` only the onsite
+/// derivatives are formed, at about the cost of one forward walk.
+pub fn backward<F: FnMut(usize, &[f64])>(
     cl: &Cluster,
     h: &HamiltonianData,
     nmom: usize,
     wk: &Walk,
     gmu: &[f64],
     onsite_bar: &mut [f64],
-    mut bond_grad: impl FnMut(usize, &[f64]),
+    bond_grad: Option<&mut F>,
 ) {
-    let f = &mut bond_grad;
-    dispatch!(h.norb, backward_impl(cl, h, nmom, wk, gmu, onsite_bar, f))
+    dispatch!(
+        h.norb,
+        backward_impl(cl, h, nmom, wk, gmu, onsite_bar, bond_grad)
+    )
+}
+
+fn tangent_impl<N: Dim>(
+    dim: N,
+    cl: &Cluster,
+    h: &HamiltonianData,
+    nmom: usize,
+    wk: &Walk,
+    centre: usize,
+    orbitals: (usize, usize),
+) -> Vec<f64> {
+    let n = dim.n();
+    let nn = n * n;
+    let n_steps = nmom.div_ceil(2);
+    let (o0, o1) = orbitals;
+    let mut wd: Vec<Vec<f64>> = vec![vec![0.0; wk.w[0].len()]];
+    for a in 0..n_steps {
+        let n_in = cl.size_le[a];
+        let n_out = wk.w[a + 1].len() / nn;
+        let (prev, wa) = (&wd[a], &wk.w[a]);
+        let mut out = vec![0.0; n_out * nn];
+        for c in 0..n_out {
+            let oc = &mut out[c * nn..(c + 1) * nn];
+            if a > 0 {
+                for &(b, c2) in &cl.links[cl.link_start[c]..cl.link_start[c + 1]] {
+                    if c2 >= n_in {
+                        continue;
+                    }
+                    let blk = &h.hblk[b * nn..(b + 1) * nn];
+                    let wc = &prev[c2 * nn..(c2 + 1) * nn];
+                    for al in 0..n {
+                        for be in 0..n {
+                            let hv = blk[al * n + be];
+                            for d in 0..n {
+                                oc[al * n + d] += hv * wc[be * n + d];
+                            }
+                        }
+                    }
+                }
+            }
+            if c < n_in {
+                let lev = &h.onsite[cl.origin[c] * n..(cl.origin[c] + 1) * n];
+                let wc = &prev[c * nn..(c + 1) * nn];
+                for al in 0..n {
+                    for d in 0..n {
+                        oc[al * n + d] += lev[al] * wc[al * n + d];
+                    }
+                }
+                if cl.origin[c] == centre {
+                    for al in o0..o1 {
+                        for d in 0..n {
+                            oc[al * n + d] += wa[c * nn + al * n + d];
+                        }
+                    }
+                }
+            }
+        }
+        wd.push(out);
+    }
+    let mut mu = vec![0.0; n * (nmom + 1)];
+    for k in 0..=nmom {
+        let (a, b) = (k / 2, k - k / 2);
+        let size = cl.size_le[a] * nn;
+        for idx in 0..size {
+            mu[(idx % n) * (nmom + 1) + k] += wd[a][idx] * wk.w[b][idx] + wk.w[a][idx] * wd[b][idx];
+        }
+    }
+    mu
+}
+
+/// Derivative of the moments of the cluster centre (layout as [`moments`])
+/// with respect to a common shift of the onsite levels `orbitals` of unit-cell
+/// atom `centre` (all its images in the cluster): one tangent walk.
+pub fn moments_tangent(
+    cl: &Cluster,
+    h: &HamiltonianData,
+    nmom: usize,
+    wk: &Walk,
+    centre: usize,
+    orbitals: (usize, usize),
+) -> Vec<f64> {
+    dispatch!(h.norb, tangent_impl(cl, h, nmom, wk, centre, orbitals))
 }

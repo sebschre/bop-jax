@@ -30,8 +30,31 @@ class Potential:
         sp = [int(s) for s in np.asarray(species).ravel()]
         c = None if cell is None else np.asarray(cell, dtype=float).tolist()
         s = None if shifts is None else np.asarray(shifts, dtype=float).ravel().tolist()
-        out = self._core.compute(pos, sp, c, s, gradients)
-        return {k: (v if np.isscalar(v) else np.asarray(v)) for k, v in out.items()}
+        return _arrays(self._core.compute(pos, sp, c, s, gradients))
+
+    def scf(self, positions, species, cell=None, shifts0=None, tol=1e-10, max_iter=200,
+            mixing=1.0, history=24, max_step=0.5, free=None, refresh=4):
+        """Self-consistent onsite shifts (dE/dshifts = 0, BOPfox's condition)
+        by preconditioned Anderson mixing, from ``shifts0`` (default zero).
+        Returns the dict of ``compute`` at the converged shifts plus
+        ``shifts`` (N, nspin, nshell), ``converged`` and ``history`` (max
+        |dE/dshift| after each gradient evaluation).  ``free`` (N,) bools
+        restricts the self-consistency to those atoms; ``refresh`` is the number
+        of gradient evaluations between updates of the preconditioner."""
+        pos = np.asarray(positions, dtype=float).tolist()
+        sp = [int(s) for s in np.asarray(species).ravel()]
+        c = None if cell is None else np.asarray(cell, dtype=float).tolist()
+        s = None if shifts0 is None else np.asarray(shifts0, dtype=float).ravel().tolist()
+        fr = None if free is None else [bool(f) for f in np.asarray(free).ravel()]
+        out = _arrays(self._core.scf(pos, sp, c, s, tol, max_iter, mixing, history, max_step, fr,
+                                       refresh))
+        out["shifts"] = out["shifts"].reshape(len(pos), -1, len(self.model["basis"]))
+        return out
+
+
+def _arrays(out):
+    return {k: (v if np.isscalar(v) or isinstance(v, bool) else np.asarray(v))
+            for k, v in out.items()}
 
 
 def _tolist(x):

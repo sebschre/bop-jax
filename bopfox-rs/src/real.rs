@@ -143,7 +143,7 @@ impl<const N: usize> Div for Dual<N> {
     #[inline]
     fn div(self, o: Self) -> Self {
         let inv = 1.0 / o.v;
-        let q = self.v * inv;
+        let q = self.v / o.v; // the value rounds exactly as in f64
         let mut d = [0.0; N];
         for i in 0..N {
             d[i] = (self.d[i] - q * o.d[i]) * inv;
@@ -210,8 +210,12 @@ impl<const N: usize> Mul<f64> for Dual<N> {
 impl<const N: usize> Div<f64> for Dual<N> {
     type Output = Self;
     #[inline]
-    fn div(self, o: f64) -> Self {
-        self * (1.0 / o)
+    fn div(mut self, o: f64) -> Self {
+        self.v /= o;
+        for x in self.d.iter_mut() {
+            *x /= o;
+        }
+        self
     }
 }
 

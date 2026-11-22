@@ -14,11 +14,26 @@ use crate::expansion::{self, local_derivs, Local};
 use crate::geometry::Topology;
 use crate::hamiltonian::{bond_block, cosine_cutoff, shell_slices};
 use crate::model::Model;
-use crate::moments::{backward, moments, walk, HamiltonianData, Walk};
+use crate::moments::{backward, moments, moments_tangent, walk, HamiltonianData, Walk};
 use crate::real::{Dual, Real};
 use rayon::prelude::*;
 
 pub type Cell = Option<[[f64; 3]; 3]>;
+
+/// Which derivatives [`Bop::compute_mode`] evaluates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// energy only
+    Energy,
+    /// energy and dE/dshifts (what the self-consistency needs; about half
+    /// the cost of `Full`)
+    ShiftGradient,
+    /// energy, dE/dshifts, forces and virial
+    Full,
+    /// as `ShiftGradient`, plus `local_response` (for the self-consistency
+    /// preconditioner)
+    ScfStep,
+}
 
 /// Walk vectors (f64 entries) kept between the forward and the backward pass;
 /// above this they are recomputed (512 MB).
@@ -38,6 +53,11 @@ pub struct Results {
     pub moments: Vec<Vec<Vec<Vec<f64>>>>,
     pub a_inf: Vec<Vec<Vec<f64>>>,
     pub b_inf: Vec<Vec<Vec<f64>>>,
+    /// local density of states at the Fermi level, dN/d(ef) [atom][spin][shell]
+    pub dos: Vec<Vec<Vec<f64>>>,
+    /// dN_{i s k} / d(level_{i s k'}) at fixed Fermi level, the response of
+    /// an atom's occupations to its own levels, [atom][spin][k][k'] (ScfStep)
+    pub local_response: Vec<Vec<Vec<Vec<f64>>>>,
     /// dE/dshift [atom][spin][shell]; zero at self-consistency
     pub shift_gradient: Vec<Vec<Vec<f64>>>,
     /// -dE/dpositions
@@ -279,6 +299,20 @@ impl<'a> Bop<'a> {
         shifts: &[f64],
         gradients: bool,
     ) -> Results {
+        let mode = if gradients { Mode::Full } else { Mode::Energy };
+        self.compute_mode(pos, cell, shifts, mode)
+    }
+
+    /// As [`Bop::compute`], with the derivatives selected by `mode`.
+    pub fn compute_mode(
+        &self,
+        pos: &[[f64; 3]],
+        cell: &Cell,
+        shifts: &[f64],
+        mode: Mode,
+    ) -> Results {
+        let forces = mode == Mode::Full;
+        let gradients = mode != Mode::Energy;
         let m = self.model;
         let topo = self.topo;
         let (n, ns, nsh, norb, nmom) = (topo.n_atoms, self.nspin, self.nshell, self.norb, m.nmom);
@@ -287,7 +321,7 @@ impl<'a> Bop<'a> {
             self.shift_len(),
             "shifts must have n_atoms * nspin * nshell entries"
         );
-        let (h, dh) = self.blocks(pos, cell, gradients);
+        let (h, dh) = self.blocks(pos, cell, forces);
         let levels = self.onsite_levels(shifts);
         let keep = gradients && self.walk_size() <= WALK_BUDGET;
         let (mu, walks) = self.shell_moments(&h, &levels, keep);
@@ -373,6 +407,15 @@ impl<'a> Bop<'a> {
                     dndef += g * d.fill.d[nmom + 1];
                 }
             }
+            res.dos.push(
+                (0..ns)
+                    .map(|s| {
+                        (0..nsh)
+                            .map(|k| self.degeneracy[k] * derivs[i][s][k].fill.d[nmom + 1])
+                            .collect()
+                    })
+                    .collect(),
+            );
             res.energy_atom.push(e_atom);
             res.n_shell.push(n_shell);
             res.charge.push(charge);
@@ -393,6 +436,45 @@ impl<'a> Bop<'a> {
         if ns == 1 {
             res.moment.clear();
         }
+        if mode == Mode::ScfStep {
+            res.local_response = (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    (0..ns)
+                        .map(|s| {
+                            let hd = HamiltonianData {
+                                norb,
+                                hblk: &h,
+                                onsite: &levels[s],
+                            };
+                            let cl = &topo.clusters[i];
+                            let recomputed;
+                            let wk = if keep {
+                                &walks[i][s]
+                            } else {
+                                recomputed = walk(cl, &hd, nmom);
+                                &recomputed
+                            };
+                            let mut resp = vec![vec![0.0; nsh]; nsh];
+                            for (k2, &orb) in self.slices.iter().enumerate() {
+                                let dmu = moments_tangent(cl, &hd, nmom, wk, i, orb);
+                                for (k, &(a, b)) in self.slices.iter().enumerate() {
+                                    let fd = &derivs[i][s][k].fill.d;
+                                    let mut v = 0.0;
+                                    for d in a..b {
+                                        for q in 0..=nmom {
+                                            v += fd[q] * dmu[d * (nmom + 1) + q];
+                                        }
+                                    }
+                                    resp[k][k2] = self.degeneracy[k] * v / (b - a) as f64;
+                                }
+                            }
+                            resp
+                        })
+                        .collect()
+                })
+                .collect();
+        }
         let lambda = if dndef.abs() > 0.0 {
             dfdef / dndef
         } else {
@@ -402,7 +484,7 @@ impl<'a> Bop<'a> {
         let mut forces_grad = vec![[0.0; 3]; n]; // dE/dpos
         let mut virial = [[0.0; 3]; 3];
         if let Some(rep) = &m.repulsion {
-            let (e_rep, g_rep, w_rep) = self.repulsion(rep, pos, cell, gradients);
+            let (e_rep, g_rep, w_rep) = self.repulsion(rep, pos, cell, forces);
             for i in 0..n {
                 res.energy_atom[i] += e_rep[i];
             }
@@ -425,7 +507,7 @@ impl<'a> Bop<'a> {
                 .collect::<Vec<_>>()
                 .par_chunks(chunk)
                 .map(|atoms| {
-                    let mut gbond = vec![[0.0; 3]; nb];
+                    let mut gbond = vec![[0.0; 3]; if forces { nb } else { 0 }];
                     let mut obar = vec![0.0; ns * n * norb];
                     for &i in atoms {
                         for s in 0..ns {
@@ -454,7 +536,7 @@ impl<'a> Bop<'a> {
                                 &recomputed
                             };
                             let ob = &mut obar[s * n * norb..(s + 1) * n * norb];
-                            backward(cl, &hd, nmom, wk, &gmu, ob, |b, hbar| {
+                            let mut contract = |b: usize, hbar: &[f64]| {
                                 let dblk = &dh[b * 3 * nn..(b + 1) * 3 * nn];
                                 for x in 0..3 {
                                     let mut acc = 0.0;
@@ -463,16 +545,18 @@ impl<'a> Bop<'a> {
                                     }
                                     gbond[b][x] += acc;
                                 }
-                            });
+                            };
+                            let bonds = if forces { Some(&mut contract) } else { None };
+                            backward(cl, &hd, nmom, wk, &gmu, ob, bonds);
                         }
                     }
                     (gbond, obar)
                 })
                 .collect();
-            let mut gbond = vec![[0.0; 3]; nb];
+            let mut gbond = vec![[0.0; 3]; if forces { nb } else { 0 }];
             let mut obar = vec![0.0; ns * n * norb];
             for (g, o) in partial {
-                for b in 0..nb {
+                for b in 0..g.len() {
                     for x in 0..3 {
                         gbond[b][x] += g[b][x];
                     }
@@ -481,7 +565,7 @@ impl<'a> Bop<'a> {
                     *t += v;
                 }
             }
-            for b in 0..nb {
+            for b in 0..gbond.len() {
                 let i = owners[b];
                 let j = topo.nbr.j[b];
                 let r = topo.nbr.vector(b, i, pos, cell.as_ref());
@@ -505,6 +589,8 @@ impl<'a> Bop<'a> {
                         .collect()
                 })
                 .collect();
+        }
+        if forces {
             res.forces = forces_grad.iter().map(|g| [-g[0], -g[1], -g[2]]).collect();
             for x in 0..3 {
                 for y in 0..x {

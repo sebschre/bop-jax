@@ -95,3 +95,51 @@ def test_egorov_iron_without_yukawa():
     shifts = np.zeros((len(pos), 2, 1))
     shifts[:, 0], shifts[:, 1] = -1.0, 1.0
     compare(cfg, iron_egorov(), pairwise.exp_sum, pos, cell, shifts)
+
+
+def compare_scf(cfg, params, radial, pos, cell, shifts0, tol=1e-7):
+    n = len(pos)
+    topo = bj.build_topology(pos, [0] * n, cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2)
+    energy = bj.make_energy_fn(topo, cfg, radial=radial)
+    shifts0 = np.asarray(shifts0, dtype=float).reshape(energy.shift_shape)
+    p, c = jnp.array(pos), jnp.array(cell)
+    ref = bj.make_scf(energy)(p, c, params, shifts0=jnp.array(shifts0), tol=1e-10)
+    assert ref.converged
+    f_ref = bj.make_forces(energy)(ref.shifts, p, c, params)
+
+    rs = bopfox_rs.Potential(bopfox_rs.model_from_bopjax(cfg, params, radial))
+    out = rs.scf(pos, [0] * n, cell, shifts0, tol=1e-10)
+    assert out["converged"]
+    assert out["energy"] == pytest.approx(ref.energy, abs=1e-9 * n)
+    np.testing.assert_allclose(out["shifts"].reshape(ref.shifts.shape), np.asarray(ref.shifts),
+                               atol=tol)
+    np.testing.assert_allclose(out["forces"], np.asarray(f_ref), atol=tol)
+    return out
+
+
+def test_scf_canonical_d_band():
+    cfg = bj.BOPConfig(nmom=9, rcut=3.3, dcut=0.5, bandwidth="averaged")
+    pos, cell = lattice(FCC, 3.5, 2, 0.05)
+    out = compare_scf(cfg, canonical_d(hubbard=8.0), hamiltonian.powerlaw, pos, cell,
+                      np.zeros((32, 1)))
+    assert len(out["history"]) <= 20  # gradient evaluations
+
+
+@pytest.mark.parametrize("basis", [("d",), ("s", "d")])
+def test_scf_magnetic_iron(basis):
+    cfg = bj.BOPConfig(spin="collinear", basis=basis, **IRON_CONFIG)
+    pos, cell = lattice(BCC, 2.83, 2, 0.04)
+    shifts0 = np.zeros((len(pos), 2, len(basis)))
+    shifts0[:, 0, -1], shifts0[:, 1, -1] = -1.3, 1.3
+    out = compare_scf(cfg, iron(basis=basis), hamiltonian.v0_bond, pos, cell, shifts0)
+    assert np.all(out["moment"] > 1.5)  # ferromagnetic everywhere
+
+
+def test_scf_carbon_sp():
+    """Metallic simple-cubic carbon.  In distorted diamond the density of
+    states at the Fermi level nearly vanishes, the stationary point is set by
+    the non-variational part of the BOP energy, and there are several of them
+    far apart (bopjax's Newton solver stalls there)."""
+    cfg = bj.BOPConfig(**CARBON_CONFIG)
+    pos, cell = lattice([[0, 0, 0]], 1.9218, 2, 0.02)
+    compare_scf(cfg, carbon(), hamiltonian.v0_bond, pos, cell, np.zeros((8, 2)))

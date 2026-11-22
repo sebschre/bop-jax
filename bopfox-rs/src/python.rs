@@ -1,6 +1,6 @@
 //! Python bindings (feature "python"): `bopfox_rs._core.Potential`.
 
-use crate::{Bop, Model, Topology};
+use crate::{Bop, Model, ScfOptions, Topology};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -59,6 +59,77 @@ impl Potential {
                 Topology::build(&positions, &species, cell.as_ref(), m.rcut, m.nmom, m.rcut2);
             Bop::new(m, &topo).compute(&positions, &cell, &shifts, gradients)
         });
+        results_dict(py, r, gradients)
+    }
+
+    /// Self-consistent shifts (dE/dshifts = 0) from `shifts0` (default zero),
+    /// and everything at them, forces included.  `free` (N,) bools restricts
+    /// the self-consistency to those atoms.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (positions, species, cell=None, shifts0=None, tol=1e-10, max_iter=200,
+                        mixing=1.0, history=24, max_step=0.5, free=None, refresh=4))]
+    fn scf<'py>(
+        &self,
+        py: Python<'py>,
+        positions: Vec<[f64; 3]>,
+        species: Vec<usize>,
+        cell: Option<[[f64; 3]; 3]>,
+        shifts0: Option<Vec<f64>>,
+        tol: f64,
+        max_iter: usize,
+        mixing: f64,
+        history: usize,
+        max_step: f64,
+        free: Option<Vec<bool>>,
+        refresh: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        self.check(&positions, &species)?;
+        let n_shift = positions.len() * self.shifts_per_atom();
+        if shifts0.as_ref().is_some_and(|s| s.len() != n_shift) {
+            return Err(PyValueError::new_err(format!("expected {n_shift} shifts")));
+        }
+        if free.as_ref().is_some_and(|f| f.len() != positions.len()) {
+            return Err(PyValueError::new_err("free needs one entry per atom"));
+        }
+        let opt = ScfOptions {
+            tol,
+            max_iter,
+            mixing,
+            history,
+            max_step,
+            free,
+            refresh,
+        };
+        let m = &self.model;
+        let r = py.allow_threads(|| {
+            let topo =
+                Topology::build(&positions, &species, cell.as_ref(), m.rcut, m.nmom, m.rcut2);
+            Bop::new(m, &topo).scf(&positions, &cell, shifts0.as_deref(), &opt)
+        });
+        let d = results_dict(py, r.results, true)?;
+        d.set_item("shifts", r.shifts)?;
+        d.set_item("converged", r.converged)?;
+        d.set_item("history", r.history)?;
+        Ok(d)
+    }
+}
+
+impl Potential {
+    fn check(&self, positions: &[[f64; 3]], species: &[usize]) -> PyResult<()> {
+        if species.len() != positions.len() {
+            return Err(PyValueError::new_err(
+                "species and positions differ in length",
+            ));
+        }
+        if species.iter().any(|&s| s >= self.model.nspecies()) {
+            return Err(PyValueError::new_err("species index out of range"));
+        }
+        Ok(())
+    }
+}
+
+fn results_dict(py: Python<'_>, r: crate::Results, gradients: bool) -> PyResult<Bound<'_, PyDict>> {
+    {
         let d = PyDict::new(py);
         d.set_item("energy", r.energy)?;
         d.set_item("energy_atom", r.energy_atom)?;
@@ -76,6 +147,7 @@ impl Potential {
             d.set_item("virial", r.virial)?;
             d.set_item("shift_gradient", r.shift_gradient)?;
         }
+        d.set_item("dos", r.dos)?;
         Ok(d)
     }
 }

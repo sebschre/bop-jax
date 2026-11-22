@@ -17,7 +17,9 @@ pub mod moments;
 #[cfg(feature = "python")]
 mod python;
 pub mod real;
+pub mod scf;
 
-pub use energy::{Bop, Cell, Results};
+pub use energy::{Bop, Cell, Mode, Results};
 pub use geometry::Topology;
 pub use model::Model;
+pub use scf::{ScfOptions, ScfResult};
