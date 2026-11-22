@@ -184,3 +184,48 @@ def test_potential_condition(structure):
     # not stationary, so the partial forces differ from the total ones
     partial = rs.compute(pos, [0] * n, cell, out["shifts"])["forces"]
     assert np.abs(partial - out["forces"]).max() > 1e-5
+
+
+@pytest.mark.parametrize("xi", [0.0, 0.06])
+def test_noncollinear(xi):
+    """Spinor Hamiltonian with canted local axes, with and without spin-orbit
+    coupling: energy, forces, dE/dshifts and dE/daxes at given shifts, and the
+    self-consistent state."""
+    cfg = bj.BOPConfig(spin="noncollinear", spin_orbit=xi > 0, **dict(IRON_CONFIG, nmom=7))
+    a = 2.83  # 2x1x1 bcc supercell, 4 atoms
+    pos = a * np.array([[0, 0, 0], [0.5, 0.5, 0.5], [1, 0, 0], [1.5, 0.5, 0.5]])
+    pos = pos + RNG.normal(scale=0.04, size=pos.shape)
+    cell = np.diag([2 * a, a, a])
+    n = len(pos)
+    axes = np.array([[0.0, 0.0, 1.0], [0.3, 0.1, 0.9], [-0.2, 0.4, 0.8], [0.1, -0.3, 1.0]])
+    params = dict(iron(), spin_axes=jnp.array(axes))
+    if xi > 0:
+        params["spin_orbit"] = jnp.array([[xi]])
+    shifts = np.zeros((n, 2, 1))
+    shifts[:, 0], shifts[:, 1] = -1.2, 1.2
+    shifts += RNG.normal(scale=0.02, size=shifts.shape)
+
+    topo = bj.build_topology(pos, [0] * n, cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2)
+    energy = bj.make_energy_fn(topo, cfg, radial=hamiltonian.v0_bond)
+    p, c, s = jnp.array(pos), jnp.array(cell), jnp.array(shifts)
+
+    def e_fn(s_, p_, a_):
+        return energy(s_, p_, c, dict(params, spin_axes=a_))[0]
+
+    e_ref = e_fn(s, p, jnp.array(axes))
+    g_s, g_p, g_a = jax.grad(e_fn, argnums=(0, 1, 2))(s, p, jnp.array(axes))
+
+    rs = bopfox_rs.Potential(bopfox_rs.model_from_bopjax(cfg, params, hamiltonian.v0_bond))
+    out = rs.compute(pos, [0] * n, cell, shifts, axes=axes)
+    assert out["energy"] == pytest.approx(float(e_ref), abs=1e-9)
+    np.testing.assert_allclose(out["forces"], -np.asarray(g_p), atol=1e-8)
+    np.testing.assert_allclose(out["shift_gradient"].reshape(shifts.shape), np.asarray(g_s),
+                               atol=1e-8)
+    np.testing.assert_allclose(out["axes_gradient"], np.asarray(g_a), atol=1e-8)
+
+    ref = bj.make_scf(energy)(p, c, params, shifts0=s, tol=1e-10)
+    assert ref.converged
+    out = rs.scf(pos, [0] * n, cell, shifts, tol=1e-10, axes=axes)
+    assert out["converged"]
+    assert out["energy"] == pytest.approx(ref.energy, abs=1e-9)
+    np.testing.assert_allclose(out["shifts"], np.asarray(ref.shifts), atol=1e-7)

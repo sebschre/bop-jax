@@ -41,6 +41,8 @@ pub enum Kernel {
 pub enum Spin {
     None,
     Collinear,
+    /// local spin axes per atom (`Bop::with_axes`), spinor Hamiltonian
+    Noncollinear,
 }
 
 /// Functional form of the pair repulsion and embedding (bopjax.pairwise).
@@ -163,6 +165,12 @@ pub struct Model {
     pub hubbard: Vec<f64>,     // [species]
     #[serde(default)]
     pub stoner: Vec<Vec<f64>>, // [species][shell]
+    /// onsite spin-orbit coupling xi L.S (spin = noncollinear only)
+    #[serde(default)]
+    pub spin_orbit: bool,
+    /// spin-orbit constants xi [species][shell]
+    #[serde(default)]
+    pub spin_orbit_xi: Vec<Vec<f64>>,
     pub bond: BTreeMap<String, ChannelParams>,
     #[serde(default)]
     pub repulsion: Option<Repulsion>,
@@ -190,7 +198,7 @@ impl Model {
     pub fn nspin(&self) -> usize {
         match self.spin {
             Spin::None => 1,
-            Spin::Collinear => 2,
+            Spin::Collinear | Spin::Noncollinear => 2,
         }
     }
 
@@ -212,8 +220,14 @@ impl Model {
         if self.n0.len() != ns || self.hubbard.len() != ns {
             return Err("onsite, n0 and hubbard need one entry per species".into());
         }
-        if self.spin == Spin::Collinear && self.stoner.len() != ns {
-            return Err("collinear magnetism needs stoner parameters".into());
+        if self.spin != Spin::None && self.stoner.len() != ns {
+            return Err("magnetism needs stoner parameters".into());
+        }
+        if self.spin_orbit && self.spin != Spin::Noncollinear {
+            return Err("spin-orbit coupling needs spin = noncollinear".into());
+        }
+        if self.spin_orbit && self.spin_orbit_xi.len() != ns {
+            return Err("spin-orbit coupling needs spin_orbit_xi per species".into());
         }
         if self.repulsion.is_some() && self.rcut2.is_none() {
             return Err("repulsion needs rcut2".into());

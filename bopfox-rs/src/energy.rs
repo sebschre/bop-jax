@@ -10,12 +10,14 @@
 //! At self-consistent shifts the energy is stationary in them, so the forces
 //! are the partial derivatives returned here.
 
+use crate::complex::{pauli, projector_derivatives, spin_projectors, C64, ZERO};
 use crate::expansion::{self, local_derivs, Local};
 use crate::geometry::Topology;
-use crate::hamiltonian::{bond_block, cosine_cutoff, shell_slices};
+use crate::hamiltonian::{angular_momentum, bond_block, cosine_cutoff, shell_slices};
 use crate::model::Model;
 use crate::moments::{backward, moments, moments_tangent, walk, HamiltonianData, Walk};
 use crate::real::{Dual, Real};
+use crate::spinor::{self, SpinorData, SpinorWalk};
 use rayon::prelude::*;
 
 pub type Cell = Option<[[f64; 3]; 3]>;
@@ -62,6 +64,9 @@ pub struct Results {
     /// dN_{i s k} / d(level_{i s k'}) at fixed Fermi level, the response of
     /// an atom's occupations to its own levels, [atom][spin][k][k'] (ScfStep)
     pub local_response: Vec<Vec<Vec<Vec<f64>>>>,
+    /// dE/d(spin axes) [atom] (noncollinear; the axes need not be normalised,
+    /// so the component along an axis is zero)
+    pub axes_gradient: Vec<[f64; 3]>,
     /// dE/dshift [atom][spin][shell]; zero at self-consistency
     pub shift_gradient: Vec<Vec<Vec<f64>>>,
     /// -dE/dpositions
@@ -81,9 +86,55 @@ pub struct Bop<'a> {
     orb_shell: Vec<usize>,
     degeneracy: Vec<f64>,
     kernel: Vec<f64>,
+    noncollinear: bool,
+    /// local spin axes (noncollinear), default all along z
+    axes: Vec<[f64; 3]>,
+    /// onsite spin-orbit block per species, `M x M` (noncollinear)
+    spin_orbit: Vec<Vec<C64>>,
 }
 
 impl<'a> Bop<'a> {
+    /// Sets the local spin axes (noncollinear; need not be normalised).
+    pub fn with_axes(mut self, axes: &[[f64; 3]]) -> Self {
+        assert_eq!(axes.len(), self.topo.n_atoms, "one spin axis per atom");
+        self.axes = axes.to_vec();
+        self
+    }
+
+    fn spin_orbit_blocks(model: &Model, slices: &[(usize, usize)], norb: usize) -> Vec<Vec<C64>> {
+        if !model.spin_orbit {
+            return Vec::new();
+        }
+        let m = 2 * norb;
+        let sigma = pauli();
+        model
+            .spin_orbit_xi
+            .iter()
+            .map(|xi| {
+                let mut o = vec![ZERO; m * m];
+                for (k, (&sh, &(a0, a1))) in model.basis.iter().zip(slices).enumerate() {
+                    let l = angular_momentum(sh);
+                    let n = a1 - a0;
+                    for a in 0..n {
+                        for b in 0..n {
+                            for t in 0..2 {
+                                for u in 0..2 {
+                                    let mut v = ZERO;
+                                    for x in 0..3 {
+                                        v += l[x][a * n + b] * sigma[x][t * 2 + u];
+                                    }
+                                    o[((a0 + a) * 2 + t) * m + (a0 + b) * 2 + u] +=
+                                        v * (0.5 * xi[k]);
+                                }
+                            }
+                        }
+                    }
+                }
+                o
+            })
+            .collect()
+    }
+
     pub fn new(model: &'a Model, topo: &'a Topology) -> Self {
         let (slices, norb) = shell_slices(&model.basis);
         let nspin = model.nspin();
@@ -92,7 +143,7 @@ impl<'a> Bop<'a> {
             .enumerate()
             .flat_map(|(k, &(a, b))| std::iter::repeat_n(k, b - a))
             .collect();
-        let degeneracy = model
+        let degeneracy: Vec<f64> = model
             .basis
             .iter()
             .map(|s| (2.0 / nspin as f64) * s.norb() as f64)
@@ -107,6 +158,9 @@ impl<'a> Bop<'a> {
             orb_shell,
             degeneracy,
             kernel: expansion::kernel(model),
+            noncollinear: model.spin == crate::model::Spin::Noncollinear,
+            axes: vec![[0.0, 0.0, 1.0]; topo.n_atoms],
+            spin_orbit: Self::spin_orbit_blocks(model, &slices_for_so(model), norb),
         }
     }
 
@@ -330,7 +384,20 @@ impl<'a> Bop<'a> {
         let (h, dh) = self.blocks(pos, cell, with_derivatives);
         let levels = self.onsite_levels(shifts);
         let keep = keep && self.walk_size() <= WALK_BUDGET;
-        let (mu, walks) = self.shell_moments(&h, &levels, keep);
+        let (mut proj, mut onsite_c, mut swalks) = (Vec::new(), Vec::new(), Vec::new());
+        let (mu, walks) = if self.noncollinear {
+            proj = self
+                .axes
+                .iter()
+                .map(|a| spin_projectors(unit(*a)))
+                .collect();
+            onsite_c = self.onsite_blocks(&levels, &proj);
+            let (mu, sw) = self.shell_moments_nc(&h, &onsite_c, &proj, keep);
+            swalks = sw;
+            (mu, Vec::new())
+        } else {
+            self.shell_moments(&h, &levels, keep)
+        };
         let locals: Vec<Vec<Vec<Local>>> = mu
             .par_iter()
             .map(|at| {
@@ -374,6 +441,9 @@ impl<'a> Bop<'a> {
             levels,
             keep,
             walks,
+            swalks,
+            onsite_c,
+            proj,
             mu,
             locals,
             derivs,
@@ -410,15 +480,16 @@ impl<'a> Bop<'a> {
         }
         res.energy = res.energy_atom.iter().sum();
         if gradients {
-            let (sg, g, w) = self.seeded_backward(&fw, pos, cell, 1.0, &p, forces);
-            res.shift_gradient = self.unflatten(&sg);
+            let gr = self.seeded_backward(&fw, pos, cell, 1.0, &p, forces);
+            res.shift_gradient = self.unflatten(&gr.shifts);
+            res.axes_gradient = gr.axes;
             if forces {
                 for i in 0..n {
                     for x in 0..3 {
-                        forces_grad[i][x] += g[i][x];
+                        forces_grad[i][x] += gr.pos[i][x];
                     }
                 }
-                add3(&mut virial, &w);
+                add3(&mut virial, &gr.virial);
             }
         }
         if forces {
@@ -525,7 +596,9 @@ impl<'a> Bop<'a> {
         if ns == 1 {
             res.moment.clear();
         }
-        if response {
+        if response && self.noncollinear {
+            res.local_response = self.local_response_nc(fw);
+        } else if response {
             res.local_response = (0..n)
                 .into_par_iter()
                 .map(|i| {
@@ -573,7 +646,6 @@ impl<'a> Bop<'a> {
     /// `p = dF/dN` this is the energy gradient; with `wbond = 0` it is the
     /// adjoint `chi^T p` of the occupations, which the potential
     /// self-consistency needs.
-    #[allow(clippy::type_complexity)]
     pub fn seeded_backward(
         &self,
         fw: &Forward,
@@ -581,6 +653,75 @@ impl<'a> Bop<'a> {
         cell: &Cell,
         wbond: f64,
         p: &[Vec<Vec<f64>>],
+        forces: bool,
+    ) -> Grad {
+        let lambda = self.fermi_multiplier(fw, wbond, p);
+        if self.noncollinear {
+            return self.seeded_backward_nc(fw, pos, cell, wbond, p, lambda, forces);
+        }
+        let (shifts, pos_grad, virial) =
+            self.seeded_backward_collinear(fw, pos, cell, wbond, p, lambda, forces);
+        Grad {
+            shifts,
+            pos: pos_grad,
+            virial,
+            axes: Vec::new(),
+        }
+    }
+
+    /// Lagrange multiplier of the electron count for the seed `(wbond, p)`.
+    fn fermi_multiplier(&self, fw: &Forward, wbond: f64, p: &[Vec<Vec<f64>>]) -> f64 {
+        let nmom = self.model.nmom;
+        let mut dfdef = 0.0;
+        for (i, at) in fw.derivs.iter().enumerate() {
+            for (s, sp) in at.iter().enumerate() {
+                for (k, d) in sp.iter().enumerate() {
+                    dfdef += self.degeneracy[k]
+                        * (wbond * d.bond.d[nmom + 1] + p[i][s][k] * d.fill.d[nmom + 1]);
+                }
+            }
+        }
+        if fw.dndef.abs() > 0.0 {
+            dfdef / fw.dndef
+        } else {
+            0.0
+        }
+    }
+
+    /// dE/dmu of every start orbital of atom i, spin s: `[d * (nmom+1) + k]`.
+    fn moment_seed(
+        &self,
+        fw: &Forward,
+        i: usize,
+        s: usize,
+        wbond: f64,
+        p: &[Vec<Vec<f64>>],
+        lambda: f64,
+    ) -> Vec<f64> {
+        let nmom = self.model.nmom;
+        let mut gmu = vec![0.0; self.norb * (nmom + 1)];
+        for d in 0..self.norb {
+            let k = self.orb_shell[d];
+            let (a, b) = self.slices[k];
+            let w = self.degeneracy[k] / (b - a) as f64;
+            let dv = &fw.derivs[i][s][k];
+            for q in 0..=nmom {
+                gmu[d * (nmom + 1) + q] =
+                    w * (wbond * dv.bond.d[q] + (p[i][s][k] - lambda) * dv.fill.d[q]);
+            }
+        }
+        gmu
+    }
+
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn seeded_backward_collinear(
+        &self,
+        fw: &Forward,
+        pos: &[[f64; 3]],
+        cell: &Cell,
+        wbond: f64,
+        p: &[Vec<Vec<f64>>],
+        lambda: f64,
         forces: bool,
     ) -> (Vec<f64>, Vec<[f64; 3]>, [[f64; 3]; 3]) {
         let m = self.model;
@@ -592,21 +733,7 @@ impl<'a> Bop<'a> {
             !forces || !dh.is_empty(),
             "forward pass without bond-block derivatives"
         );
-        let mut dfdef = 0.0;
-        for i in 0..n {
-            for s in 0..ns {
-                for k in 0..nsh {
-                    let d = &derivs[i][s][k];
-                    dfdef += self.degeneracy[k]
-                        * (wbond * d.bond.d[nmom + 1] + p[i][s][k] * d.fill.d[nmom + 1]);
-                }
-            }
-        }
-        let lambda = if fw.dndef.abs() > 0.0 {
-            dfdef / fw.dndef
-        } else {
-            0.0
-        };
+        let _ = (derivs, nsh);
         let mut forces_grad = vec![[0.0; 3]; n];
         let mut virial = [[0.0; 3]; 3];
         {
@@ -623,18 +750,7 @@ impl<'a> Bop<'a> {
                     let mut obar = vec![0.0; ns * n * norb];
                     for &i in atoms {
                         for s in 0..ns {
-                            let mut gmu = vec![0.0; norb * (nmom + 1)];
-                            for d in 0..norb {
-                                let k = self.orb_shell[d];
-                                let (a, b) = self.slices[k];
-                                let w = self.degeneracy[k] / (b - a) as f64;
-                                let dv = &derivs[i][s][k];
-                                for q in 0..=nmom {
-                                    gmu[d * (nmom + 1) + q] = w
-                                        * (wbond * dv.bond.d[q]
-                                            + (p[i][s][k] - lambda) * dv.fill.d[q]);
-                                }
-                            }
+                            let gmu = self.moment_seed(fw, i, s, wbond, p, lambda);
                             let hd = HamiltonianData {
                                 norb,
                                 hblk: h,
@@ -791,12 +907,37 @@ pub(crate) fn symmetrised(mut v: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
 }
 
 /// Result of [`Bop::forward`].
+/// Gradient from [`Bop::seeded_backward`].
+#[derive(Clone, Debug, Default)]
+pub struct Grad {
+    /// d/dshifts, flat like the shifts
+    pub shifts: Vec<f64>,
+    /// d/dpositions (with `forces`)
+    pub pos: Vec<[f64; 3]>,
+    /// d/dstrain (with `forces`)
+    pub virial: [[f64; 3]; 3],
+    /// d/d(spin axes) (noncollinear)
+    pub axes: Vec<[f64; 3]>,
+}
+
+fn unit(a: [f64; 3]) -> [f64; 3] {
+    let n = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+    [a[0] / n, a[1] / n, a[2] / n]
+}
+
+fn slices_for_so(model: &Model) -> Vec<(usize, usize)> {
+    shell_slices(&model.basis).0
+}
+
 pub struct Forward {
     h: Vec<f64>,
     dh: Vec<f64>,
     levels: Vec<Vec<f64>>,
     keep: bool,
     walks: Vec<Vec<Walk>>,
+    swalks: Vec<SpinorWalk>,
+    onsite_c: Vec<C64>,
+    proj: Vec<[[C64; 4]; 2]>,
     pub mu: Vec<Vec<Vec<Vec<f64>>>>,
     locals: Vec<Vec<Vec<Local>>>,
     derivs: Vec<Vec<Vec<expansion::LocalDerivs>>>,
@@ -809,5 +950,313 @@ pub(crate) fn add3(a: &mut [[f64; 3]; 3], b: &[[f64; 3]; 3]) {
         for y in 0..3 {
             a[x][y] += b[x][y];
         }
+    }
+}
+
+// --- non-collinear magnetism ---------------------------------------------------
+
+impl<'a> Bop<'a> {
+    /// Onsite blocks `O_i = sum_s level_{i s} (1 x P_s) + xi L.S`, `n * M * M`.
+    fn onsite_blocks(&self, levels: &[Vec<f64>], proj: &[[[C64; 4]; 2]]) -> Vec<C64> {
+        let (n, norb) = (self.topo.n_atoms, self.norb);
+        let m = 2 * norb;
+        let mut out = vec![ZERO; n * m * m];
+        for i in 0..n {
+            let o = &mut out[i * m * m..(i + 1) * m * m];
+            for a in 0..norb {
+                for t in 0..2 {
+                    for u in 0..2 {
+                        let mut v = ZERO;
+                        for s in 0..2 {
+                            v += proj[i][s][t * 2 + u] * levels[s][i * norb + a];
+                        }
+                        o[(a * 2 + t) * m + a * 2 + u] = v;
+                    }
+                }
+            }
+            if !self.spin_orbit.is_empty() {
+                for (x, y) in o.iter_mut().zip(&self.spin_orbit[self.topo.species[i]]) {
+                    *x += *y;
+                }
+            }
+        }
+        out
+    }
+
+    fn spinor_data<'b>(&'b self, h: &'b [f64], onsite: &'b [C64]) -> SpinorData<'b> {
+        SpinorData {
+            norb: self.norb,
+            hblk: h,
+            onsite,
+            orbital_diagonal: self.spin_orbit.is_empty(),
+        }
+    }
+
+    /// `Re tr(P m)` for one 2x2 moment matrix at `off`: `Re sum_uv P[v][u] m[u][v]`.
+    fn project(p: &[C64; 4], m: &[C64], off: usize) -> f64 {
+        let mut v = 0.0;
+        for u in 0..2 {
+            for w in 0..2 {
+                v += (p[w * 2 + u] * m[off + u * 2 + w]).re;
+            }
+        }
+        v
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn shell_moments_nc(
+        &self,
+        h: &[f64],
+        onsite: &[C64],
+        proj: &[[[C64; 4]; 2]],
+        keep: bool,
+    ) -> (Vec<Vec<Vec<Vec<f64>>>>, Vec<SpinorWalk>) {
+        let nmom = self.model.nmom;
+        let sd = self.spinor_data(h, onsite);
+        let per_atom: Vec<(Vec<Vec<Vec<f64>>>, Option<SpinorWalk>)> = (0..self.topo.n_atoms)
+            .into_par_iter()
+            .map(|i| {
+                let cl = &self.topo.clusters[i];
+                let wk = spinor::walk(cl, &sd, nmom);
+                let mm = spinor::moment_matrices(cl, &wk, self.norb, nmom);
+                let mu = (0..2)
+                    .map(|s| {
+                        self.slices
+                            .iter()
+                            .map(|&(a, b)| {
+                                (0..=nmom)
+                                    .map(|k| {
+                                        (a..b)
+                                            .map(|d| {
+                                                Self::project(
+                                                    &proj[i][s],
+                                                    &mm,
+                                                    (d * (nmom + 1) + k) * 4,
+                                                )
+                                            })
+                                            .sum::<f64>()
+                                            / (b - a) as f64
+                                    })
+                                    .collect()
+                            })
+                            .collect()
+                    })
+                    .collect();
+                (mu, keep.then_some(wk))
+            })
+            .collect();
+        let (mu, walks): (Vec<_>, Vec<_>) = per_atom.into_iter().unzip();
+        (mu, walks.into_iter().flatten().collect())
+    }
+
+    fn spinor_walk_of<'b>(
+        &self,
+        fw: &'b Forward,
+        i: usize,
+        sd: &SpinorData,
+        store: &'b mut Option<SpinorWalk>,
+    ) -> &'b SpinorWalk {
+        if fw.keep {
+            &fw.swalks[i]
+        } else {
+            *store = Some(spinor::walk(&self.topo.clusters[i], sd, self.model.nmom));
+            store.as_ref().unwrap()
+        }
+    }
+
+    /// `local_response` of the noncollinear walk: the response of the local
+    /// spin channels of each atom to their own levels.
+    fn local_response_nc(&self, fw: &Forward) -> Vec<Vec<Vec<Vec<f64>>>> {
+        let (nsh, norb, nmom) = (self.nshell, self.norb, self.model.nmom);
+        let m = 2 * norb;
+        let sd = self.spinor_data(&fw.h, &fw.onsite_c);
+        (0..self.topo.n_atoms)
+            .into_par_iter()
+            .map(|i| {
+                let cl = &self.topo.clusters[i];
+                let mut store = None;
+                let wk = self.spinor_walk_of(fw, i, &sd, &mut store);
+                (0..2)
+                    .map(|s| {
+                        let mut resp = vec![vec![0.0; nsh]; nsh];
+                        for (k2, &(a0, a1)) in self.slices.iter().enumerate() {
+                            let mut d_o = vec![ZERO; m * m];
+                            for a in a0..a1 {
+                                for t in 0..2 {
+                                    for u in 0..2 {
+                                        d_o[(a * 2 + t) * m + a * 2 + u] = fw.proj[i][s][t * 2 + u];
+                                    }
+                                }
+                            }
+                            let dm = spinor::moment_matrices_tangent(cl, &sd, nmom, wk, i, &d_o);
+                            for (k, &(a, b)) in self.slices.iter().enumerate() {
+                                let fd = &fw.derivs[i][s][k].fill.d;
+                                let mut v = 0.0;
+                                for d in a..b {
+                                    for q in 0..=nmom {
+                                        v += fd[q]
+                                            * Self::project(
+                                                &fw.proj[i][s],
+                                                &dm,
+                                                (d * (nmom + 1) + q) * 4,
+                                            );
+                                    }
+                                }
+                                resp[k][k2] = self.degeneracy[k] * v / (b - a) as f64;
+                            }
+                        }
+                        resp
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seeded_backward_nc(
+        &self,
+        fw: &Forward,
+        pos: &[[f64; 3]],
+        cell: &Cell,
+        wbond: f64,
+        p: &[Vec<Vec<f64>>],
+        lambda: f64,
+        forces: bool,
+    ) -> Grad {
+        let topo = self.topo;
+        let (n, nsh, norb, nmom) = (topo.n_atoms, self.nshell, self.norb, self.model.nmom);
+        let m = 2 * norb;
+        let mm = m * m;
+        let nn = norb * norb;
+        let nb = topo.nbr.n_bonds();
+        let dh = &fw.dh;
+        assert!(
+            !forces || !dh.is_empty(),
+            "forward pass without bond-block derivatives"
+        );
+        let sd = self.spinor_data(&fw.h, &fw.onsite_c);
+        let chunk = n.div_ceil(rayon::current_num_threads() * 4).max(1);
+        type Part = (Vec<[f64; 3]>, Vec<C64>, Vec<(usize, [[C64; 4]; 2])>);
+        let partial: Vec<Part> = (0..n)
+            .collect::<Vec<_>>()
+            .par_chunks(chunk)
+            .map(|atoms| {
+                let mut gbond = vec![[0.0; 3]; if forces { nb } else { 0 }];
+                let mut obar = vec![ZERO; n * mm];
+                let mut mproj = Vec::new();
+                for &i in atoms {
+                    let gmu: Vec<Vec<f64>> = (0..2)
+                        .map(|s| self.moment_seed(fw, i, s, wbond, p, lambda))
+                        .collect();
+                    let cl = &topo.clusters[i];
+                    let mut store = None;
+                    let wk = self.spinor_walk_of(fw, i, &sd, &mut store);
+                    // C_k[d] = sum_s gmu[s][d][k] P_s, and the projection part
+                    let mut cmat = vec![ZERO; norb * (nmom + 1) * 4];
+                    for d in 0..norb {
+                        for q in 0..=nmom {
+                            for e in 0..4 {
+                                let mut v = ZERO;
+                                for s in 0..2 {
+                                    v += fw.proj[i][s][e] * gmu[s][d * (nmom + 1) + q];
+                                }
+                                cmat[(d * (nmom + 1) + q) * 4 + e] = v;
+                            }
+                        }
+                    }
+                    let mmat = spinor::moment_matrices(cl, wk, norb, nmom);
+                    let mut ms = [[ZERO; 4]; 2];
+                    for s in 0..2 {
+                        for d in 0..norb {
+                            for q in 0..=nmom {
+                                let g = gmu[s][d * (nmom + 1) + q];
+                                for e in 0..4 {
+                                    ms[s][e] += mmat[(d * (nmom + 1) + q) * 4 + e] * g;
+                                }
+                            }
+                        }
+                    }
+                    mproj.push((i, ms));
+                    let mut contract = |b: usize, hbar: &[f64]| {
+                        let dblk = &dh[b * 3 * nn..(b + 1) * 3 * nn];
+                        for x in 0..3 {
+                            let mut acc = 0.0;
+                            for e in 0..nn {
+                                acc += hbar[e] * dblk[x * nn + e];
+                            }
+                            gbond[b][x] += acc;
+                        }
+                    };
+                    let bonds = if forces { Some(&mut contract) } else { None };
+                    spinor::backward(cl, &sd, nmom, wk, &cmat, &mut obar, bonds);
+                }
+                (gbond, obar, mproj)
+            })
+            .collect();
+        let mut gbond = vec![[0.0; 3]; if forces { nb } else { 0 }];
+        let mut obar = vec![ZERO; n * mm];
+        let mut ms = vec![[[ZERO; 4]; 2]; n];
+        for (g, o, mp) in partial {
+            for b in 0..g.len() {
+                for x in 0..3 {
+                    gbond[b][x] += g[b][x];
+                }
+            }
+            for (t, v) in obar.iter_mut().zip(o) {
+                *t += v;
+            }
+            for (i, v) in mp {
+                ms[i] = v;
+            }
+        }
+        let mut grad = Grad {
+            shifts: vec![0.0; n * 2 * nsh],
+            pos: vec![[0.0; 3]; n],
+            ..Default::default()
+        };
+        let owners = topo.nbr.owners();
+        for b in 0..gbond.len() {
+            let (i, j) = (owners[b], topo.nbr.j[b]);
+            let r = topo.nbr.vector(b, i, pos, cell.as_ref());
+            for x in 0..3 {
+                grad.pos[j][x] += gbond[b][x];
+                grad.pos[i][x] -= gbond[b][x];
+                for y in 0..3 {
+                    grad.virial[x][y] += gbond[b][x] * r[y];
+                }
+            }
+        }
+        // Re sum_tu conj(Obar[(a t),(a u)]) X[t][u]
+        let pair = |i: usize, a: usize, x: &[C64; 4]| -> f64 {
+            let o = &obar[i * mm..(i + 1) * mm];
+            let mut v = 0.0;
+            for t in 0..2 {
+                for u in 0..2 {
+                    v += o[(a * 2 + t) * m + a * 2 + u].dot_re(x[t * 2 + u]);
+                }
+            }
+            v
+        };
+        grad.axes = vec![[0.0; 3]; n];
+        for i in 0..n {
+            for s in 0..2 {
+                for (k, &(a0, a1)) in self.slices.iter().enumerate() {
+                    grad.shifts[(i * 2 + s) * nsh + k] =
+                        (a0..a1).map(|a| pair(i, a, &fw.proj[i][s])).sum();
+                }
+            }
+            let dp = projector_derivatives(self.axes[i]);
+            for x in 0..3 {
+                let mut v = 0.0;
+                for s in 0..2 {
+                    for a in 0..norb {
+                        v += fw.levels[s][i * norb + a] * pair(i, a, &dp[x][s]);
+                    }
+                    v += Self::project(&dp[x][s], &ms[i][s], 0);
+                }
+                grad.axes[i][x] = v;
+            }
+        }
+        grad
     }
 }

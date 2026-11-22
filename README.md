@@ -121,9 +121,14 @@ This prints -6.0112485448437 eV per atom, the BOPfox value to all 13 digits.
 derivatives (the BOPfox route) instead of automatic differentiation. Phase 1
 covers energy, forces, virial and dE/dshifts at given shifts for s/p/d bases,
 collinear magnetism and the pair repulsions. Phase 2 adds self-consistency
-from gradients only, by preconditioned Anderson mixing. It matches bopjax to
-1e-9. It is 13-20 times faster for energy and forces at given shifts, and
-30-50 times faster self-consistently (256-atom d band: 1.3 s against 67 s).
+from gradients only, by preconditioned Anderson mixing. Since then it also
+has bopjax's potential condition (with implicit-function forces),
+non-collinear magnetism with spin-orbit coupling, and an ASE calculator with
+warm-started self-consistency.
+
+It matches bopjax to 1e-9. It is 13-20 times faster for energy and forces at
+given shifts, and 30-50 times faster self-consistently (256-atom d band:
+1.3 s against 67 s).
 
 ## Documentation
 

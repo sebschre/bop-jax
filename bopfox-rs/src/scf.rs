@@ -660,7 +660,9 @@ impl<'a> Bop<'a> {
             add3(&mut virial, &w_rep);
         }
         res.energy = res.energy_atom.iter().sum();
-        let (sg, g_e, w_e) = self.seeded_backward(&fw, pos, cell, 1.0, &p, true);
+        let ge = self.seeded_backward(&fw, pos, cell, 1.0, &p, true);
+        let (sg, g_e, w_e) = (ge.shifts, ge.pos, ge.virial);
+        let mut axes_grad = ge.axes;
         for i in 0..n {
             for c in 0..3 {
                 grad[i][c] += g_e[i][c];
@@ -682,8 +684,9 @@ impl<'a> Bop<'a> {
         let restrict = |full: &[f64]| -> Vec<f64> { index.iter().map(|&q| full[q]).collect() };
         let a_t = |u: &[f64]| -> Vec<f64> {
             let v = pc.kernel(&embed(u));
-            let (chi_t, _, _) =
-                self.seeded_backward(&fw, pos, cell, 0.0, &self.unflatten(&v), false);
+            let chi_t = self
+                .seeded_backward(&fw, pos, cell, 0.0, &self.unflatten(&v), false)
+                .shifts;
             restrict(&chi_t).iter().zip(u).map(|(a, b)| a - b).collect()
         };
         // right preconditioner M^{-1} ~ (dr/dx)^{-T} = -(1 + P K)^{-1}
@@ -699,12 +702,19 @@ impl<'a> Bop<'a> {
         let u = m_inv(&z.unwrap_or_else(|| vec![0.0; rhs.len()]));
         // u^T dr/dR = d(v.N)/dR with v = K u
         let v = pc.kernel(&embed(&u));
-        let (_, g_s, w_s) = self.seeded_backward(&fw, pos, cell, 0.0, &self.unflatten(&v), true);
+        let gs = self.seeded_backward(&fw, pos, cell, 0.0, &self.unflatten(&v), true);
+        let (g_s, w_s) = (gs.pos, gs.virial);
         for i in 0..n {
             for c in 0..3 {
                 grad[i][c] -= g_s[i][c];
             }
         }
+        for (a, b) in axes_grad.iter_mut().zip(&gs.axes) {
+            for c in 0..3 {
+                a[c] -= b[c];
+            }
+        }
+        res.axes_gradient = axes_grad;
         for a in 0..3 {
             for b in 0..3 {
                 virial[a][b] -= w_s[a][b];

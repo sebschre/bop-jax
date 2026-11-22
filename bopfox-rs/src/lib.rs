@@ -8,6 +8,7 @@
 
 #![allow(clippy::needless_range_loop)] // index loops read like the formulas
 
+pub mod complex;
 pub mod energy;
 pub mod expansion;
 pub mod geometry;
@@ -18,6 +19,7 @@ pub mod moments;
 mod python;
 pub mod real;
 pub mod scf;
+pub mod spinor;
 
 pub use energy::{Bop, Cell, Mode, Results};
 pub use geometry::Topology;

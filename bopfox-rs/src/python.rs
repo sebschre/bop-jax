@@ -37,7 +37,8 @@ impl Potential {
     /// Energy (and with `gradients` forces, virial, dE/dshifts) for positions
     /// (N, 3), species (N,), cell (3, 3) rows = lattice vectors or None, and
     /// onsite shifts flattened as [atom][spin][shell] (default zero).
-    #[pyo3(signature = (positions, species, cell=None, shifts=None, gradients=true))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (positions, species, cell=None, shifts=None, gradients=true, axes=None))]
     fn compute<'py>(
         &self,
         py: Python<'py>,
@@ -46,16 +47,11 @@ impl Potential {
         cell: Option<[[f64; 3]; 3]>,
         shifts: Option<Vec<f64>>,
         gradients: bool,
+        axes: Option<Vec<[f64; 3]>>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        if species.len() != positions.len() {
-            return Err(PyValueError::new_err(
-                "species and positions differ in length",
-            ));
-        }
-        if let Some(&s) = species.iter().max() {
-            if s >= self.model.nspecies() {
-                return Err(PyValueError::new_err("species index out of range"));
-            }
+        self.check(&positions, &species)?;
+        if axes.as_ref().is_some_and(|a| a.len() != positions.len()) {
+            return Err(PyValueError::new_err("axes needs one entry per atom"));
         }
         let n_shift = positions.len() * self.shifts_per_atom();
         let shifts = shifts.unwrap_or_else(|| vec![0.0; n_shift]);
@@ -66,7 +62,7 @@ impl Potential {
         let r = py.allow_threads(|| {
             let topo =
                 Topology::build(&positions, &species, cell.as_ref(), m.rcut, m.nmom, m.rcut2);
-            Bop::new(m, &topo).compute(&positions, &cell, &shifts, gradients)
+            with_axes(Bop::new(m, &topo), &axes).compute(&positions, &cell, &shifts, gradients)
         });
         results_dict(py, r, gradients)
     }
@@ -77,7 +73,7 @@ impl Potential {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (positions, species, cell=None, shifts0=None, tol=1e-10, max_iter=200,
                         mixing=None, history=None, max_step=0.5, free=None, refresh=4,
-                        condition="stationary", adjoint_tol=1e-10, reuse_history=false))]
+                        condition="stationary", adjoint_tol=1e-10, reuse_history=false, axes=None))]
     fn scf<'py>(
         &self,
         py: Python<'py>,
@@ -95,6 +91,7 @@ impl Potential {
         condition: &str,
         adjoint_tol: f64,
         reuse_history: bool,
+        axes: Option<Vec<[f64; 3]>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let condition = match condition {
             "stationary" => Condition::Stationary,
@@ -102,6 +99,9 @@ impl Potential {
             c => return Err(PyValueError::new_err(format!("unknown condition {c:?}"))),
         };
         self.check(&positions, &species)?;
+        if axes.as_ref().is_some_and(|a| a.len() != positions.len()) {
+            return Err(PyValueError::new_err("axes needs one entry per atom"));
+        }
         let n_shift = positions.len() * self.shifts_per_atom();
         if shifts0.as_ref().is_some_and(|s| s.len() != n_shift) {
             return Err(PyValueError::new_err(format!("expected {n_shift} shifts")));
@@ -133,7 +133,7 @@ impl Potential {
         let r = py.allow_threads(|| {
             let topo =
                 Topology::build(&positions, &species, cell.as_ref(), m.rcut, m.nmom, m.rcut2);
-            Bop::new(m, &topo).scf_continued(
+            with_axes(Bop::new(m, &topo), &axes).scf_continued(
                 &positions,
                 &cell,
                 shifts0.as_deref(),
@@ -149,6 +149,13 @@ impl Potential {
         d.set_item("residual", r.residual)?;
         d.set_item("adjoint_iterations", r.adjoint_iterations)?;
         Ok(d)
+    }
+}
+
+fn with_axes<'a>(bop: Bop<'a>, axes: &Option<Vec<[f64; 3]>>) -> Bop<'a> {
+    match axes {
+        Some(a) => bop.with_axes(a),
+        None => bop,
     }
 }
 
@@ -186,6 +193,9 @@ fn results_dict(py: Python<'_>, r: crate::Results, gradients: bool) -> PyResult<
             d.set_item("shift_gradient", r.shift_gradient)?;
         }
         d.set_item("dos", r.dos)?;
+        if !r.axes_gradient.is_empty() {
+            d.set_item("axes_gradient", r.axes_gradient)?;
+        }
         d.set_item("occupations", r.occupations)?;
         Ok(d)
     }

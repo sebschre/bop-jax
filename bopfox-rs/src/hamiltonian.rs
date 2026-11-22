@@ -253,3 +253,55 @@ pub fn bond_block<T: Real, P: BondParams + ?Sized>(
         }
     }
 }
+
+/// Orbital angular momentum (3 matrices `n x n`, row-major) in units of hbar,
+/// in the real orbitals and order of the Slater-Koster blocks (as
+/// `bopjax.hamiltonian.angular_momentum`): imaginary and antisymmetric.
+pub fn angular_momentum(shell: Shell) -> [Vec<crate::complex::C64>; 3] {
+    use crate::complex::C64;
+    let mut eps = [[[0.0f64; 3]; 3]; 3];
+    for (a, b, c) in [(0, 1, 2), (1, 2, 0), (2, 0, 1)] {
+        eps[a][b][c] = 1.0;
+        eps[a][c][b] = -1.0;
+    }
+    let n = shell.norb();
+    let mut out: [Vec<C64>; 3] = [
+        vec![C64::default(); n * n],
+        vec![C64::default(); n * n],
+        vec![C64::default(); n * n],
+    ];
+    match shell {
+        Shell::S => {}
+        Shell::P => {
+            for k in 0..3 {
+                for a in 0..3 {
+                    for b in 0..3 {
+                        out[k][a * 3 + b] = C64::new(0.0, -eps[k][a][b]);
+                    }
+                }
+            }
+        }
+        Shell::D => {
+            let d = d_tensors();
+            for k in 0..3 {
+                for m in 0..5 {
+                    for nn in 0..5 {
+                        // -i sum_ij D_m[i][j] (eps_k D_n + D_n eps_k^T)[i][j]
+                        let mut v = 0.0;
+                        for i in 0..3 {
+                            for j in 0..3 {
+                                let mut t = 0.0;
+                                for l in 0..3 {
+                                    t += eps[k][i][l] * d[nn][l][j] + eps[k][j][l] * d[nn][i][l];
+                                }
+                                v += d[m][i][j] * t;
+                            }
+                        }
+                        out[k][m * 5 + nn] = C64::new(0.0, -v);
+                    }
+                }
+            }
+        }
+    }
+    out
+}

@@ -90,3 +90,26 @@ def test_cold_start_without_moments_stays_nonmagnetic():
     atoms.calc = iron_calc()
     atoms.get_potential_energy()
     assert np.abs(atoms.get_magnetic_moments()).max() < 1e-6
+
+
+def test_noncollinear_with_spin_orbit():
+    """Axes from vector initial moments; forces against numerical ones and
+    the magnetic anisotropy: with spin-orbit coupling the energy depends on
+    a common rotation of the moments."""
+    cfg = bj.BOPConfig(spin="noncollinear", spin_orbit=True, **dict(IRON_CONFIG, nmom=7))
+    params = dict(iron(), spin_orbit=np.array([[0.06]]))
+    atoms = iron_cell(n=1, rattle=0.03)
+    tilted = np.array([[0.0, 0.3, 2.4], [0.2, -0.1, 2.5]])
+    atoms.set_initial_magnetic_moments(None)  # scalar -> vector moments
+    atoms.set_initial_magnetic_moments(tilted)
+    atoms.calc = BOPCalculator.from_bopjax(cfg, params, hamiltonian.v0_bond, tol=1e-11)
+    f = atoms.get_forces()
+    np.testing.assert_allclose(f, atoms.calc.calculate_numerical_forces(atoms, d=1e-4), atol=1e-6)
+    m = atoms.get_magnetic_moments()
+    assert m.shape == (2, 3)
+    np.testing.assert_allclose(np.cross(m, tilted), 0.0, atol=1e-9)  # along the axes
+    g = atoms.calc.results["axes_gradient"]
+    assert np.abs(g).max() > 1e-6  # anisotropy: torques on the tilted moments
+    e_tilted = atoms.get_potential_energy()
+    atoms.set_initial_magnetic_moments([[0.0, 0.0, 2.5]] * 2)
+    assert abs(atoms.get_potential_energy() - e_tilted) > 1e-7

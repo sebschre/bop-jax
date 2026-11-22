@@ -36,7 +36,7 @@ class BOPCalculator(Calculator):
 
     def __init__(self, model, species=None, condition="stationary", tol=1e-8,
                  warm_start=True, extrapolation="linear", scf_options=None,
-                 raise_on_failure=True, **kwargs):
+                 raise_on_failure=True, axes=None, **kwargs):
         """
         model         bopfox-rs model (dict, JSON string or ``Potential``)
         species       chemical symbol -> species index of the model; may be
@@ -46,6 +46,13 @@ class BOPCalculator(Calculator):
         warm_start    start from the shifts of the previous calculation
         extrapolation "none" or "linear" (from the last two calculations)
         scf_options   further keyword arguments of ``Potential.scf``
+        axes          (N, 3) local spin axes of a noncollinear model; by
+                      default the directions of the initial magnetic moments
+                      (vectors), or z
+
+        For a noncollinear model ``magmoms`` are vectors along the axes and
+        ``results["axes_gradient"]`` holds dE/d(axes) (eV per unit of the
+        axis vector; the torque on spin i is ``-e_i x dE/de_i``).
         """
         super().__init__(**kwargs)
         self.pot = model if isinstance(model, Potential) else Potential(model)
@@ -58,6 +65,8 @@ class BOPCalculator(Calculator):
         self.extrapolation = extrapolation
         self.scf_options = dict(scf_options or {})
         self.raise_on_failure = raise_on_failure
+        self.axes = None if axes is None else np.asarray(axes, dtype=float)
+        self.noncollinear = self.pot.model.get("spin", "none") == "noncollinear"
         self._previous = []  # shifts of the last calculations, newest last
         self._key = None
         self.scf_info = {}  # evaluations, residual, converged of the last calculation
@@ -88,12 +97,26 @@ class BOPCalculator(Calculator):
         stoner = np.asarray(model["stoner"], dtype=float)[self._species(atoms)]  # (n, nshell)
         moments = atoms.get_initial_magnetic_moments()
         if moments.ndim > 1:
-            raise ValueError("collinear model: initial magnetic moments must be scalars")
+            if not self.noncollinear:
+                raise ValueError("collinear model: initial magnetic moments must be scalars")
+            moments = np.linalg.norm(moments, axis=1)
         shell = np.argmax(stoner, axis=1)  # the moment goes on the most magnetic shell
         split = 0.5 * stoner[np.arange(n), shell] * moments
         shifts[np.arange(n), 0, shell] = -split
         shifts[np.arange(n), 1, shell] = split
         return shifts
+
+    def _axes(self, atoms):
+        if not self.noncollinear:
+            return None
+        if self.axes is not None:
+            return self.axes
+        m = atoms.get_initial_magnetic_moments()
+        axes = np.tile([0.0, 0.0, 1.0], (len(atoms), 1))
+        if m.ndim > 1:
+            norm = np.linalg.norm(m, axis=1)
+            axes[norm > 0] = m[norm > 0] / norm[norm > 0, None]
+        return axes
 
     def _start(self, atoms):
         key = (tuple(atoms.numbers),)
@@ -117,7 +140,7 @@ class BOPCalculator(Calculator):
         shifts0 = self._start(atoms)
         out = self.pot.scf(atoms.positions, self._species(atoms), cell, shifts0, tol=self.tol,
                            condition=self.condition, reuse_history=bool(self._previous),
-                           **self.scf_options)
+                           axes=self._axes(atoms), **self.scf_options)
         self.scf_info = {"evaluations": len(out["history"]), "residual": out["residual"],
                          "converged": out["converged"],
                          "adjoint_iterations": out["adjoint_iterations"]}
@@ -132,7 +155,13 @@ class BOPCalculator(Calculator):
         self.results["energies"] = out["energy_atom"]
         self.results["forces"] = out["forces"]
         self.results["charges"] = out["charge"]
-        if "moment" in out:
+        if self.noncollinear:
+            axes = self._axes(atoms)
+            e = axes / np.linalg.norm(axes, axis=1, keepdims=True)
+            self.results["magmoms"] = out["moment"][:, None] * e
+            self.results["magmom"] = self.results["magmoms"].sum(axis=0)
+            self.results["axes_gradient"] = out["axes_gradient"]
+        elif "moment" in out:
             self.results["magmoms"] = out["moment"]
             self.results["magmom"] = float(np.sum(out["moment"]))
         else:

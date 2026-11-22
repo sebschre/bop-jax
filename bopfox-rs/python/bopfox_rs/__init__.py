@@ -26,20 +26,22 @@ class Potential:
         """Forget the Anderson history kept for ``scf(reuse_history=True)``."""
         self._core.clear_history()
 
-    def compute(self, positions, species, cell=None, shifts=None, gradients=True):
+    def compute(self, positions, species, cell=None, shifts=None, gradients=True, axes=None):
         """Dict of numpy arrays: energy, energy_atom, fermi, n_shell, charge,
         moments, a_inf, b_inf (and moment when magnetic); with ``gradients``
         also forces (-dE/dpositions), virial (dE/dstrain) and shift_gradient
-        (dE/dshifts, shaped like the shifts: (N, nspin, nshell))."""
+        (dE/dshifts, shaped like the shifts: (N, nspin, nshell)).  For
+        ``spin="noncollinear"``, ``axes`` (N, 3) are the local spin axes
+        (default z) and ``axes_gradient`` is dE/daxes."""
         pos = np.asarray(positions, dtype=float).tolist()
         sp = [int(s) for s in np.asarray(species).ravel()]
         c = None if cell is None else np.asarray(cell, dtype=float).tolist()
         s = None if shifts is None else np.asarray(shifts, dtype=float).ravel().tolist()
-        return _arrays(self._core.compute(pos, sp, c, s, gradients))
+        return _arrays(self._core.compute(pos, sp, c, s, gradients, _axes(axes)))
 
     def scf(self, positions, species, cell=None, shifts0=None, tol=1e-10, max_iter=200,
             mixing=None, history=None, max_step=0.5, free=None, refresh=4,
-            condition="stationary", adjoint_tol=1e-10, reuse_history=False):
+            condition="stationary", adjoint_tol=1e-10, reuse_history=False, axes=None):
         """Self-consistent onsite shifts by preconditioned Anderson mixing,
         from ``shifts0`` (default zero).  ``condition`` is "stationary"
         (dE/dshifts = 0, BOPfox; ``tol`` on max |dE/dshift|) or "potential"
@@ -62,9 +64,14 @@ class Potential:
         s = None if shifts0 is None else np.asarray(shifts0, dtype=float).ravel().tolist()
         fr = None if free is None else [bool(f) for f in np.asarray(free).ravel()]
         out = _arrays(self._core.scf(pos, sp, c, s, tol, max_iter, mixing, history, max_step, fr,
-                                       refresh, condition, adjoint_tol, reuse_history))
+                                       refresh, condition, adjoint_tol, reuse_history,
+                                       _axes(axes)))
         out["shifts"] = out["shifts"].reshape(len(pos), -1, len(self.model["basis"]))
         return out
+
+
+def _axes(axes):
+    return None if axes is None else np.asarray(axes, dtype=float).tolist()
 
 
 def _arrays(out):
@@ -79,14 +86,18 @@ def _tolist(x):
 def model_from_bopjax(cfg, params, radial="powerlaw") -> dict:
     """Model dict from a ``bopjax.BOPConfig`` and a bopjax parameter dict.
 
+    For ``spin="noncollinear"`` the spin axes are not part of the model:
+    pass ``params["spin_axes"]`` as ``axes`` to ``compute`` / ``scf``.
+
     ``radial`` names the bond-integral form: "powerlaw"
     (``bopjax.hamiltonian.powerlaw``), "v0" (``v0_bond``) or "exp_sum"
     (``pairwise.exp_sum``); a function is accepted and mapped by name.
     """
     if callable(radial):
         radial = {"powerlaw": "powerlaw", "v0_bond": "v0", "exp_sum": "exp_sum"}[radial.__name__]
+    fields = [k for k in ("magnetic_field", "spin_field", "orbital_field") if k in params]
     unsupported = [name for name, on in [
-        ("noncollinear spin", cfg.spin == "noncollinear"), ("spin_orbit", cfg.spin_orbit),
+        ("external fields " + ", ".join(fields), bool(fields)),
         ("screening", cfg.screening), ("yukawa", cfg.yukawa), ("kT > 0", cfg.kT > 0),
         ("coulomb != diagonal", cfg.coulomb != "diagonal"),
         ("Beer-Pettifor-Aoki bandwidth", cfg.bandwidth.startswith("beerpettiforaoki"))] if on]
@@ -104,6 +115,9 @@ def model_from_bopjax(cfg, params, radial="powerlaw") -> dict:
     }
     if cfg.magnetic:
         model["stoner"] = _tolist(params["stoner"])
+    if cfg.spin_orbit:
+        model["spin_orbit"] = True
+        model["spin_orbit_xi"] = _tolist(params["spin_orbit"])
     if cfg.repulsion is not None:
         from bopjax import pairwise as pw
         form = {id(pw.V0): "v0", id(pw.POWERLAW): "powerlaw", id(pw.EGOROV): "egorov"}.get(
