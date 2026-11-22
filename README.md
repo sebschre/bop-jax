@@ -124,8 +124,10 @@ collinear magnetism and the pair repulsions. Phase 2 adds self-consistency
 from gradients only, by preconditioned Anderson mixing. Since then it also
 has bopjax's potential condition (with implicit-function forces),
 non-collinear magnetism with spin-orbit coupling, external magnetic fields,
-spin and spin-lattice dynamics, and an ASE calculator with warm-started
-self-consistency.
+spin and spin-lattice dynamics, d-d screening, intersite Coulomb, Yukawa
+repulsion, electronic temperature, all bandwidth estimators, NEB, and an ASE
+calculator with warm-started self-consistency: everything in the feature
+table except the JAX-specific interfaces.
 
 It matches bopjax to 1e-9. It is 13-20 times faster for energy and forces at
 given shifts, and 30-50 times faster self-consistently (256-atom d band:

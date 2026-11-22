@@ -14,7 +14,11 @@ Done so far:
   - an ASE calculator with warm-started self-consistency;
   - non-collinear magnetism with optional spin-orbit coupling;
   - external magnetic fields with analytic magnetic moments;
-  - spin dynamics and spin-lattice dynamics.
+  - spin dynamics and spin-lattice dynamics;
+  - the remaining model terms: d-d screening, Yukawa repulsion, intersite
+    Coulomb, electronic temperature, the Beer-Pettifor-Aoki bandwidths;
+  - NEB and the first-order field effect on barriers;
+  - a cell-list neighbour search.
 
 ## Self-consistency
 
@@ -206,6 +210,66 @@ Rust self-consistency. Units are femtoseconds and amu (bopjax's time unit is
   - **Spin-lattice:** the trajectory matches `bopjax.spinlattice.nve`, and
     `E + E_kin` is conserved.
 
+## Screening, Coulomb, Yukawa, temperature, bandwidths
+
+- **Screening of the d-d bond integrals** (`"screening"`, bopjax's
+  `screening_factors`).
+  - Each bond's d-d integrals get a scale and shift from sums over the other
+    neighbours of its central atom, and the ring term of the reverse bond.
+  - The three-body derivatives are analytic: the bond blocks take scale and
+    shift as extra dual inputs, and their cotangents go back through the
+    factor formula and every pair term to the bond vectors.
+- **Intersite Coulomb** (`"coulomb": "frauenheim"`, `"taper"`).
+  - Frauenheim integrals between the charges of the atoms on the second
+    list, times bopjax's taper.
+  - They enter the energy, dE/dN, the forces and virial. For the potential
+    condition they also enter the target, the adjoint operator (the full
+    kernel) and the explicit R-dependence of the target in the implicit
+    forces.
+  - **Taper caveat:** bopjax's taper is a proper switch only for an inner
+    radius R1 = 0. For R1 > 0 its coefficients give values in the hundreds
+    between R1 and R2. The port keeps the same coefficients for comparison;
+    use R1 = 0.
+- **Yukawa repulsion** (`"yukawa"`): the environment-dependent form of
+  bopjax/Egorov et al. Forces come in two passes: the pair derivatives, then
+  the derivatives of the decay constants.
+- **Electronic temperature** (`"kT"`, `"smearing_nodes"`). The filling is
+  averaged over the Fermi kernel (Gauss-Legendre nodes in the Fermi
+  function), and the bond energy is the Mermin free energy.
+- **Beer-Pettifor-Aoki bandwidths** (`beerpettiforaoki`,
+  `beerpettiforaoki_bopfox`).
+  - The extreme eigenvalues come from a Jacobi solve of the BPA matrix, and
+    their derivatives from the eigenvectors (Hellmann-Feynman).
+  - The centre comes from bisection plus two Newton steps in dual
+    arithmetic, which gives the exact derivative of the root.
+- **Checks:**
+  - finite differences of all of them (with two species, s/p/d bases,
+    periodic and finite, and the potential condition with intersite
+    Coulomb);
+  - bopjax: screening with no, collinear and non-collinear spin; Egorov
+    iron with Yukawa; kT = 0.1 eV self-consistently; both BPA variants;
+  - bopjax's two-species intersite-Coulomb reference: energy to 1e-10,
+    Coulomb energy, charges.
+
+## NEB and field effects on barriers
+
+- **`bopfox_rs.neb`** is bopjax's climbing-image NEB and FIRE relaxation:
+  the same algorithm, giving bit-identical bands for the same forces.
+  `image_forces` builds the force function from a model, with one
+  warm-started self-consistency per image (its own shifts and Anderson
+  history). It retries without the history, and then from the starting
+  shifts, before reporting a failure.
+- **`bopfox_rs.zeeman`** ports `first_order_energies`,
+  `first_order_barrier` and `peierls_stress`, using the analytic moments.
+- **Checks:**
+  - the Mueller-Brown saddle;
+  - a vacancy hop in bcc iron. With only the hopping atom free, the saddle
+    is at the midpoint. Some images of this hop, in so small a cell, are out
+    of reach for the stationary condition, in bopjax too; the potential
+    condition converges them.
+  - the first-order field derivative of the barrier against the barrier
+    recomputed in +-5 T.
+
 ## Self-consistency solver fallback
 
 When the Anderson mixing stalls (two restarts in a row without a tenfold
@@ -249,22 +313,24 @@ coupling).
 | bond integrals | `powerlaw`, `v0` (BOPfox v0), `exp_sum` (Egorov) |
 | expansion | any `nmom` ≤ 14, `nexp`; bandwidths `azero`, `lowest`, `highest`, `avgan_maxbn`, `global`, `averaged`, `findeminemax`, `gershgorin`; terminators `none`, `constantabn`, `weighted`, `oscillation`; Jackson kernel |
 | magnetism | none, collinear (Stoner), non-collinear with optional onsite spin-orbit coupling |
+| bond integrals, environment | screening of the d-d integrals (three-body) |
+| electrostatics, repulsion | onsite Hubbard `J`, intersite Frauenheim Coulomb; `v0`, `powerlaw`, `egorov` pair + embedding, Yukawa |
+| electrons | `kT > 0` (Mermin free energy); all bandwidth estimators including Beer-Pettifor-Aoki |
+| paths | climbing-image NEB, FIRE, first-order field effect on barriers, Peierls stress |
 | self-consistency | stationary (BOPfox) and potential conditions, frozen atoms, warm starts |
-| electrostatics | onsite Hubbard `J` |
-| repulsion | `v0`, `powerlaw`, `egorov` (pair + embedding) |
 | fields | Zeeman term of an external field, spin and orbital field sources; analytic spin, orbital and total magnetic moments |
 | dynamics | LLG spin dynamics (damping, thermal torques), coupled spin-lattice dynamics |
 | outputs | energy (total and per atom), Fermi level, occupations, charges, moments, `a_inf`/`b_inf`, forces, virial `dE/dstrain`, `dE/dshifts`, `dE/daxes`, `dE/dh`, `dE/db` |
 | interfaces | Rust, Python (`Potential`), ASE (`BOPCalculator`) |
 
-Not yet:
-- the first-order field effect on barriers (`bopjax.zeeman.first_order_*`,
-  plain post-processing of the moments now available) and NEB;
-- screening, Yukawa repulsion, intersite Coulomb;
-- `kT > 0`;
-- the Beer-Pettifor-Aoki bandwidth;
-- a cell-list neighbour search (the search is O(N²), still only 62 ms for
-  1372 atoms).
+Everything in bopjax's feature table is now ported. The exceptions are
+bopjax's JAX-specific interfaces (JAX-MD, `jax.grad` with respect to model
+parameters for fitting) and OVITO rendering, which works on any trajectory.
+Fitting stays in bopjax, whose parameter dicts `model_from_bopjax` converts.
+
+Neighbour lists are binned (linear) whenever the cell holds three bins of
+width rcut per lattice direction, and always for clusters; 6912 atoms take
+0.27 s.
 
 ## Validation
 
