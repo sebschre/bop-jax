@@ -1,13 +1,16 @@
 //! Python bindings (feature "python"): `bopfox_rs._core.Potential`.
 
-use crate::{Bop, Condition, Model, ScfOptions, Topology};
+use crate::{Bop, Condition, MixingHistory, Model, ScfOptions, Topology};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::sync::Mutex;
 
 #[pyclass(module = "bopfox_rs._core")]
 struct Potential {
     model: Model,
+    /// Anderson history of the last `scf` call
+    mixing: Mutex<Option<MixingHistory>>,
 }
 
 #[pymethods]
@@ -16,7 +19,13 @@ impl Potential {
     fn new(model_json: &str) -> PyResult<Self> {
         Ok(Potential {
             model: Model::from_json(model_json).map_err(PyValueError::new_err)?,
+            mixing: Mutex::new(None),
         })
+    }
+
+    /// Forget the Anderson history kept for `scf(..., reuse_history=True)`.
+    fn clear_history(&self) {
+        *self.mixing.lock().unwrap() = None;
     }
 
     /// Shift entries per atom (nspin * nshell).
@@ -68,7 +77,7 @@ impl Potential {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (positions, species, cell=None, shifts0=None, tol=1e-10, max_iter=200,
                         mixing=None, history=None, max_step=0.5, free=None, refresh=4,
-                        condition="stationary", adjoint_tol=1e-10))]
+                        condition="stationary", adjoint_tol=1e-10, reuse_history=false))]
     fn scf<'py>(
         &self,
         py: Python<'py>,
@@ -85,6 +94,7 @@ impl Potential {
         refresh: usize,
         condition: &str,
         adjoint_tol: f64,
+        reuse_history: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         let condition = match condition {
             "stationary" => Condition::Stationary,
@@ -115,11 +125,23 @@ impl Potential {
             adjoint_tol,
         };
         let m = &self.model;
+        let previous = if reuse_history {
+            self.mixing.lock().unwrap().clone()
+        } else {
+            None
+        };
         let r = py.allow_threads(|| {
             let topo =
                 Topology::build(&positions, &species, cell.as_ref(), m.rcut, m.nmom, m.rcut2);
-            Bop::new(m, &topo).scf(&positions, &cell, shifts0.as_deref(), &opt)
+            Bop::new(m, &topo).scf_continued(
+                &positions,
+                &cell,
+                shifts0.as_deref(),
+                &opt,
+                previous.as_ref(),
+            )
         });
+        *self.mixing.lock().unwrap() = Some(r.mixing.clone());
         let d = results_dict(py, r.results, true)?;
         d.set_item("shifts", r.shifts)?;
         d.set_item("converged", r.converged)?;

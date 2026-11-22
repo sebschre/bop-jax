@@ -109,6 +109,15 @@ pub struct ScfResult {
     pub residual: f64,
     /// operator applications of the adjoint solve (potential condition)
     pub adjoint_iterations: usize,
+    /// the Anderson history at the end, to continue from (`scf_continued`)
+    pub mixing: MixingHistory,
+}
+
+/// Steps and step differences of the Anderson mixing, newest first.
+#[derive(Clone, Debug, Default)]
+pub struct MixingHistory {
+    pub dy: Vec<Vec<f64>>,
+    pub df: Vec<Vec<f64>>,
 }
 
 fn flatten(g: &[Vec<Vec<f64>>]) -> Vec<f64> {
@@ -412,14 +421,17 @@ fn anderson(
     mut eval: impl FnMut(&[f64]) -> (Vec<f64>, f64),
     y0: Vec<f64>,
     opt: &ScfOptions,
-) -> (Vec<f64>, Vec<f64>) {
+    previous: Option<&MixingHistory>,
+) -> (Vec<f64>, Vec<f64>, MixingHistory) {
     let k = y0.len();
     let mut y = y0;
     let (mut f, mut err) = eval(&y);
     let mut history = vec![err];
     let (mut y_best, mut e_best) = (y.clone(), err);
-    let mut dy: Vec<Vec<f64>> = Vec::new();
-    let mut df: Vec<Vec<f64>> = Vec::new();
+    let (mut dy, mut df) = match previous {
+        Some(p) if p.dy.first().is_some_and(|v| v.len() == k) => (p.dy.clone(), p.df.clone()),
+        _ => (Vec::new(), Vec::new()),
+    };
     let mut beta = opt.mixing;
     let mut it = 0;
     while err > opt.tol && it < opt.max_iter {
@@ -479,7 +491,8 @@ fn anderson(
         f = f_new;
         err = e_new;
     }
-    (if e_best < err { y_best } else { y }, history)
+    let state = MixingHistory { dy, df };
+    (if e_best < err { y_best } else { y }, history, state)
 }
 
 impl<'a> Bop<'a> {
@@ -519,6 +532,23 @@ impl<'a> Bop<'a> {
         cell: &Cell,
         shifts0: Option<&[f64]>,
         opt: &ScfOptions,
+    ) -> ScfResult {
+        self.scf_continued(pos, cell, shifts0, opt, None)
+    }
+
+    /// As [`Bop::scf`], starting the Anderson mixing with the history of a
+    /// previous solve (`ScfResult::mixing`) of a nearby configuration, as in
+    /// molecular dynamics: the steps of the previous solve already describe
+    /// the response of the shifts, so the new solve converges in fewer
+    /// evaluations.  If that history misleads, the usual safeguard (restart
+    /// with an empty history) discards it.
+    pub fn scf_continued(
+        &self,
+        pos: &[[f64; 3]],
+        cell: &Cell,
+        shifts0: Option<&[f64]>,
+        opt: &ScfOptions,
+        previous: Option<&MixingHistory>,
     ) -> ScfResult {
         let n_shift = self.shift_len();
         let per_atom = n_shift / self.topo.n_atoms.max(1);
@@ -577,7 +607,7 @@ impl<'a> Bop<'a> {
             (f, err)
         };
         let y0: Vec<f64> = index.iter().map(|&q| x[q]).collect();
-        let (y, history) = anderson(eval, y0, opt);
+        let (y, history, mixing) = anderson(eval, y0, opt, previous);
         for (q, &v) in index.iter().zip(&y) {
             x[*q] = v;
         }
@@ -592,9 +622,12 @@ impl<'a> Bop<'a> {
                 history,
                 residual,
                 adjoint_iterations: 0,
+                mixing,
             };
         }
-        self.implicit_forces(pos, cell, x, &index, free, opt, history)
+        let mut r = self.implicit_forces(pos, cell, x, &index, free, opt, history);
+        r.mixing = mixing;
+        r
     }
 
     /// Everything at potential-condition shifts `x`, with the forces and
@@ -688,6 +721,7 @@ impl<'a> Bop<'a> {
             history,
             residual,
             adjoint_iterations: calls,
+            mixing: MixingHistory::default(),
         }
     }
 }

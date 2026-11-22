@@ -54,6 +54,7 @@ jobs:
         working-directory: bopfox-rs
         env:
           VIRTUAL_ENV: ${{ github.workspace }}/.venv
+      - run: uv pip install "ase>=3.23"  # for the calculator tests
       - run: uv run pytest -q bopfox-rs/tests
 
   build:

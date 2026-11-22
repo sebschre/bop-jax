@@ -9,6 +9,9 @@ description = "Analytic bond-order potentials in Rust with analytic forces"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
 
+[project.optional-dependencies]
+ase = ["ase>=3.23"]
+
 [tool.maturin]
 python-source = "python"
 module-name = "bopfox_rs._core"

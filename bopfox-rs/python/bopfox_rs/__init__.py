@@ -2,6 +2,7 @@
 
 ``Potential(model)`` takes a model as a JSON string or a dict (see
 ``model_from_bopjax`` to convert a bopjax configuration and parameter set).
+``bopfox_rs.calculator.BOPCalculator`` is an ASE calculator (needs ``ase``).
 """
 
 from __future__ import annotations
@@ -21,6 +22,10 @@ class Potential:
         self._core = _Potential(json.dumps(self.model))
         self.shifts_per_atom = self._core.shifts_per_atom
 
+    def clear_history(self):
+        """Forget the Anderson history kept for ``scf(reuse_history=True)``."""
+        self._core.clear_history()
+
     def compute(self, positions, species, cell=None, shifts=None, gradients=True):
         """Dict of numpy arrays: energy, energy_atom, fermi, n_shell, charge,
         moments, a_inf, b_inf (and moment when magnetic); with ``gradients``
@@ -34,7 +39,7 @@ class Potential:
 
     def scf(self, positions, species, cell=None, shifts0=None, tol=1e-10, max_iter=200,
             mixing=None, history=None, max_step=0.5, free=None, refresh=4,
-            condition="stationary", adjoint_tol=1e-10):
+            condition="stationary", adjoint_tol=1e-10, reuse_history=False):
         """Self-consistent onsite shifts by preconditioned Anderson mixing,
         from ``shifts0`` (default zero).  ``condition`` is "stationary"
         (dE/dshifts = 0, BOPfox; ``tol`` on max |dE/dshift|) or "potential"
@@ -42,6 +47,9 @@ class Potential:
         ``tol`` on max |K N - shifts|, forces by implicit differentiation with
         an adjoint solve to ``adjoint_tol``).  ``mixing`` and ``history``
         default to 1.0 and 24 (stationary) or 0.3 and 8 (potential).
+        ``reuse_history`` starts the Anderson mixing with the history of the
+        previous ``scf`` call of this object (a nearby configuration, as in
+        molecular dynamics; ``clear_history()`` forgets it).
         Returns the dict of ``compute`` at the converged shifts plus
         ``shifts`` (N, nspin, nshell), ``converged``, ``history`` (the
         convergence measure after each evaluation), ``residual`` and
@@ -54,7 +62,7 @@ class Potential:
         s = None if shifts0 is None else np.asarray(shifts0, dtype=float).ravel().tolist()
         fr = None if free is None else [bool(f) for f in np.asarray(free).ravel()]
         out = _arrays(self._core.scf(pos, sp, c, s, tol, max_iter, mixing, history, max_step, fr,
-                                       refresh, condition, adjoint_tol))
+                                       refresh, condition, adjoint_tol, reuse_history))
         out["shifts"] = out["shifts"].reshape(len(pos), -1, len(self.model["basis"]))
         return out
 
