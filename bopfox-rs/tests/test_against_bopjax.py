@@ -143,3 +143,44 @@ def test_scf_carbon_sp():
     cfg = bj.BOPConfig(**CARBON_CONFIG)
     pos, cell = lattice([[0, 0, 0]], 1.9218, 2, 0.02)
     compare_scf(cfg, carbon(), hamiltonian.v0_bond, pos, cell, np.zeros((8, 2)))
+
+
+def bcc_cluster(a=2.83):
+    """15-atom bcc cluster: a centre, its 8 nearest and 6 second neighbours."""
+    pts = [[0, 0, 0]] + [[x, y, z] for x in (-0.5, 0.5) for y in (-0.5, 0.5) for z in (-0.5, 0.5)]
+    pts += [[s * (i == 0), s * (i == 1), s * (i == 2)] for i in range(3) for s in (-1, 1)]
+    rng = np.random.default_rng(7)  # fixed: bopjax converges for these positions
+    return a * np.array(pts, dtype=float) + rng.normal(scale=0.03, size=(15, 3))
+
+
+@pytest.mark.parametrize("structure", ["bulk", "cluster"])
+def test_potential_condition(structure):
+    cfg = bj.BOPConfig(spin="collinear", **IRON_CONFIG)
+    params = iron()
+    if structure == "bulk":
+        pos, cell = lattice(BCC, 2.83, 2, 0.05)
+    else:
+        pos, cell = bcc_cluster(), None
+    n = len(pos)
+    shifts0 = np.zeros((n, 2, 1))
+    shifts0[:, 0], shifts0[:, 1] = -1.3, 1.3
+    topo = bj.build_topology(pos, [0] * n, cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2)
+    energy = bj.make_energy_fn(topo, cfg, radial=hamiltonian.v0_bond)
+    # bopjax's plain Anderson mixing needs a small step on the cluster, whose
+    # surface moments are close to saturation (3000 iterations there; bopfox-rs: ~120)
+    mixing = 0.1 if structure == "bulk" else 0.05
+    pot = bj.make_potential(energy, condition="potential", tol=1e-11, max_iter=3000, mixing=mixing)
+    c = None if cell is None else jnp.array(cell)
+    (e_ref, aux), g = jax.value_and_grad(lambda r: pot(r, c, params, jnp.array(shifts0)),
+                                         has_aux=True)(jnp.array(pos))
+    assert float(aux["scf_residual"]) < 1e-10
+
+    rs = bopfox_rs.Potential(bopfox_rs.model_from_bopjax(cfg, params, hamiltonian.v0_bond))
+    out = rs.scf(pos, [0] * n, cell, shifts0, condition="potential", tol=1e-11)
+    assert out["converged"]
+    assert out["energy"] == pytest.approx(float(e_ref), abs=1e-8)
+    np.testing.assert_allclose(out["shifts"], np.asarray(aux["shifts"]), atol=1e-8)
+    np.testing.assert_allclose(out["forces"], -np.asarray(g), atol=1e-7)
+    # not stationary, so the partial forces differ from the total ones
+    partial = rs.compute(pos, [0] * n, cell, out["shifts"])["forces"]
+    assert np.abs(partial - out["forces"]).max() > 1e-5

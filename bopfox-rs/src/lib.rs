@@ -22,4 +22,4 @@ pub mod scf;
 pub use energy::{Bop, Cell, Mode, Results};
 pub use geometry::Topology;
 pub use model::Model;
-pub use scf::{ScfOptions, ScfResult};
+pub use scf::{Condition, ScfOptions, ScfResult};

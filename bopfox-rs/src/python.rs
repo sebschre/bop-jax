@@ -1,6 +1,6 @@
 //! Python bindings (feature "python"): `bopfox_rs._core.Potential`.
 
-use crate::{Bop, Model, ScfOptions, Topology};
+use crate::{Bop, Condition, Model, ScfOptions, Topology};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -67,7 +67,8 @@ impl Potential {
     /// the self-consistency to those atoms.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (positions, species, cell=None, shifts0=None, tol=1e-10, max_iter=200,
-                        mixing=1.0, history=24, max_step=0.5, free=None, refresh=4))]
+                        mixing=None, history=None, max_step=0.5, free=None, refresh=4,
+                        condition="stationary", adjoint_tol=1e-10))]
     fn scf<'py>(
         &self,
         py: Python<'py>,
@@ -77,12 +78,19 @@ impl Potential {
         shifts0: Option<Vec<f64>>,
         tol: f64,
         max_iter: usize,
-        mixing: f64,
-        history: usize,
+        mixing: Option<f64>,
+        history: Option<usize>,
         max_step: f64,
         free: Option<Vec<bool>>,
         refresh: usize,
+        condition: &str,
+        adjoint_tol: f64,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let condition = match condition {
+            "stationary" => Condition::Stationary,
+            "potential" => Condition::Potential,
+            c => return Err(PyValueError::new_err(format!("unknown condition {c:?}"))),
+        };
         self.check(&positions, &species)?;
         let n_shift = positions.len() * self.shifts_per_atom();
         if shifts0.as_ref().is_some_and(|s| s.len() != n_shift) {
@@ -91,14 +99,20 @@ impl Potential {
         if free.as_ref().is_some_and(|f| f.len() != positions.len()) {
             return Err(PyValueError::new_err("free needs one entry per atom"));
         }
+        let base = match condition {
+            Condition::Stationary => ScfOptions::default(),
+            Condition::Potential => ScfOptions::potential(),
+        };
         let opt = ScfOptions {
             tol,
             max_iter,
-            mixing,
-            history,
+            mixing: mixing.unwrap_or(base.mixing),
+            history: history.unwrap_or(base.history),
             max_step,
             free,
             refresh,
+            condition,
+            adjoint_tol,
         };
         let m = &self.model;
         let r = py.allow_threads(|| {
@@ -110,6 +124,8 @@ impl Potential {
         d.set_item("shifts", r.shifts)?;
         d.set_item("converged", r.converged)?;
         d.set_item("history", r.history)?;
+        d.set_item("residual", r.residual)?;
+        d.set_item("adjoint_iterations", r.adjoint_iterations)?;
         Ok(d)
     }
 }
@@ -148,6 +164,7 @@ fn results_dict(py: Python<'_>, r: crate::Results, gradients: bool) -> PyResult<
             d.set_item("shift_gradient", r.shift_gradient)?;
         }
         d.set_item("dos", r.dos)?;
+        d.set_item("occupations", r.occupations)?;
         Ok(d)
     }
 }

@@ -240,3 +240,80 @@ fn frozen_atoms_keep_their_shifts() {
         }
     }
 }
+
+/// Potential condition: shifts = K N(shifts).  The energy is not stationary
+/// there, so the forces carry the response of the shifts (implicit function
+/// theorem); check them, and the virial, against finite differences of the
+/// self-consistent energy, for the magnetic iron model in a distorted cell.
+#[test]
+fn potential_condition_forces_are_total_derivatives() {
+    let m = iron();
+    let (pos, cell) = bcc(2.83, 2, 0.08);
+    let n = pos.len();
+    let topo = Topology::build(&pos, &vec![0; n], cell.as_ref(), m.rcut, m.nmom, m.rcut2);
+    let bop = Bop::new(&m, &topo);
+    let x0: Vec<f64> = (0..2 * n)
+        .map(|q| if q % 2 == 0 { -1.3 } else { 1.3 })
+        .collect();
+    let opt = ScfOptions {
+        tol: 1e-12,
+        ..ScfOptions::potential()
+    };
+    let r = bop.scf(&pos, &cell, Some(&x0), &opt);
+    println!(
+        "potential history {:?} adjoint {}",
+        r.history, r.adjoint_iterations
+    );
+    assert!(r.converged);
+    // not stationary: the plain partial derivative would be wrong
+    let gmax = r
+        .results
+        .shift_gradient
+        .iter()
+        .flatten()
+        .flatten()
+        .fold(0.0f64, |a, b| a.max(b.abs()));
+    assert!(
+        gmax > 1e-4,
+        "expected a non-stationary state, max|dE/dshift| = {gmax}"
+    );
+    let partial = bop.compute(&pos, &cell, &r.shifts, true);
+    let e = |p: &[[f64; 3]], c: &bopfox_rs::Cell| {
+        let topo = Topology::build(p, &vec![0; n], c.as_ref(), m.rcut, m.nmom, m.rcut2);
+        let s = Bop::new(&m, &topo).scf(p, c, Some(&r.shifts), &opt);
+        assert!(s.converged);
+        s.results.energy
+    };
+    let h = 1e-4;
+    let mut worst_partial: f64 = 0.0;
+    for (i, x) in [(0usize, 0usize), (3, 1), (7, 2)] {
+        let d = |t: f64| {
+            let mut p = pos.clone();
+            p[i][x] += t;
+            e(&p, &cell)
+        };
+        let fd = -(-d(2.0 * h) + 8.0 * d(h) - 8.0 * d(-h) + d(-2.0 * h)) / (12.0 * h);
+        assert!(
+            (r.results.forces[i][x] - fd).abs() < 1e-7,
+            "force {i} {x}: {} vs {fd}",
+            r.results.forces[i][x]
+        );
+        worst_partial = worst_partial.max((partial.forces[i][x] - fd).abs());
+    }
+    assert!(
+        worst_partial > 1e-5,
+        "partial forces should differ, by {worst_partial}"
+    );
+    let c = cell.unwrap();
+    let d = |t: f64| {
+        let def = |v: [f64; 3]| [v[0] * (1.0 + t), v[1], v[2]];
+        let p: Vec<[f64; 3]> = pos.iter().map(|&v| def(v)).collect();
+        e(&p, &Some([def(c[0]), def(c[1]), def(c[2])]))
+    };
+    let fd = (-d(2.0 * h) + 8.0 * d(h) - 8.0 * d(-h) + d(-2.0 * h)) / (12.0 * h);
+    assert!(
+        (r.results.virial[0][0] - fd).abs() < 1e-6,
+        "virial {} vs {fd}",
+        r.results.virial[0][0]
+    );
+}

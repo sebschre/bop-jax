@@ -33,12 +33,19 @@ class Potential:
         return _arrays(self._core.compute(pos, sp, c, s, gradients))
 
     def scf(self, positions, species, cell=None, shifts0=None, tol=1e-10, max_iter=200,
-            mixing=1.0, history=24, max_step=0.5, free=None, refresh=4):
-        """Self-consistent onsite shifts (dE/dshifts = 0, BOPfox's condition)
-        by preconditioned Anderson mixing, from ``shifts0`` (default zero).
+            mixing=None, history=None, max_step=0.5, free=None, refresh=4,
+            condition="stationary", adjoint_tol=1e-10):
+        """Self-consistent onsite shifts by preconditioned Anderson mixing,
+        from ``shifts0`` (default zero).  ``condition`` is "stationary"
+        (dE/dshifts = 0, BOPfox; ``tol`` on max |dE/dshift|) or "potential"
+        (shifts = K N, as ``bopjax.make_potential(condition="potential")``;
+        ``tol`` on max |K N - shifts|, forces by implicit differentiation with
+        an adjoint solve to ``adjoint_tol``).  ``mixing`` and ``history``
+        default to 1.0 and 24 (stationary) or 0.3 and 8 (potential).
         Returns the dict of ``compute`` at the converged shifts plus
-        ``shifts`` (N, nspin, nshell), ``converged`` and ``history`` (max
-        |dE/dshift| after each gradient evaluation).  ``free`` (N,) bools
+        ``shifts`` (N, nspin, nshell), ``converged``, ``history`` (the
+        convergence measure after each evaluation), ``residual`` and
+        ``adjoint_iterations``.  ``free`` (N,) bools
         restricts the self-consistency to those atoms; ``refresh`` is the number
         of gradient evaluations between updates of the preconditioner."""
         pos = np.asarray(positions, dtype=float).tolist()
@@ -47,7 +54,7 @@ class Potential:
         s = None if shifts0 is None else np.asarray(shifts0, dtype=float).ravel().tolist()
         fr = None if free is None else [bool(f) for f in np.asarray(free).ravel()]
         out = _arrays(self._core.scf(pos, sp, c, s, tol, max_iter, mixing, history, max_step, fr,
-                                       refresh))
+                                       refresh, condition, adjoint_tol))
         out["shifts"] = out["shifts"].reshape(len(pos), -1, len(self.model["basis"]))
         return out
 

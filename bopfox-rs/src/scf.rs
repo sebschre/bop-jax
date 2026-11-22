@@ -1,26 +1,48 @@
-//! Self-consistency: the onsite shifts at which the energy is stationary,
-//! dE/dshifts = 0 (the condition BOPfox solves), from gradients only.
+//! Self-consistency of the onsite shifts, from gradients only.
 //!
-//! The gradient is `g = chi (target - shifts) + delta` (`docs/formulation.md`
-//! of bopjax), with `chi = dN/dshifts` and `target = K N` the potentials the
-//! occupations imply (onsite Hubbard `J` and Stoner `I`).  Its Jacobian is
-//! close to `chi (K chi - 1)`.  The local approximation
-//! `chi ~ -diag(D)`, `D` the density of states of each atom, spin and shell at
-//! the Fermi level, gives a preconditioner that is block-diagonal in the atoms:
+//! Two conditions, as in `bopjax.make_potential`:
 //!
-//!   J0_i = D_i (K_i D_i + 1),   step = -J0_i^{-1} g_i
+//! * **stationary** (default, what BOPfox solves): dE/dshifts = 0.  The
+//!   energy is then stationary in the shifts and the forces are partial
+//!   derivatives.
+//! * **potential**: the shifts equal the potentials their occupations imply,
+//!   `shifts = K N(shifts)` (onsite Hubbard `J` and Stoner `I`), the usual
+//!   charge and spin self-consistency of tight binding.  It stays well
+//!   conditioned where moments saturate and the stationary point is far away,
+//!   but the energy is not stationary there: the forces carry the response of
+//!   the shifts, obtained by implicit differentiation (one adjoint linear solve,
+//!   see [`Bop::scf`]).
 //!
-//! It holds the right sign in the spin channel too, where a Stoner
-//! instability (`I D > 1`) makes the Jacobian change sign.  Anderson (Pulay)
-//! mixing of these preconditioned steps then converges like GMRES on the
-//! linearised problem with one gradient evaluation per iteration, and
-//! needs neither the Hessian nor Hessian-vector products.
+//! Both are solved by Anderson (Pulay) mixing of preconditioned steps, one
+//! energy evaluation per iteration and no Hessian.  The gradient is
+//! `g = chi (target - shifts) + delta` with `chi = dN/dshifts`, so
+//! `dg/dshifts ~ chi K chi - chi` and `d(target - shifts)/dshifts ~ K chi - 1`.
+//! The preconditioner models `chi = -(Q - q q^T / sigma)`: `Q` is the exact
+//! response of each atom's occupations to its own levels at fixed Fermi level
+//! (one tangent walk per shell, `local_response`), `q = Q 1`,
+//! `sigma = 1^T Q 1`, and the rank-one term keeps the electron count fixed.
+//! The resulting systems are solved exactly in O(N) (Sherman-Morrison), or by
+//! GMRES on the free levels when some atoms are frozen.  Measured Jacobians
+//! show that each ingredient matters: the DOS at the Fermi level underestimates
+//! the local response by a third, with `J` = 8 eV the fixed-N coupling between
+//! atoms is as large as the diagonal, and with Stoner magnetism the spin block
+//! can change sign.
 
-use crate::energy::{Bop, Cell, Mode, Results};
+use crate::energy::{add3, symmetrised, Bop, Cell, Mode, Results};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Condition {
+    /// dE/dshifts = 0 (BOPfox)
+    Stationary,
+    /// shifts = K N(shifts)
+    Potential,
+}
 
 #[derive(Clone, Debug)]
 pub struct ScfOptions {
-    /// convergence: max |dE/dshift| (eV)
+    pub condition: Condition,
+    /// convergence: max |dE/dshift| (stationary) or max |K N - shifts|
+    /// (potential), eV
     pub tol: f64,
     pub max_iter: usize,
     /// Anderson mixing parameter of the preconditioned step
@@ -32,15 +54,35 @@ pub struct ScfOptions {
     /// atoms whose shifts are solved for (default all); the others keep
     /// their starting shifts
     pub free: Option<Vec<bool>>,
-    /// gradient evaluations between updates of the local response in the
+    /// evaluations between updates of the local response in the
     /// preconditioner (1: every evaluation; each update costs one tangent
     /// walk per shell)
     pub refresh: usize,
+    /// relative tolerance of the adjoint solve (potential condition)
+    pub adjoint_tol: f64,
+}
+
+impl ScfOptions {
+    /// Defaults for the potential condition: smaller mixing and a shorter
+    /// history than for the stationary one.  Far from self-consistency, near
+    /// saturated moments (clusters, surfaces), longer histories carry stale
+    /// information and full steps overshoot.  Measured: a 15-atom iron cluster
+    /// converges in 80-120 evaluations with these settings and not at all
+    /// with mixing 0.5; bulk iron needs 20-30.
+    pub fn potential() -> Self {
+        ScfOptions {
+            condition: Condition::Potential,
+            mixing: 0.3,
+            history: 8,
+            ..Default::default()
+        }
+    }
 }
 
 impl Default for ScfOptions {
     fn default() -> Self {
         ScfOptions {
+            condition: Condition::Stationary,
             tol: 1e-10,
             max_iter: 200,
             mixing: 1.0,
@@ -48,6 +90,7 @@ impl Default for ScfOptions {
             max_step: 0.5,
             free: None,
             refresh: 4,
+            adjoint_tol: 1e-10,
         }
     }
 }
@@ -56,11 +99,16 @@ impl Default for ScfOptions {
 pub struct ScfResult {
     /// converged shifts, `[atom][spin][shell]` flattened
     pub shifts: Vec<f64>,
-    /// everything at the converged shifts, forces included
+    /// everything at the converged shifts, forces included (for the potential
+    /// condition with the response of the shifts)
     pub results: Results,
     pub converged: bool,
-    /// max |dE/dshift| after each gradient evaluation
+    /// the convergence measure after each evaluation
     pub history: Vec<f64>,
+    /// final convergence measure
+    pub residual: f64,
+    /// operator applications of the adjoint solve (potential condition)
+    pub adjoint_iterations: usize,
 }
 
 fn flatten(g: &[Vec<Vec<f64>>]) -> Vec<f64> {
@@ -116,39 +164,35 @@ fn solve_dense(a: &mut [f64], b: &mut [f64], n: usize) -> bool {
 /// an empty or full channel then gets about the potential-mixing step.
 const RESPONSE_FLOOR: f64 = 0.05;
 
-impl<'a> Bop<'a> {
-    /// Preconditioned step `-J0^{-1} g`.
-    ///
-    /// `J0 = chi K chi - chi` with `chi = -(Q - q q^T / sigma)`: `Q` is the
-    /// exact response of each atom's occupations to its own levels at fixed
-    /// Fermi level (block-diagonal), `q = Q 1`, `sigma = 1^T Q 1`; the
-    /// rank-one term keeps the electron count fixed (`chi 1 = 0`).  `K` is the
-    /// onsite Hubbard and Stoner kernel.  Solved exactly in O(N) with the
-    /// Sherman-Morrison formula; the uniform part of the step is arbitrary
-    /// (the energy does not depend on it) and is removed by the caller.
-    ///
-    /// With frozen atoms (`free`) the step of their levels is zero and the
-    /// remaining system `J0_ff step_f = -g_f` is solved by GMRES (applying
-    /// `J0` costs O(N)).
-    fn preconditioned_step(&self, res: &Results, g: &[f64], free: Option<&[bool]>) -> Vec<f64> {
-        let m = self.model;
+/// The model of the response and the onsite kernel, per atom.
+struct Precond {
+    n: usize,
+    nc: usize,
+    q: Vec<f64>,  // n * nc * nc, the local response Q (positive)
+    k: Vec<f64>,  // n * nc * nc, the kernel K
+    qv: Vec<f64>, // n * nc, Q 1
+    sigma: f64,
+    free: Option<Vec<bool>>,
+}
+
+impl Precond {
+    fn new(bop: &Bop, res: &Results, free: Option<&[bool]>) -> Self {
+        let m = bop.model;
         let ns = m.nspin();
         let nsh = m.basis.len();
         let nc = ns * nsh;
-        let n = self.topo.n_atoms;
-        // per atom: Q, K, q
-        let mut qmat = vec![0.0; n * nc * nc];
-        let mut kmat = vec![0.0; n * nc * nc];
-        let mut qvec = vec![0.0; n * nc];
+        let n = bop.topo.n_atoms;
+        let mut q = vec![0.0; n * nc * nc];
+        let mut k = vec![0.0; n * nc * nc];
+        let mut qv = vec![0.0; n * nc];
         for i in 0..n {
-            let sp = self.topo.species[i];
-            let qi = &mut qmat[i * nc * nc..(i + 1) * nc * nc];
+            let sp = bop.topo.species[i];
+            let qi = &mut q[i * nc * nc..(i + 1) * nc * nc];
             for s in 0..ns {
-                for k in 0..nsh {
-                    for k2 in 0..nsh {
-                        let (c, c2) = (s * nsh + k, s * nsh + k2);
-                        let r = &res.local_response[i][s];
-                        qi[c * nc + c2] = -0.5 * (r[k][k2] + r[k2][k]);
+                let r = &res.local_response[i][s];
+                for a in 0..nsh {
+                    for b in 0..nsh {
+                        qi[(s * nsh + a) * nc + s * nsh + b] = -0.5 * (r[a][b] + r[b][a]);
                     }
                 }
             }
@@ -156,108 +200,319 @@ impl<'a> Bop<'a> {
                 qi[c * nc + c] = qi[c * nc + c].max(RESPONSE_FLOOR);
             }
             for c in 0..nc {
-                qvec[i * nc + c] = (0..nc).map(|c2| qi[c * nc + c2]).sum();
+                qv[i * nc + c] = (0..nc).map(|c2| qi[c * nc + c2]).sum();
             }
-            let ki = &mut kmat[i * nc * nc..(i + 1) * nc * nc];
+            let ki = &mut k[i * nc * nc..(i + 1) * nc * nc];
             for c in 0..nc {
                 for c2 in 0..nc {
-                    let (s, k, s2, k2) = (c / nsh, c % nsh, c2 / nsh, c2 % nsh);
+                    let (s, a, s2, b) = (c / nsh, c % nsh, c2 / nsh, c2 % nsh);
                     let mut kk = m.hubbard[sp];
-                    if ns == 2 && k == k2 {
-                        let ist = m.stoner[sp][k];
+                    if ns == 2 && a == b {
+                        let ist = m.stoner[sp][a];
                         kk += if s == s2 { -0.5 * ist } else { 0.5 * ist };
                     }
                     ki[c * nc + c2] = kk;
                 }
             }
         }
-        let sigma: f64 = qvec.iter().sum();
-        let diag_step = |g: &[f64]| -> Vec<f64> {
-            (0..n * nc)
-                .map(|q| -g[q] / qmat[(q / nc) * nc * nc + (q % nc) * (nc + 1)])
-                .collect()
-        };
-        if let Some(free) = free {
-            let block = |mat: &[f64], v: &[f64]| -> Vec<f64> {
-                let mut out = vec![0.0; n * nc];
-                for i in 0..n {
-                    for r in 0..nc {
-                        out[i * nc + r] = (0..nc)
-                            .map(|c| mat[i * nc * nc + r * nc + c] * v[i * nc + c])
-                            .sum();
-                    }
-                }
-                out
-            };
-            let p_op = |v: &[f64]| -> Vec<f64> {
-                let t = dot(&qvec, v) / sigma;
-                let mut out = block(&qmat, v);
-                out.iter_mut().zip(&qvec).for_each(|(o, q)| *o -= q * t);
-                out
-            };
-            let mask = |v: &mut Vec<f64>| {
-                for q in 0..n * nc {
-                    if !free[q / nc] {
-                        v[q] = 0.0;
-                    }
-                }
-            };
-            let op = |v: &[f64]| -> Vec<f64> {
-                let pv = p_op(v);
-                let mut w = block(&kmat, &pv);
-                w.iter_mut().zip(v).for_each(|(a, b)| *a += b);
-                let mut out = p_op(&w);
-                mask(&mut out);
-                out
-            };
-            let mut b: Vec<f64> = g.iter().map(|x| -x).collect();
-            mask(&mut b);
-            return gmres(op, &b, 1e-8, 40, 400).unwrap_or_else(|| {
-                let mut d = diag_step(g);
-                mask(&mut d);
-                d
-            });
+        let sigma = qv.iter().sum();
+        Precond {
+            n,
+            nc,
+            q,
+            k,
+            qv,
+            sigma,
+            free: free.map(|f| f.to_vec()),
         }
-        let mut x1 = vec![0.0; n * nc];
-        let mut x2 = vec![0.0; n * nc];
-        let mut ok = sigma > 0.0;
-        for i in 0..n {
-            let qi = &qmat[i * nc * nc..(i + 1) * nc * nc];
-            let ki = &kmat[i * nc * nc..(i + 1) * nc * nc];
-            // u = -Q^{-1} g
-            let mut u: Vec<f64> = g[i * nc..(i + 1) * nc].iter().map(|x| -x).collect();
-            ok &= solve_dense(&mut qi.to_vec(), &mut u, nc);
-            // M = 1 + K Q
-            let mut mm = vec![0.0; nc * nc];
+    }
+
+    fn block(&self, mat: &[f64], v: &[f64]) -> Vec<f64> {
+        let nc = self.nc;
+        let mut out = vec![0.0; self.n * nc];
+        for i in 0..self.n {
+            for r in 0..nc {
+                out[i * nc + r] = (0..nc)
+                    .map(|c| mat[i * nc * nc + r * nc + c] * v[i * nc + c])
+                    .sum();
+            }
+        }
+        out
+    }
+
+    /// K v (the kernel is symmetric)
+    fn kernel(&self, v: &[f64]) -> Vec<f64> {
+        self.block(&self.k, v)
+    }
+
+    /// P v = Q v - q (q.v) / sigma  (= -chi v)
+    fn p(&self, v: &[f64]) -> Vec<f64> {
+        let t = dot(&self.qv, v) / self.sigma;
+        let mut out = self.block(&self.q, v);
+        out.iter_mut().zip(&self.qv).for_each(|(o, q)| *o -= q * t);
+        out
+    }
+
+    fn mask(&self, v: &mut [f64]) {
+        if let Some(f) = &self.free {
+            for (q, x) in v.iter_mut().enumerate() {
+                if !f[q / self.nc] {
+                    *x = 0.0;
+                }
+            }
+        }
+    }
+
+    /// `1 + A B` per atom block.
+    fn one_plus(&self, a: &[f64], b: &[f64]) -> Vec<f64> {
+        let nc = self.nc;
+        let mut out = vec![0.0; self.n * nc * nc];
+        for i in 0..self.n {
+            let o = i * nc * nc;
             for r in 0..nc {
                 for c in 0..nc {
-                    mm[r * nc + c] = if r == c { 1.0 } else { 0.0 }
+                    out[o + r * nc + c] = if r == c { 1.0 } else { 0.0 }
                         + (0..nc)
-                            .map(|t| ki[r * nc + t] * qi[t * nc + c])
+                            .map(|t| a[o + r * nc + t] * b[o + t * nc + c])
                             .sum::<f64>();
                 }
             }
-            let mut kq: Vec<f64> = (0..nc)
-                .map(|r| (0..nc).map(|t| ki[r * nc + t] * qvec[i * nc + t]).sum())
-                .collect();
-            ok &= solve_dense(&mut mm.clone(), &mut u, nc);
-            ok &= solve_dense(&mut mm, &mut kq, nc);
-            x1[i * nc..(i + 1) * nc].copy_from_slice(&u);
-            x2[i * nc..(i + 1) * nc].copy_from_slice(&kq);
         }
-        let denom = 1.0 - dot(&qvec, &x2) / sigma;
-        if ok && denom.abs() > 1e-12 {
-            let t = dot(&qvec, &x1) / denom;
-            let step: Vec<f64> = (0..n * nc).map(|q| x1[q] + x2[q] * t / sigma).collect();
-            if step.iter().all(|v| v.is_finite()) {
-                return step;
-            }
-        }
-        diag_step(g)
+        out
     }
 
-    /// Self-consistent shifts from `shifts0` (default zero), and the energy,
-    /// forces and everything else at them.
+    /// Solves `(B - a b^T / sigma) x = z`, B block-diagonal (Sherman-Morrison).
+    fn rank_one_solve(&self, bmat: &[f64], a: &[f64], b: &[f64], z: &[f64]) -> Option<Vec<f64>> {
+        let nc = self.nc;
+        let mut x1 = z.to_vec();
+        let mut x2 = a.to_vec();
+        for i in 0..self.n {
+            let blk = &bmat[i * nc * nc..(i + 1) * nc * nc];
+            if !solve_dense(&mut blk.to_vec(), &mut x1[i * nc..(i + 1) * nc], nc)
+                || !solve_dense(&mut blk.to_vec(), &mut x2[i * nc..(i + 1) * nc], nc)
+            {
+                return None;
+            }
+        }
+        let denom = 1.0 - dot(b, &x2) / self.sigma;
+        if self.sigma.is_nan() || self.sigma <= 0.0 || denom.abs() < 1e-12 {
+            return None;
+        }
+        let t = dot(b, &x1) / denom;
+        let x: Vec<f64> = x1
+            .iter()
+            .zip(&x2)
+            .map(|(u, v)| u + v * t / self.sigma)
+            .collect();
+        x.iter().all(|v| v.is_finite()).then_some(x)
+    }
+
+    /// Solve `op x = z` on the free levels (GMRES), x zero elsewhere.
+    fn masked_solve(&self, op: impl Fn(&[f64]) -> Vec<f64>, z: &[f64]) -> Option<Vec<f64>> {
+        let mut b = z.to_vec();
+        self.mask(&mut b);
+        let op = |v: &[f64]| {
+            let mut o = op(v);
+            self.mask(&mut o);
+            o
+        };
+        gmres(op, &b, 1e-8, 40, 400)
+    }
+
+    fn diagonal(&self, z: &[f64]) -> Vec<f64> {
+        let nc = self.nc;
+        let mut out: Vec<f64> = (0..self.n * nc)
+            .map(|q| z[q] / self.q[(q / nc) * nc * nc + (q % nc) * (nc + 1)])
+            .collect();
+        self.mask(&mut out);
+        out
+    }
+
+    /// Stationary condition: `step = -J0^{-1} g`, `J0 = P (K P + 1)`.
+    fn stationary(&self, g: &[f64]) -> Vec<f64> {
+        let neg: Vec<f64> = g.iter().map(|x| -x).collect();
+        let solved = if self.free.is_none() {
+            // P u = -g  =>  u = -Q^{-1} g (g sums to zero); then (1 + K P) step = u
+            let mut u = neg.clone();
+            let nc = self.nc;
+            let mut ok = true;
+            for i in 0..self.n {
+                ok &= solve_dense(
+                    &mut self.q[i * nc * nc..(i + 1) * nc * nc].to_vec(),
+                    &mut u[i * nc..(i + 1) * nc],
+                    nc,
+                );
+            }
+            if ok {
+                self.potential(&u)
+            } else {
+                None
+            }
+        } else {
+            self.masked_solve(
+                |v| {
+                    let pv = self.p(v);
+                    let mut w = self.kernel(&pv);
+                    w.iter_mut().zip(v).for_each(|(a, b)| *a += b);
+                    self.p(&w)
+                },
+                &neg,
+            )
+        };
+        solved.unwrap_or_else(|| self.diagonal(&neg))
+    }
+
+    /// `(1 + K P)^{-1} r`: the Newton step of the potential condition
+    /// `K N - shifts = r`, whose Jacobian is `K chi - 1 = -(1 + K P)`.
+    fn potential(&self, r: &[f64]) -> Option<Vec<f64>> {
+        if self.free.is_none() {
+            let kq = self.kernel(&self.qv);
+            self.rank_one_solve(&self.one_plus(&self.k, &self.q), &kq, &self.qv, r)
+        } else {
+            self.masked_solve(
+                |v| {
+                    let mut o = self.kernel(&self.p(v));
+                    o.iter_mut().zip(v).for_each(|(a, b)| *a += b);
+                    o
+                },
+                r,
+            )
+        }
+    }
+
+    /// `(1 + P K)^{-1} z`, the transpose of [`Precond::potential`].
+    fn adjoint(&self, z: &[f64]) -> Vec<f64> {
+        let solved = if self.free.is_none() {
+            let kq = self.kernel(&self.qv);
+            self.rank_one_solve(&self.one_plus(&self.q, &self.k), &self.qv, &kq, z)
+        } else {
+            self.masked_solve(
+                |v| {
+                    let mut o = self.p(&self.kernel(v));
+                    o.iter_mut().zip(v).for_each(|(a, b)| *a += b);
+                    o
+                },
+                z,
+            )
+        };
+        solved.unwrap_or_else(|| {
+            let mut o = z.to_vec();
+            self.mask(&mut o);
+            o
+        })
+    }
+}
+
+/// Anderson (type II, Pulay) mixing of the steps `f(y)` that `eval` returns
+/// together with the convergence measure.  Keeps the best iterate; when the
+/// measure grows tenfold over the best one it restarts from there with an
+/// empty history and half the mixing.  Returns the best iterate and the
+/// history of the measure.
+fn anderson(
+    mut eval: impl FnMut(&[f64]) -> (Vec<f64>, f64),
+    y0: Vec<f64>,
+    opt: &ScfOptions,
+) -> (Vec<f64>, Vec<f64>) {
+    let k = y0.len();
+    let mut y = y0;
+    let (mut f, mut err) = eval(&y);
+    let mut history = vec![err];
+    let (mut y_best, mut e_best) = (y.clone(), err);
+    let mut dy: Vec<Vec<f64>> = Vec::new();
+    let mut df: Vec<Vec<f64>> = Vec::new();
+    let mut beta = opt.mixing;
+    let mut it = 0;
+    while err > opt.tol && it < opt.max_iter {
+        it += 1;
+        let h = df.len();
+        let mut gamma = vec![0.0; h];
+        if h > 0 {
+            let mut a = vec![0.0; h * h];
+            for r in 0..h {
+                for c in 0..h {
+                    a[r * h + c] = dot(&df[r], &df[c]);
+                }
+            }
+            let diag = (0..h).map(|r| a[r * h + r]).fold(0.0, f64::max);
+            for r in 0..h {
+                a[r * h + r] += 1e-10 * diag + 1e-300;
+            }
+            let mut b: Vec<f64> = (0..h).map(|r| dot(&df[r], &f)).collect();
+            if solve_dense(&mut a, &mut b, h) {
+                gamma = b;
+            } else {
+                dy.clear();
+                df.clear();
+            }
+        }
+        let mut y_new: Vec<f64> = (0..k).map(|q| y[q] + beta * f[q]).collect();
+        for (j, gm) in gamma.iter().enumerate().take(df.len()) {
+            for q in 0..k {
+                y_new[q] -= gm * (dy[j][q] + beta * df[j][q]);
+            }
+        }
+        if y_new.iter().any(|v| !v.is_finite()) {
+            y_new = (0..k).map(|q| y[q] + beta * f[q]).collect();
+        }
+        let (f_new, e_new) = eval(&y_new);
+        history.push(e_new);
+        if e_new < e_best {
+            e_best = e_new;
+            y_best.clone_from(&y_new);
+        }
+        if e_new.is_nan() || e_new > 10.0 * e_best {
+            dy.clear();
+            df.clear();
+            beta *= 0.5;
+            y.clone_from(&y_best);
+            let (fb, eb) = eval(&y);
+            history.push(eb);
+            f = fb;
+            err = eb;
+            continue;
+        }
+        dy.insert(0, (0..k).map(|q| y_new[q] - y[q]).collect());
+        df.insert(0, (0..k).map(|q| f_new[q] - f[q]).collect());
+        dy.truncate(opt.history);
+        df.truncate(opt.history);
+        y = y_new;
+        f = f_new;
+        err = e_new;
+    }
+    (if e_best < err { y_best } else { y }, history)
+}
+
+impl<'a> Bop<'a> {
+    /// The potentials the occupations imply, `K N` (flat like the shifts).
+    fn potential_target(&self, res: &Results) -> Vec<f64> {
+        let m = self.model;
+        let (ns, nsh) = (m.nspin(), m.basis.len());
+        let mut t = vec![0.0; self.shift_len()];
+        for i in 0..self.topo.n_atoms {
+            let sp = self.topo.species[i];
+            for s in 0..ns {
+                for k in 0..nsh {
+                    let mut v = m.hubbard[sp] * res.charge[i];
+                    if ns == 2 {
+                        let mk = res.occupations[i][0][k] - res.occupations[i][1][k];
+                        v += if s == 0 { -0.5 } else { 0.5 } * m.stoner[sp][k] * mk;
+                    }
+                    t[(i * ns + s) * nsh + k] = v;
+                }
+            }
+        }
+        t
+    }
+
+    /// Self-consistent shifts from `shifts0` (default zero) under
+    /// `opt.condition`, and the energy, forces and everything else at them.
+    ///
+    /// For the potential condition `r(x, R) = K N(x, R) - x = 0` the energy is
+    /// not stationary in the shifts `x`, and
+    /// `dE/dR = dE/dR|_x - u^T dr/dR` with `(dr/dx)^T u = dE/dx`.  The adjoint
+    /// system is solved by right-preconditioned GMRES; each application of
+    /// `(dr/dx)^T u = chi^T K u - u` is one backward pass seeded with the
+    /// occupations (no bond derivatives), and `u^T dr/dR` one more with them.
     pub fn scf(
         &self,
         pos: &[[f64; 3]],
@@ -273,39 +528,44 @@ impl<'a> Bop<'a> {
             None => (0..n_shift).collect(),
             Some(f) => (0..n_shift).filter(|&q| f[q / per_atom]).collect(),
         };
-        // with every level free a uniform shift leaves the energy unchanged:
-        // keep the mean of the shifts where it started
         let all_free = index.len() == n_shift;
+        let free = if all_free { None } else { opt.free.as_deref() };
         let k = index.len();
+        let stationary = opt.condition == Condition::Stationary;
 
         let mut evals = 0usize;
-        let mut response: Vec<Vec<Vec<Vec<f64>>>> = Vec::new();
-        let mut eval = |y: &[f64], x: &mut Vec<f64>| -> (Results, Vec<f64>, f64) {
+        let mut pre: Option<Precond> = None;
+        let eval = |y: &[f64]| -> (Vec<f64>, f64) {
+            let mut xx = x.clone();
             for (q, &v) in index.iter().zip(y) {
-                x[*q] = v;
+                xx[*q] = v;
             }
-            let fresh = evals.is_multiple_of(opt.refresh.max(1));
+            let fresh = pre.is_none() || evals.is_multiple_of(opt.refresh.max(1));
             evals += 1;
-            let mode = if fresh {
-                Mode::ScfStep
-            } else {
-                Mode::ShiftGradient
+            let mode = match (stationary, fresh) {
+                (true, true) => Mode::ScfStep,
+                (true, false) => Mode::ShiftGradient,
+                (false, true) => Mode::Response,
+                (false, false) => Mode::Energy,
             };
-            let mut res = self.compute_mode(pos, cell, x, mode);
+            let res = self.compute_mode(pos, cell, &xx, mode);
             if fresh {
-                response.clone_from(&res.local_response);
-            } else {
-                res.local_response.clone_from(&response);
+                pre = Some(Precond::new(self, &res, free));
             }
-            let g = flatten(&res.shift_gradient);
-            let gmax = max_abs(index.iter().map(|&q| g[q]));
-            let full = self.preconditioned_step(
-                &res,
-                &g,
-                if all_free { None } else { opt.free.as_deref() },
-            );
+            let pc = pre.as_ref().unwrap();
+            let (full, err) = if stationary {
+                let g = flatten(&res.shift_gradient);
+                (pc.stationary(&g), max_abs(index.iter().map(|&q| g[q])))
+            } else {
+                let t = self.potential_target(&res);
+                let r: Vec<f64> = t.iter().zip(&xx).map(|(a, b)| a - b).collect();
+                let err = max_abs(index.iter().map(|&q| r[q]));
+                (pc.potential(&r).unwrap_or_else(|| r.clone()), err)
+            };
             let mut f: Vec<f64> = index.iter().map(|&q| full[q]).collect();
-            if all_free && k > 0 {
+            // with every level free a uniform shift leaves the energy
+            // unchanged: keep the mean of the shifts where it started
+            if stationary && all_free && k > 0 {
                 let mean = f.iter().sum::<f64>() / k as f64;
                 f.iter_mut().for_each(|v| *v -= mean);
             }
@@ -314,90 +574,120 @@ impl<'a> Bop<'a> {
                 let s = opt.max_step / fmax;
                 f.iter_mut().for_each(|v| *v *= s);
             }
-            (res, f, gmax)
+            (f, err)
         };
-
-        let mut y: Vec<f64> = index.iter().map(|&q| x[q]).collect();
-        let (_, mut f, mut gmax) = eval(&y, &mut x);
-        let mut history = vec![gmax];
-        let (mut y_best, mut g_best) = (y.clone(), gmax);
-        let mut dy: Vec<Vec<f64>> = Vec::new();
-        let mut df: Vec<Vec<f64>> = Vec::new();
-        let mut beta = opt.mixing;
-        let mut it = 0;
-        while gmax > opt.tol && it < opt.max_iter {
-            it += 1;
-            // Anderson: minimise |f - sum gamma_j df_j| over the history
-            let h = df.len();
-            let mut gamma = vec![0.0; h];
-            if h > 0 {
-                let mut a = vec![0.0; h * h];
-                for r in 0..h {
-                    for c in 0..h {
-                        a[r * h + c] = dot(&df[r], &df[c]);
-                    }
-                }
-                let diag = (0..h).map(|r| a[r * h + r]).fold(0.0, f64::max);
-                for r in 0..h {
-                    a[r * h + r] += 1e-10 * diag + 1e-300;
-                }
-                let mut b: Vec<f64> = (0..h).map(|r| dot(&df[r], &f)).collect();
-                if solve_dense(&mut a, &mut b, h) {
-                    gamma = b;
-                } else {
-                    dy.clear();
-                    df.clear();
-                }
-            }
-            let mut y_new: Vec<f64> = (0..k).map(|q| y[q] + beta * f[q]).collect();
-            for (j, gm) in gamma.iter().enumerate().take(df.len()) {
-                for q in 0..k {
-                    y_new[q] -= gm * (dy[j][q] + beta * df[j][q]);
-                }
-            }
-            if y_new.iter().any(|v| !v.is_finite()) {
-                y_new = (0..k).map(|q| y[q] + beta * f[q]).collect();
-            }
-            let (_, f_new, g_new) = eval(&y_new, &mut x);
-            history.push(g_new);
-            if g_new < g_best {
-                g_best = g_new;
-                y_best.clone_from(&y_new);
-            }
-            if g_new.is_nan() || g_new > 10.0 * g_best {
-                // diverging: restart from the best iterate with less mixing
-                dy.clear();
-                df.clear();
-                beta *= 0.5;
-                y.clone_from(&y_best);
-                let (_, fb, gb) = eval(&y, &mut x);
-                history.push(gb);
-                f = fb;
-                gmax = gb;
-                continue;
-            }
-            dy.insert(0, (0..k).map(|q| y_new[q] - y[q]).collect());
-            df.insert(0, (0..k).map(|q| f_new[q] - f[q]).collect());
-            dy.truncate(opt.history);
-            df.truncate(opt.history);
-            y = y_new;
-            f = f_new;
-            gmax = g_new;
-        }
-        if g_best < gmax {
-            y = y_best;
-        }
+        let y0: Vec<f64> = index.iter().map(|&q| x[q]).collect();
+        let (y, history) = anderson(eval, y0, opt);
         for (q, &v) in index.iter().zip(&y) {
             x[*q] = v;
         }
-        let results = self.compute_mode(pos, cell, &x, Mode::Full);
-        let g = flatten(&results.shift_gradient);
-        let gmax = max_abs(index.iter().map(|&q| g[q]));
+        if stationary {
+            let results = self.compute_mode(pos, cell, &x, Mode::Full);
+            let g = flatten(&results.shift_gradient);
+            let residual = max_abs(index.iter().map(|&q| g[q]));
+            return ScfResult {
+                shifts: x,
+                results,
+                converged: residual <= opt.tol,
+                history,
+                residual,
+                adjoint_iterations: 0,
+            };
+        }
+        self.implicit_forces(pos, cell, x, &index, free, opt, history)
+    }
+
+    /// Everything at potential-condition shifts `x`, with the forces and
+    /// virial of the implicit function `x(R)`.
+    #[allow(clippy::too_many_arguments)]
+    fn implicit_forces(
+        &self,
+        pos: &[[f64; 3]],
+        cell: &Cell,
+        x: Vec<f64>,
+        index: &[usize],
+        free: Option<&[bool]>,
+        opt: &ScfOptions,
+        history: Vec<f64>,
+    ) -> ScfResult {
+        let n = self.topo.n_atoms;
+        let n_shift = self.shift_len();
+        let fw = self.forward(pos, cell, &x, true, true);
+        let (mut res, p) = self.assemble(&fw, true);
+        let mut grad = vec![[0.0; 3]; n];
+        let mut virial = [[0.0; 3]; 3];
+        if let Some(rep) = &self.model.repulsion {
+            let (e_rep, g_rep, w_rep) = self.repulsion(rep, pos, cell, true);
+            for i in 0..n {
+                res.energy_atom[i] += e_rep[i];
+                for c in 0..3 {
+                    grad[i][c] += g_rep[i][c];
+                }
+            }
+            add3(&mut virial, &w_rep);
+        }
+        res.energy = res.energy_atom.iter().sum();
+        let (sg, g_e, w_e) = self.seeded_backward(&fw, pos, cell, 1.0, &p, true);
+        for i in 0..n {
+            for c in 0..3 {
+                grad[i][c] += g_e[i][c];
+            }
+        }
+        add3(&mut virial, &w_e);
+        let t = self.potential_target(&res);
+        let residual = max_abs(index.iter().map(|&q| t[q] - x[q]));
+
+        // adjoint: (dr/dx)^T u = dE/dx on the free levels
+        let pc = Precond::new(self, &res, free);
+        let embed = |u: &[f64]| {
+            let mut full = vec![0.0; n_shift];
+            for (q, &v) in index.iter().zip(u) {
+                full[*q] = v;
+            }
+            full
+        };
+        let restrict = |full: &[f64]| -> Vec<f64> { index.iter().map(|&q| full[q]).collect() };
+        let a_t = |u: &[f64]| -> Vec<f64> {
+            let v = pc.kernel(&embed(u));
+            let (chi_t, _, _) =
+                self.seeded_backward(&fw, pos, cell, 0.0, &self.unflatten(&v), false);
+            restrict(&chi_t).iter().zip(u).map(|(a, b)| a - b).collect()
+        };
+        // right preconditioner M^{-1} ~ (dr/dx)^{-T} = -(1 + P K)^{-1}
+        let m_inv = |z: &[f64]| -> Vec<f64> {
+            restrict(&pc.adjoint(&embed(z)))
+                .iter()
+                .map(|v| -v)
+                .collect()
+        };
+        let rhs = restrict(&sg);
+        let (z, calls) = gmres_count(|z| a_t(&m_inv(z)), &rhs, opt.adjoint_tol, 30, 300);
+        let adjoint_ok = z.is_some();
+        let u = m_inv(&z.unwrap_or_else(|| vec![0.0; rhs.len()]));
+        // u^T dr/dR = d(v.N)/dR with v = K u
+        let v = pc.kernel(&embed(&u));
+        let (_, g_s, w_s) = self.seeded_backward(&fw, pos, cell, 0.0, &self.unflatten(&v), true);
+        for i in 0..n {
+            for c in 0..3 {
+                grad[i][c] -= g_s[i][c];
+            }
+        }
+        for a in 0..3 {
+            for b in 0..3 {
+                virial[a][b] -= w_s[a][b];
+            }
+        }
+        res.forces = grad.iter().map(|g| [-g[0], -g[1], -g[2]]).collect();
+        res.virial = symmetrised(virial);
+        res.shift_gradient = self.unflatten(&sg);
+        res.moments = fw.mu;
         ScfResult {
             shifts: x,
-            results,
-            converged: gmax <= opt.tol,
+            results: res,
+            converged: residual <= opt.tol && adjoint_ok,
             history,
+            residual,
+            adjoint_iterations: calls,
         }
     }
 }
@@ -410,6 +700,33 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 /// `|op x - b| <= tol |b|`.
 fn gmres(
     op: impl Fn(&[f64]) -> Vec<f64>,
+    b: &[f64],
+    tol: f64,
+    restart: usize,
+    max_iter: usize,
+) -> Option<Vec<f64>> {
+    gmres_count(op, b, tol, restart, max_iter).0
+}
+
+/// As [`gmres`], also returning the number of operator applications.
+fn gmres_count(
+    op: impl Fn(&[f64]) -> Vec<f64>,
+    b: &[f64],
+    tol: f64,
+    restart: usize,
+    max_iter: usize,
+) -> (Option<Vec<f64>>, usize) {
+    let calls = std::cell::Cell::new(0usize);
+    let counted = |v: &[f64]| {
+        calls.set(calls.get() + 1);
+        op(v)
+    };
+    let x = gmres_inner(&counted, b, tol, restart, max_iter);
+    (x, calls.get())
+}
+
+fn gmres_inner(
+    op: &impl Fn(&[f64]) -> Vec<f64>,
     b: &[f64],
     tol: f64,
     restart: usize,
