@@ -281,3 +281,21 @@ def test_magnetic_field(spin, xi):
     assert out["converged"]
     assert out["energy"] == pytest.approx(ref.energy, abs=1e-9)
     np.testing.assert_allclose(out["shifts"], np.asarray(ref.shifts), atol=1e-7)
+
+
+@pytest.mark.parametrize("bandwidth", ["beerpettiforaoki", "beerpettiforaoki_bopfox"])
+def test_beer_pettifor_aoki_bandwidth(bandwidth):
+    cfg = bj.BOPConfig(nmom=9, rcut=3.3, dcut=0.5, bandwidth=bandwidth)
+    pos, cell = lattice(FCC, 3.5, 1, 0.08)
+    compare(cfg, canonical_d(hubbard=8.0), hamiltonian.powerlaw, pos, cell,
+            RNG.normal(scale=0.01, size=(4, 1)))
+
+
+def test_electronic_temperature():
+    """Mermin free energy at kT = 0.1 eV: at given shifts and self-consistently."""
+    cfg = bj.BOPConfig(spin="collinear", kT=0.1, **IRON_CONFIG)
+    pos, cell = lattice(BCC, 2.83, 2, 0.04)
+    shifts0 = np.zeros((len(pos), 2, 1))
+    shifts0[:, 0], shifts0[:, 1] = -1.3, 1.3
+    compare(cfg, iron(), hamiltonian.v0_bond, pos, cell, shifts0 + 0.01)
+    compare_scf(cfg, iron(), hamiltonian.v0_bond, pos, cell, shifts0)

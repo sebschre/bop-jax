@@ -97,6 +97,7 @@ pub struct Bop<'a> {
     orb_shell: Vec<usize>,
     degeneracy: Vec<f64>,
     kernel: Vec<f64>,
+    smear: Option<expansion::Smearing>,
     noncollinear: bool,
     /// local spin axes (noncollinear), default all along z
     axes: Vec<[f64; 3]>,
@@ -233,6 +234,7 @@ impl<'a> Bop<'a> {
             orb_shell,
             degeneracy,
             kernel: expansion::kernel(model),
+            smear: expansion::smearing(model),
             noncollinear: model.spin == crate::model::Spin::Noncollinear,
             axes: vec![[0.0, 0.0, 1.0]; topo.n_atoms],
             spin_orbit: Self::spin_orbit_blocks(model, &slices_for_so(model), norb),
@@ -382,7 +384,7 @@ impl<'a> Bop<'a> {
             for at in locals {
                 for sp in at {
                     for (k, l) in sp.iter().enumerate() {
-                        s += self.degeneracy[k] * l.fill(ef);
+                        s += self.degeneracy[k] * l.fill(ef, self.smear.as_ref());
                     }
                 }
             }
@@ -391,8 +393,8 @@ impl<'a> Bop<'a> {
         let mut lo = f64::INFINITY;
         let mut hi = f64::NEG_INFINITY;
         for l in locals.iter().flatten().flatten() {
-            lo = lo.min(l.ainf - 2.0 * l.binf);
-            hi = hi.max(l.ainf + 2.0 * l.binf);
+            lo = lo.min(l.ainf - 2.0 * l.binf - 40.0 * self.model.kt);
+            hi = hi.max(l.ainf + 2.0 * l.binf + 40.0 * self.model.kt);
         }
         for _ in 0..100 {
             let mid = 0.5 * (lo + hi);
@@ -409,7 +411,7 @@ impl<'a> Bop<'a> {
             for at in locals {
                 for sp in at {
                     for (k, l) in sp.iter().enumerate() {
-                        let (fd, _) = expansion::filling_and_bond_energy(
+                        let (fd, _) = expansion::filling_bond(
                             &l.sigma
                                 .iter()
                                 .map(|&x| Dual::<1>::cst(x))
@@ -418,6 +420,7 @@ impl<'a> Bop<'a> {
                             Dual::cst(l.binf),
                             Dual::<1>::var(ef, 0),
                             Dual::cst(l.gamma0),
+                            self.smear.as_ref(),
                         );
                         f += self.degeneracy[k] * fd.v;
                         dos += self.degeneracy[k] * fd.d[0];
@@ -501,7 +504,7 @@ impl<'a> Bop<'a> {
                 at.iter()
                     .map(|sp| {
                         sp.iter()
-                            .map(|x| local_derivs(x, ef, m, &self.kernel))
+                            .map(|x| local_derivs(x, ef, m, &self.kernel, self.smear.as_ref()))
                             .collect()
                     })
                     .collect()

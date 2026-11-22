@@ -203,6 +203,21 @@ fn check_fd(m: &Model, pos: &[[f64; 3]], species: &[usize], cell: &Cell, shifts:
 }
 
 #[test]
+fn electronic_temperature_derivatives() {
+    let mut m = canonical_d(9, 3.3, 0.5, 8.0);
+    m.bandwidth = bopfox_rs::model::Bandwidth::Averaged;
+    m.kt = 0.1;
+    check_fd(
+        &m,
+        &distorted(),
+        &[0; 4],
+        &cubic(A),
+        &[0.01, -0.02, 0.005, 0.003],
+        1e-7,
+    );
+}
+
+#[test]
 fn d_band_derivatives_match_finite_differences() {
     let mut m = canonical_d(9, 3.3, 0.5, 8.0);
     m.bandwidth = bopfox_rs::model::Bandwidth::Averaged;
@@ -231,6 +246,18 @@ fn terminators_and_kernel_derivatives() {
             Kernel::Jackson,
             Bandwidth::Highest,
             7,
+        ),
+        (
+            Terminator::None,
+            Kernel::None,
+            Bandwidth::Beerpettiforaoki,
+            9,
+        ),
+        (
+            Terminator::Constantabn,
+            Kernel::None,
+            Bandwidth::BeerpettiforaokiBopfox,
+            8,
         ),
     ] {
         let mut m = canonical_d(nmom, 3.3, 0.5, 4.0);

@@ -107,8 +107,172 @@ fn heights(cell: &[[f64; 3]; 3]) -> [f64; 3] {
     ]
 }
 
-/// All pairs closer than `rcut` (brute force over atoms and lattice images).
+/// All pairs closer than `rcut`: binned (linear in the number of atoms)
+/// when the cell holds at least three bins of width `rcut` along every
+/// lattice direction (or always, for a finite cluster), otherwise by brute
+/// force over atoms and lattice images.
 pub fn neighbours(pos: &[[f64; 3]], cell: Option<&[[f64; 3]; 3]>, rcut: f64) -> NeighbourList {
+    match cell {
+        None => binned_open(pos, rcut),
+        Some(c) => {
+            let h = heights(c);
+            let nb: Vec<usize> = h.iter().map(|hd| (hd / rcut).floor() as usize).collect();
+            if nb.iter().all(|&b| b >= 3) {
+                binned_periodic(pos, c, rcut, [nb[0], nb[1], nb[2]])
+            } else {
+                brute_force(pos, cell, rcut)
+            }
+        }
+    }
+}
+
+fn from_rows(rows: Vec<Vec<(usize, [i32; 3])>>) -> NeighbourList {
+    let mut nl = NeighbourList {
+        start: vec![0],
+        ..Default::default()
+    };
+    for mut row in rows {
+        row.sort_unstable(); // a deterministic order, whatever the search
+        for (j, t) in row {
+            nl.j.push(j);
+            nl.t.push(t);
+        }
+        nl.start.push(nl.j.len());
+    }
+    nl
+}
+
+/// Fractional coordinates are `s_d = sum_x pos_x inv[x][d]`.
+fn inverse(c: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let det = dot(c[0], cross(c[1], c[2]));
+    let r = [cross(c[1], c[2]), cross(c[2], c[0]), cross(c[0], c[1])];
+    let mut inv = [[0.0; 3]; 3];
+    for x in 0..3 {
+        for d in 0..3 {
+            inv[x][d] = r[d][x] / det;
+        }
+    }
+    inv
+}
+
+fn binned_periodic(
+    pos: &[[f64; 3]],
+    c: &[[f64; 3]; 3],
+    rcut: f64,
+    nb: [usize; 3],
+) -> NeighbourList {
+    let inv = inverse(c);
+    let n = pos.len();
+    // wrapped fractional coordinates and the lattice shift that wraps them
+    let mut frac = vec![[0.0; 3]; n];
+    let mut wrap = vec![[0i32; 3]; n];
+    let mut bin_of = vec![[0usize; 3]; n];
+    for i in 0..n {
+        for d in 0..3 {
+            let s = pos[i][0] * inv[0][d] + pos[i][1] * inv[1][d] + pos[i][2] * inv[2][d];
+            let f = s.floor();
+            frac[i][d] = s - f;
+            wrap[i][d] = f as i32;
+            bin_of[i][d] = ((frac[i][d] * nb[d] as f64) as usize).min(nb[d] - 1);
+        }
+    }
+    let idx = |b: [usize; 3]| (b[0] * nb[1] + b[1]) * nb[2] + b[2];
+    let mut bins: Vec<Vec<usize>> = vec![Vec::new(); nb[0] * nb[1] * nb[2]];
+    for i in 0..n {
+        bins[idx(bin_of[i])].push(i);
+    }
+    let r2 = rcut * rcut;
+    let rows = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mut row = Vec::new();
+            for dx in -1i32..=1 {
+                for dy in -1i32..=1 {
+                    for dz in -1i32..=1 {
+                        let mut b = [0usize; 3];
+                        let mut w = [0i32; 3];
+                        for (d, dd) in [dx, dy, dz].into_iter().enumerate() {
+                            let v = bin_of[i][d] as i32 + dd;
+                            w[d] = v.div_euclid(nb[d] as i32);
+                            b[d] = v.rem_euclid(nb[d] as i32) as usize;
+                        }
+                        for &j in &bins[idx(b)] {
+                            let ds = [
+                                frac[j][0] + w[0] as f64 - frac[i][0],
+                                frac[j][1] + w[1] as f64 - frac[i][1],
+                                frac[j][2] + w[2] as f64 - frac[i][2],
+                            ];
+                            let mut dv = [0.0; 3];
+                            for x in 0..3 {
+                                dv[x] = ds[0] * c[0][x] + ds[1] * c[1][x] + ds[2] * c[2][x];
+                            }
+                            let dd = dot(dv, dv);
+                            if dd < r2 && dd > 1e-16 {
+                                // translation of j in the original (unwrapped) frame
+                                let t = [
+                                    w[0] + wrap[i][0] - wrap[j][0],
+                                    w[1] + wrap[i][1] - wrap[j][1],
+                                    w[2] + wrap[i][2] - wrap[j][2],
+                                ];
+                                row.push((j, t));
+                            }
+                        }
+                    }
+                }
+            }
+            row
+        })
+        .collect();
+    from_rows(rows)
+}
+
+fn binned_open(pos: &[[f64; 3]], rcut: f64) -> NeighbourList {
+    let n = pos.len();
+    let mut lo = [f64::INFINITY; 3];
+    for p in pos {
+        for d in 0..3 {
+            lo[d] = lo[d].min(p[d]);
+        }
+    }
+    let key =
+        |p: &[f64; 3]| -> [i64; 3] { [0, 1, 2].map(|d| ((p[d] - lo[d]) / rcut).floor() as i64) };
+    let mut bins: HashMap<[i64; 3], Vec<usize>> = HashMap::new();
+    for (i, p) in pos.iter().enumerate() {
+        bins.entry(key(p)).or_default().push(i);
+    }
+    let r2 = rcut * rcut;
+    let rows = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let k = key(&pos[i]);
+            let mut row = Vec::new();
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(list) = bins.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) {
+                            for &j in list {
+                                let d = [
+                                    pos[j][0] - pos[i][0],
+                                    pos[j][1] - pos[i][1],
+                                    pos[j][2] - pos[i][2],
+                                ];
+                                let dd = dot(d, d);
+                                if dd < r2 && dd > 1e-16 {
+                                    row.push((j, [0, 0, 0]));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            row
+        })
+        .collect();
+    from_rows(rows)
+}
+
+/// All pairs closer than `rcut`, brute force over atoms and lattice images.
+pub fn brute_force(pos: &[[f64; 3]], cell: Option<&[[f64; 3]; 3]>, rcut: f64) -> NeighbourList {
     let shifts: Vec<([i32; 3], [f64; 3])> = match cell {
         None => vec![([0, 0, 0], [0.0; 3])],
         Some(c) => {
@@ -150,18 +314,7 @@ pub fn neighbours(pos: &[[f64; 3]], cell: Option<&[[f64; 3]; 3]>, rcut: f64) -> 
             row
         })
         .collect();
-    let mut nl = NeighbourList {
-        start: vec![0],
-        ..Default::default()
-    };
-    for row in rows {
-        for (j, t) in row {
-            nl.j.push(j);
-            nl.t.push(t);
-        }
-        nl.start.push(nl.j.len());
-    }
-    nl
+    from_rows(rows)
 }
 
 type Key = (usize, i32, i32, i32);
@@ -230,6 +383,46 @@ impl Topology {
             nbr,
             clusters,
             nbr2,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lists_equal(a: &NeighbourList, b: &NeighbourList) {
+        assert_eq!(a.start, b.start);
+        assert_eq!(a.j, b.j);
+        assert_eq!(a.t, b.t);
+    }
+
+    #[test]
+    fn binned_search_finds_the_same_pairs() {
+        // a skewed periodic cell with atoms outside it, and an open cluster
+        let mut seed = 7u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as f64 / u64::MAX as f64
+        };
+        let cell = [[12.0, 0.0, 0.0], [2.5, 11.0, 0.0], [-1.5, 1.0, 13.0]];
+        let pos: Vec<[f64; 3]> = (0..300)
+            .map(|_| {
+                let s = [rnd() * 1.4 - 0.2, rnd() * 1.4 - 0.2, rnd() * 1.4 - 0.2];
+                [0, 1, 2].map(|x| s[0] * cell[0][x] + s[1] * cell[1][x] + s[2] * cell[2][x])
+            })
+            .collect();
+        for rcut in [2.5, 3.9] {
+            lists_equal(
+                &neighbours(&pos, Some(&cell), rcut),
+                &brute_force(&pos, Some(&cell), rcut),
+            );
+            lists_equal(
+                &neighbours(&pos, None, rcut),
+                &brute_force(&pos, None, rcut),
+            );
         }
     }
 }

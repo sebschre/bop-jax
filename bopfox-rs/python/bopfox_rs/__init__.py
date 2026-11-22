@@ -135,9 +135,8 @@ def model_from_bopjax(cfg, params, radial="powerlaw") -> dict:
     if callable(radial):
         radial = {"powerlaw": "powerlaw", "v0_bond": "v0", "exp_sum": "exp_sum"}[radial.__name__]
     unsupported = [name for name, on in [
-        ("screening", cfg.screening), ("yukawa", cfg.yukawa), ("kT > 0", cfg.kT > 0),
-        ("coulomb != diagonal", cfg.coulomb != "diagonal"),
-        ("Beer-Pettifor-Aoki bandwidth", cfg.bandwidth.startswith("beerpettiforaoki"))] if on]
+        ("screening", cfg.screening), ("yukawa", cfg.yukawa),
+        ("coulomb != diagonal", cfg.coulomb != "diagonal")] if on]
     if unsupported:
         raise NotImplementedError("not in bopfox-rs yet: " + ", ".join(unsupported))
     model = {
@@ -146,6 +145,7 @@ def model_from_bopjax(cfg, params, radial="powerlaw") -> dict:
         "alpha_weight": cfg.alpha_weight, "kernel": cfg.kernel,
         "rcut": cfg.rcut, "dcut": cfg.dcut, "rcut2": cfg.rcut2, "dcut2": cfg.dcut2,
         "basis": list(cfg.basis), "spin": cfg.spin, "radial": radial,
+        "kT": cfg.kT, "smearing_nodes": cfg.smearing_nodes,
         "onsite": _tolist(params["onsite"]), "n0": _tolist(params["n0"]),
         "hubbard": _tolist(params["hubbard"]),
         "bond": {k: _tolist(v) for k, v in params["bond"].items()},

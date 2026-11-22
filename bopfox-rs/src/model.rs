@@ -18,6 +18,9 @@ pub enum Bandwidth {
     Averaged,
     Findeminemax,
     Gershgorin,
+    Beerpettiforaoki,
+    #[serde(rename = "beerpettiforaoki_bopfox")]
+    BeerpettiforaokiBopfox,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +130,9 @@ fn default_radial() -> Radial {
 fn default_one() -> f64 {
     1.0
 }
+fn default_nodes() -> usize {
+    24
+}
 fn default_global() -> (f64, f64) {
     (0.0, 1.0)
 }
@@ -159,6 +165,12 @@ pub struct Model {
     pub spin: Spin,
     #[serde(default = "default_radial")]
     pub radial: Radial,
+    /// electronic temperature (eV); the energy is then the Mermin free energy
+    #[serde(default, rename = "kT")]
+    pub kt: f64,
+    /// quadrature nodes of the Fermi kernel (kT > 0)
+    #[serde(default = "default_nodes")]
+    pub smearing_nodes: usize,
     // --- parameters, indexed by species ---
     pub onsite: Vec<Vec<f64>>, // [species][shell]
     pub n0: Vec<Vec<f64>>,     // [species][shell]
@@ -228,6 +240,9 @@ impl Model {
         }
         if self.spin_orbit && self.spin_orbit_xi.len() != ns {
             return Err("spin-orbit coupling needs spin_orbit_xi per species".into());
+        }
+        if self.kt < 0.0 {
+            return Err("kT must not be negative".into());
         }
         if self.repulsion.is_some() && self.rcut2.is_none() {
             return Err("repulsion needs rcut2".into());
