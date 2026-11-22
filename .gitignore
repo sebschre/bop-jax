@@ -5,3 +5,4 @@ __pycache__/
 .pytest_cache/
 dist/
 bopfox-rs/target/
+bopfox-rs/python/bopfox_rs/*.so
