@@ -12,7 +12,9 @@ Done so far:
   - bopjax's potential self-consistency condition, with implicit-function
     forces;
   - an ASE calculator with warm-started self-consistency;
-  - non-collinear magnetism with optional spin-orbit coupling.
+  - non-collinear magnetism with optional spin-orbit coupling;
+  - external magnetic fields with analytic magnetic moments;
+  - spin dynamics and spin-lattice dynamics.
 
 ## Self-consistency
 
@@ -141,6 +143,84 @@ add `ase` to the environment.
   the lattice alone changes the energy, so the virial is the symmetrised
   strain derivative.
 
+## Magnetic fields
+
+`magnetic_field` (Tesla, one vector or one per atom; Rust
+`Bop::with_magnetic_field`) adds bopjax's Zeeman term
+`-mu_B B.(L + g/2 sigma)`. `spin_field` (`h_i.sigma`) and `orbital_field`
+(`b_i.L`), in eV, are its lower-level sources (`Bop::with_fields`).
+
+- **Spin, along each local axis.** It moves the up and down levels by
+  `-/+ h.e` and adds `(h.e) m` to the energy, so the shifts remain the
+  internal potentials.
+- **Spin, across the axis, and orbital** (non-collinear only). `h_perp.sigma`
+  and `b.L` enter the spinor onsite block. Collinear models couple only
+  `h_z`.
+- **Moments.** The backward pass returns dE/dh and dE/db, so the moments
+  `-(1/mu_B) dE/dB` come out analytically: `spin_moment` (g/2 <sigma>),
+  `orbital_moment` (<L>) and `magnetic_moment`, as from
+  `bopjax.make_magnetic_moment`. They are available at zero field as well.
+- **Torques** include the field terms, and with the potential condition the
+  moments include the response of the shifts.
+- **Checks:**
+  - finite differences of dE/dh, dE/db, forces, shifts and torques in a
+    field, with and without spin-orbit coupling;
+  - the self-consistent moment against finite differences of the
+    self-consistent energy in the field, for both conditions;
+  - bopjax at 10 T: energy, forces, torques, moments and self-consistent
+    shifts.
+
+## Spin dynamics
+
+`bopfox_rs.spin` ports `bopjax.spin` and `bopjax.spinlattice` to work on the
+Rust self-consistency. Units are femtoseconds and amu (bopjax's time unit is
+`TIME_UNIT_FS` = 10.18 fs).
+
+- **`SpinDynamics`:** Landau-Lifshitz-Gilbert dynamics of the spin axes at
+  fixed positions. Heun steps are applied as rotations; there is Gilbert
+  damping `alpha` and stochastic torques at temperature `kT`, the
+  fluctuation-dissipation pair. It reports torques, damping power,
+  effective fields and the magnetisation.
+- **`SpinLatticeDynamics`:** atoms and axes together. Velocity Verlet for
+  the atoms, with a midpoint step of the axes solved by `correctors`
+  fixed-point passes. Without damping `E + E_kin` is conserved.
+- **Evaluations:** each one is a self-consistent solve, warm-started from
+  extrapolated shifts and the previous Anderson history, in fields too.
+- **Unconverged evaluations:** `on_failure` ("warn", "ignore", "raise")
+  says what happens when an evaluation misses `tol`. The stationary
+  condition can lack an exact root. In a distorted, canted 4-atom iron cell
+  with the 7-moment variant of the iron model, both bopfox-rs and bopjax's
+  Newton solver stall at about 1e-4 after a few steps. bopjax carries on
+  silently; here such evaluations are counted (`evaluate.failures`).
+  `condition="potential"` has no such failures, and the 9-moment model
+  converges throughout.
+- **Checks** (`tests/test_spin.py`):
+  - **bopjax trajectories:** the axes agree to 1e-11 after 2 fs at time
+    steps of 0.1, 0.05 and 0.025 fs. The energy drift is identical too; it
+    is the Heun scheme's and falls 5-7 times per halving of the step.
+  - **Larmor precession:** a rigid ferromagnet precesses at
+    `g mu_B B / hbar` about the field, at constant angle.
+  - **Damping:** the energy falls at the damping power.
+  - **Thermal equilibrium (slow test):** stochastic torques sample
+    exp(-E / kT): `<cos theta>` follows the Langevin function.
+  - **Spin-lattice:** the trajectory matches `bopjax.spinlattice.nve`, and
+    `E + E_kin` is conserved.
+
+## Self-consistency solver fallback
+
+When the Anderson mixing stalls (two restarts in a row without a tenfold
+gain), the solver continues with Newton-Krylov steps (`newton_fallback`):
+- GMRES, right-preconditioned with the same model Jacobian;
+- Jacobian-vector products by forward differences of the residual, one
+  evaluation each;
+- a line search on the residual.
+
+It converges, for example, a canted 4-atom iron cell where the mixing
+stalled at 7e-3 and bopjax's exact Newton reaches 2e-13. The preconditioner
+uses the full per-atom response, including one local spin channel's
+response to the other's level (non-zero with canted neighbours or spin-orbit
+coupling).
+
 ## How the derivatives are obtained
 
 - **Moments → bond blocks** (the expensive part) are differentiated by hand
@@ -172,12 +252,14 @@ add `ase` to the environment.
 | self-consistency | stationary (BOPfox) and potential conditions, frozen atoms, warm starts |
 | electrostatics | onsite Hubbard `J` |
 | repulsion | `v0`, `powerlaw`, `egorov` (pair + embedding) |
-| outputs | energy (total and per atom), Fermi level, occupations, charges, moments, `a_inf`/`b_inf`, forces, virial `dE/dstrain`, `dE/dshifts`, `dE/daxes` |
+| fields | Zeeman term of an external field, spin and orbital field sources; analytic spin, orbital and total magnetic moments |
+| dynamics | LLG spin dynamics (damping, thermal torques), coupled spin-lattice dynamics |
+| outputs | energy (total and per atom), Fermi level, occupations, charges, moments, `a_inf`/`b_inf`, forces, virial `dE/dstrain`, `dE/dshifts`, `dE/daxes`, `dE/dh`, `dE/db` |
 | interfaces | Rust, Python (`Potential`), ASE (`BOPCalculator`) |
 
 Not yet:
-- external magnetic fields (Zeeman terms, the orbital moment);
-- spin dynamics (the axis gradient it needs is there);
+- the first-order field effect on barriers (`bopjax.zeeman.first_order_*`,
+  plain post-processing of the moments now available) and NEB;
 - screening, Yukawa repulsion, intersite Coulomb;
 - `kT > 0`;
 - the Beer-Pettifor-Aoki bandwidth;

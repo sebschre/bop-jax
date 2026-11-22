@@ -69,8 +69,9 @@ class Potential:
         molecular dynamics; ``clear_history()`` forgets it).
         Returns the dict of ``compute`` at the converged shifts plus
         ``shifts`` (N, nspin, nshell), ``converged``, ``history`` (the
-        convergence measure after each evaluation), ``residual`` and
-        ``adjoint_iterations``.  ``free`` (N,) bools
+        convergence measure after each evaluation of the Anderson mixing and
+        after each Newton step of its fallback), ``residual``,
+        ``adjoint_iterations`` and ``evaluations`` (all residual evaluations).  ``free`` (N,) bools
         restricts the self-consistency to those atoms; ``refresh`` is the number
         of gradient evaluations between updates of the preconditioner."""
         pos = np.asarray(positions, dtype=float).tolist()

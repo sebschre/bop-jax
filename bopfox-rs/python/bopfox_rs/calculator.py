@@ -150,7 +150,7 @@ class BOPCalculator(Calculator):
                            condition=self.condition, reuse_history=bool(self._previous),
                            axes=self._axes(atoms), magnetic_field=self.magnetic_field,
                            **self.scf_options)
-        self.scf_info = {"evaluations": len(out["history"]), "residual": out["residual"],
+        self.scf_info = {"evaluations": out["evaluations"], "residual": out["residual"],
                          "converged": out["converged"],
                          "adjoint_iterations": out["adjoint_iterations"]}
         if not out["converged"]:

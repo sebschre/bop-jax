@@ -149,6 +149,7 @@ impl Potential {
             refresh,
             condition,
             adjoint_tol,
+            newton_fallback: true,
         };
         let m = &self.model;
         let previous = if reuse_history {
@@ -180,6 +181,7 @@ impl Potential {
         d.set_item("history", r.history)?;
         d.set_item("residual", r.residual)?;
         d.set_item("adjoint_iterations", r.adjoint_iterations)?;
+        d.set_item("evaluations", r.evaluations)?;
         Ok(d)
     }
 }

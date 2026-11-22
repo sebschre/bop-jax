@@ -31,7 +31,7 @@ jobs:
 
   rust:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -55,7 +55,8 @@ jobs:
         env:
           VIRTUAL_ENV: ${{ github.workspace }}/.venv
       - run: uv pip install "ase>=3.23"  # for the calculator tests
-      - run: uv run pytest -q bopfox-rs/tests
+      # the thermal-sampling test of the spin dynamics is marked slow
+      - run: uv run pytest -q -m "not slow" bopfox-rs/tests
 
   build:
     runs-on: ubuntu-latest

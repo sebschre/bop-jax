@@ -60,6 +60,9 @@ pub struct ScfOptions {
     pub refresh: usize,
     /// relative tolerance of the adjoint solve (potential condition)
     pub adjoint_tol: f64,
+    /// when the Anderson mixing stalls, continue with Newton-Krylov steps
+    /// (Jacobian-vector products by finite differences of the residual)
+    pub newton_fallback: bool,
 }
 
 impl ScfOptions {
@@ -91,6 +94,7 @@ impl Default for ScfOptions {
             free: None,
             refresh: 4,
             adjoint_tol: 1e-10,
+            newton_fallback: true,
         }
     }
 }
@@ -109,6 +113,8 @@ pub struct ScfResult {
     pub residual: f64,
     /// operator applications of the adjoint solve (potential condition)
     pub adjoint_iterations: usize,
+    /// evaluations of the residual (gradient or occupations), in total
+    pub evaluations: usize,
     /// the Anderson history at the end, to continue from (`scf_continued`)
     pub mixing: MixingHistory,
 }
@@ -436,6 +442,8 @@ fn anderson(
     // evaluations since the best measure last fell by 10%
     let mut stalled = 0usize;
     let patience = opt.history.max(10);
+    // restarts in a row that did not bring the best measure down tenfold
+    let (mut futile, mut best_at_restart) = (0usize, f64::INFINITY);
     while err > opt.tol && it < opt.max_iter {
         it += 1;
         let h = df.len();
@@ -479,6 +487,15 @@ fn anderson(
         // describes the problem: restart from the best iterate
         if e_new.is_nan() || e_new > 10.0 * e_best || stalled >= patience {
             stalled = 0;
+            futile = if e_best > 0.1 * best_at_restart {
+                futile + 1
+            } else {
+                0
+            };
+            best_at_restart = best_at_restart.min(e_best);
+            if opt.newton_fallback && futile >= 2 {
+                break; // leave it to Newton-Krylov
+            }
             dy.clear();
             df.clear();
             beta *= 0.5;
@@ -613,7 +630,14 @@ impl<'a> Bop<'a> {
             (f, err)
         };
         let y0: Vec<f64> = index.iter().map(|&q| x[q]).collect();
-        let (y, history, mixing) = anderson(eval, y0, opt, previous);
+        let (mut y, mut history, mixing) = anderson(eval, y0, opt, previous);
+        let mut evaluations = evals;
+        if opt.newton_fallback && history.iter().copied().fold(f64::INFINITY, f64::min) > opt.tol {
+            let (y_nk, h_nk, used) = self.newton_krylov(pos, cell, &x, &index, free, opt, y);
+            y = y_nk;
+            history.extend(h_nk);
+            evaluations += used;
+        }
         for (q, &v) in index.iter().zip(&y) {
             x[*q] = v;
         }
@@ -628,12 +652,161 @@ impl<'a> Bop<'a> {
                 history,
                 residual,
                 adjoint_iterations: 0,
+                evaluations: evaluations + 1,
                 mixing,
             };
         }
         let mut r = self.implicit_forces(pos, cell, x, &index, free, opt, history);
         r.mixing = mixing;
+        r.evaluations = evaluations + 1 + r.adjoint_iterations;
         r
+    }
+
+    /// The raw residual on the free levels (stationary: dE/dshifts;
+    /// potential: K N - shifts), its max norm, and optionally the
+    /// preconditioner there.
+    #[allow(clippy::too_many_arguments)]
+    fn residual_at(
+        &self,
+        pos: &[[f64; 3]],
+        cell: &Cell,
+        x: &[f64],
+        index: &[usize],
+        free: Option<&[bool]>,
+        stationary: bool,
+        precondition: bool,
+    ) -> (Vec<f64>, f64, Option<Precond>) {
+        let mode = match (stationary, precondition) {
+            (true, true) => Mode::ScfStep,
+            (true, false) => Mode::ShiftGradient,
+            (false, true) => Mode::Response,
+            (false, false) => Mode::Energy,
+        };
+        let res = self.compute_mode(pos, cell, x, mode);
+        let full = if stationary {
+            flatten(&res.shift_gradient)
+        } else {
+            self.potential_target(&res)
+                .iter()
+                .zip(x)
+                .map(|(a, b)| a - b)
+                .collect()
+        };
+        let f: Vec<f64> = index.iter().map(|&q| full[q]).collect();
+        let err = max_abs(f.iter().copied());
+        (f, err, precondition.then(|| Precond::new(self, &res, free)))
+    }
+
+    /// Newton-Krylov steps on the residual from `y0` (free levels): GMRES
+    /// for `J step = -F`, right-preconditioned with the model Jacobian of
+    /// [`Precond`], Jacobian-vector products by forward differences of the
+    /// residual (one evaluation each), and a backtracking line search on
+    /// max |F|.  Returns the best iterate, the measures of the Newton
+    /// iterates and the number of evaluations.
+    #[allow(clippy::too_many_arguments)]
+    fn newton_krylov(
+        &self,
+        pos: &[[f64; 3]],
+        cell: &Cell,
+        x: &[f64],
+        index: &[usize],
+        free: Option<&[bool]>,
+        opt: &ScfOptions,
+        y0: Vec<f64>,
+    ) -> (Vec<f64>, Vec<f64>, usize) {
+        let stationary = opt.condition == Condition::Stationary;
+        let all_free = free.is_none();
+        let n_shift = x.len();
+        let embed = |y: &[f64]| {
+            let mut full = x.to_vec();
+            for (q, &v) in index.iter().zip(y) {
+                full[*q] = v;
+            }
+            full
+        };
+        let embed_zero = |v: &[f64]| {
+            let mut full = vec![0.0; n_shift];
+            for (q, &a) in index.iter().zip(v) {
+                full[*q] = a;
+            }
+            full
+        };
+        let restrict = |full: &[f64]| -> Vec<f64> { index.iter().map(|&q| full[q]).collect() };
+        let evals = std::cell::Cell::new(0usize);
+        let residual = |y: &[f64], pre: bool| {
+            evals.set(evals.get() + 1);
+            self.residual_at(pos, cell, &embed(y), index, free, stationary, pre)
+        };
+        let mut y = y0;
+        let (mut f, mut err, mut pc) = residual(&y, true);
+        let mut history = vec![err];
+        for _ in 0..30 {
+            if err <= opt.tol {
+                break;
+            }
+            let p = pc.take().unwrap();
+            // M^{-1} ~ J^{-1}: stationary J0^{-1}; potential -(1 + K P)^{-1}
+            let m_inv = |z: &[f64]| -> Vec<f64> {
+                let full = embed_zero(z);
+                let mut s = if stationary {
+                    restrict(&p.stationary(&full))
+                        .iter()
+                        .map(|v| -v)
+                        .collect::<Vec<f64>>()
+                } else {
+                    restrict(&p.potential(&full).unwrap_or(full.clone()))
+                        .iter()
+                        .map(|v| -v)
+                        .collect()
+                };
+                if stationary && all_free && !s.is_empty() {
+                    let mean = s.iter().sum::<f64>() / s.len() as f64;
+                    s.iter_mut().for_each(|v| *v -= mean);
+                }
+                s
+            };
+            let scale = max_abs(y.iter().copied()).max(1.0);
+            let jv = |v: &[f64]| -> Vec<f64> {
+                let vn = max_abs(v.iter().copied());
+                if vn == 0.0 {
+                    return vec![0.0; v.len()];
+                }
+                let eps = 1e-7 * scale / vn;
+                let yp: Vec<f64> = y.iter().zip(v).map(|(a, b)| a + eps * b).collect();
+                let (fp, _, _) = residual(&yp, false);
+                fp.iter().zip(&f).map(|(a, b)| (a - b) / eps).collect()
+            };
+            let rhs: Vec<f64> = f.iter().map(|v| -v).collect();
+            let forcing = err.sqrt().clamp(1e-6, 0.1);
+            let z = gmres(|z| jv(&m_inv(z)), &rhs, forcing, 20, 40).unwrap_or_else(|| rhs.clone());
+            let step = m_inv(&z);
+            let smax = max_abs(step.iter().copied());
+            let cap = if smax > opt.max_step {
+                opt.max_step / smax
+            } else {
+                1.0
+            };
+            let mut t = cap;
+            let mut accepted = false;
+            for _ in 0..8 {
+                let y_new: Vec<f64> = y.iter().zip(&step).map(|(a, b)| a + t * b).collect();
+                let (f_new, e_new, pc_new) = residual(&y_new, true);
+                if e_new < err {
+                    y = y_new;
+                    f = f_new;
+                    err = e_new;
+                    pc = pc_new;
+                    accepted = true;
+                    break;
+                }
+                t *= 0.5;
+            }
+            history.push(err);
+            if !accepted {
+                break;
+            }
+        }
+        (y, history, evals.get())
     }
 
     /// Everything at potential-condition shifts `x`, with the forces and
@@ -752,6 +925,7 @@ impl<'a> Bop<'a> {
             history,
             residual,
             adjoint_iterations: calls,
+            evaluations: 0,
             mixing: MixingHistory::default(),
         }
     }
