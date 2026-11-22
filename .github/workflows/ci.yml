@@ -29,6 +29,35 @@ jobs:
       - run: uv sync --locked --extra md
       - run: uv run pytest -q
 
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bopfox-rs
+      - run: cargo clippy --release --all-targets --features python -- -D warnings
+        working-directory: bopfox-rs
+      - run: cargo test --release
+        working-directory: bopfox-rs
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --locked
+      # the bindings, checked against bopjax
+      - run: uvx maturin develop --release
+        working-directory: bopfox-rs
+        env:
+          VIRTUAL_ENV: ${{ github.workspace }}/.venv
+      - run: uv pip install "ase>=3.23"  # for the calculator tests
+      # the thermal-sampling test of the spin dynamics is marked slow
+      - run: uv run pytest -q -m "not slow" bopfox-rs/tests
+
   build:
     runs-on: ubuntu-latest
     steps:
