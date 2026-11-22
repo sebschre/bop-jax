@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "bopfox-rs"
+version = "0.1.0"
+description = "Analytic bond-order potentials in Rust with analytic forces"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "bopfox_rs._core"
+features = ["python"]

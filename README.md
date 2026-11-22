@@ -115,6 +115,14 @@ This prints -6.0112485448437 eV per atom, the BOPfox value to all 13 digits.
 | [Minimum energy paths](docs/magnetic-field.md#minimum-energy-paths) | `bopjax.neb`: climbing-image nudged elastic band and FIRE relaxation |
 | [Visualisation](docs/visualisation.md) | `bopjax.ovito`: trajectories with spin, orbital and other per-atom vectors as extended XYZ for [OVITO](https://www.ovito.org), and rendered pictures and animations through its Python module |
 
+## Rust port
+
+[`bopfox-rs/`](bopfox-rs/README.md) ports the energy to Rust with analytic
+derivatives (the BOPfox route) instead of automatic differentiation. Phase 1
+covers energy, forces, virial and dE/dshifts at given shifts for s/p/d bases,
+collinear magnetism and the pair repulsions. It matches bopjax to 1e-9 and is
+13-20 times faster for energy and forces.
+
 ## Documentation
 
 | Page | Content |

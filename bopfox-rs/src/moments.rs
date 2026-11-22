@@ -1,0 +1,248 @@
+//! Moments of the local density of states and their exact derivatives.
+//!
+//! For atom `i` and every start orbital `d`, the walk builds the vectors
+//! `w_a = H^a |i d>` for `a = 0..ceil(nmom / 2)` on the cluster of `i`
+//! (`w_a` vanishes beyond `a` hops, so step `a` only touches slots within
+//! `a + 1` hops), and the moments are `mu_k = <w_a | w_b>` with
+//! `a = k / 2`, `b = k - a`.
+//!
+//! The backward pass is the analytic derivative of the moments with respect
+//! to every bond block and onsite level: the adjoint vectors `wbar_a` are
+//! carried back through the walk, and every application of a bond block
+//! `H_b` contributes `wbar_{a+1} w_a^T` to `dE/dH_b`.  This is the sum over
+//! the interference paths through bond `b` of BOPfox, organised so that no
+//! path is enumerated and the cost is that of the forward walk.
+
+use crate::geometry::Cluster;
+
+/// Bond blocks and onsite levels of one spin channel.
+pub struct HamiltonianData<'a> {
+    pub norb: usize,
+    /// `n_bonds * norb * norb`, block of bond b row-major
+    pub hblk: &'a [f64],
+    /// `n_atoms * norb` onsite levels of this spin channel
+    pub onsite: &'a [f64],
+}
+
+/// Vectors of one walk: `w[a]` holds `slots * norb * norb` entries, layout
+/// `[slot][orbital][start orbital]`.
+pub struct Walk {
+    pub w: Vec<Vec<f64>>,
+}
+
+impl Walk {
+    pub fn len(&self) -> usize {
+        self.w.iter().map(|x| x.len()).sum()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.w.is_empty()
+    }
+}
+
+/// Hops a cluster needs for `nmom` moments: `mu_k = <w_a|w_b>` is evaluated
+/// within `a = k / 2` hops, and `w_b` there only needs `w_{b-1}` within
+/// `a` hops (odd k) or `a` hops minus one (even k).
+pub fn cluster_hops(nmom: usize) -> usize {
+    nmom / 2
+}
+
+/// Number of orbitals, known at compile time for the common bases so that
+/// the block loops are unrolled.
+trait Dim: Copy {
+    fn n(self) -> usize;
+}
+#[derive(Clone, Copy)]
+struct Fixed<const N: usize>;
+impl<const N: usize> Dim for Fixed<N> {
+    #[inline(always)]
+    fn n(self) -> usize {
+        N
+    }
+}
+#[derive(Clone, Copy)]
+struct Dynamic(usize);
+impl Dim for Dynamic {
+    #[inline(always)]
+    fn n(self) -> usize {
+        self.0
+    }
+}
+
+macro_rules! dispatch {
+    ($norb:expr, $f:ident($($arg:expr),*)) => {
+        match $norb {
+            1 => $f(Fixed::<1>, $($arg),*),
+            4 => $f(Fixed::<4>, $($arg),*),
+            5 => $f(Fixed::<5>, $($arg),*),
+            6 => $f(Fixed::<6>, $($arg),*),
+            9 => $f(Fixed::<9>, $($arg),*),
+            n => $f(Dynamic(n), $($arg),*),
+        }
+    };
+}
+
+fn walk_impl<N: Dim>(dim: N, cl: &Cluster, h: &HamiltonianData, nmom: usize) -> Walk {
+    let n = dim.n();
+    let nn = n * n;
+    let n_steps = nmom.div_ceil(2);
+    let top = cl.size_le.len() - 1;
+    let mut w: Vec<Vec<f64>> = Vec::with_capacity(n_steps + 1);
+    let mut w0 = vec![0.0; nn];
+    for d in 0..n {
+        w0[d * n + d] = 1.0;
+    }
+    w.push(w0);
+    for a in 0..n_steps {
+        let (n_in, n_out) = (cl.size_le[a], cl.size_le[(a + 1).min(top)]);
+        let prev = &w[a];
+        let mut out = vec![0.0; n_out * nn];
+        for c in 0..n_out {
+            let oc = &mut out[c * nn..(c + 1) * nn];
+            for &(b, c2) in &cl.links[cl.link_start[c]..cl.link_start[c + 1]] {
+                if c2 >= n_in {
+                    continue;
+                }
+                let blk = &h.hblk[b * nn..(b + 1) * nn];
+                let wc = &prev[c2 * nn..(c2 + 1) * nn];
+                for al in 0..n {
+                    for be in 0..n {
+                        let hv = blk[al * n + be];
+                        for d in 0..n {
+                            oc[al * n + d] += hv * wc[be * n + d];
+                        }
+                    }
+                }
+            }
+            if c < n_in {
+                let lev = &h.onsite[cl.origin[c] * n..(cl.origin[c] + 1) * n];
+                let wc = &prev[c * nn..(c + 1) * nn];
+                for al in 0..n {
+                    for d in 0..n {
+                        oc[al * n + d] += lev[al] * wc[al * n + d];
+                    }
+                }
+            }
+        }
+        w.push(out);
+    }
+    Walk { w }
+}
+
+/// The walk of one atom (all start orbitals at once).
+pub fn walk(cl: &Cluster, h: &HamiltonianData, nmom: usize) -> Walk {
+    dispatch!(h.norb, walk_impl(cl, h, nmom))
+}
+
+/// Moments `<i d|H^k|i d>` from a walk, layout `[start orbital][k]`.
+pub fn moments_of(cl: &Cluster, wk: &Walk, norb: usize, nmom: usize) -> Vec<f64> {
+    let n = norb;
+    let nn = n * n;
+    let mut mu = vec![0.0; n * (nmom + 1)];
+    for k in 0..=nmom {
+        let (a, b) = (k / 2, k - k / 2);
+        let size = cl.size_le[a] * nn;
+        let (wa, wb) = (&wk.w[a][..size], &wk.w[b][..size]);
+        for (idx, (x, y)) in wa.iter().zip(wb).enumerate() {
+            mu[(idx % n) * (nmom + 1) + k] += x * y;
+        }
+    }
+    mu
+}
+
+/// Walk and moments of one atom.
+pub fn moments(cl: &Cluster, h: &HamiltonianData, nmom: usize) -> (Walk, Vec<f64>) {
+    let wk = walk(cl, h, nmom);
+    let mu = moments_of(cl, &wk, h.norb, nmom);
+    (wk, mu)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn backward_impl<N: Dim, F: FnMut(usize, &[f64])>(
+    dim: N,
+    cl: &Cluster,
+    h: &HamiltonianData,
+    nmom: usize,
+    wk: &Walk,
+    gmu: &[f64],
+    onsite_bar: &mut [f64],
+    bond_grad: &mut F,
+) {
+    let n = dim.n();
+    let nn = n * n;
+    let n_steps = nmom.div_ceil(2);
+    let mut wbar: Vec<Vec<f64>> = wk.w.iter().map(|x| vec![0.0; x.len()]).collect();
+    for k in 0..=nmom {
+        let (a, b) = (k / 2, k - k / 2);
+        let size = cl.size_le[a] * nn;
+        for idx in 0..size {
+            let g = gmu[(idx % n) * (nmom + 1) + k];
+            let (xa, xb) = (wk.w[a][idx], wk.w[b][idx]);
+            wbar[a][idx] += g * xb;
+            wbar[b][idx] += g * xa;
+        }
+    }
+    let mut hbar = vec![0.0; nn];
+    for a in (0..n_steps).rev() {
+        let n_in = cl.size_le[a];
+        let (lo, hi) = wbar.split_at_mut(a + 1);
+        let (wbar_a, wbar_next) = (&mut lo[a], &hi[0]);
+        let n_out = wbar_next.len() / nn;
+        let wa = &wk.w[a];
+        for c in 0..n_out {
+            let gc = &wbar_next[c * nn..(c + 1) * nn];
+            for &(b, c2) in &cl.links[cl.link_start[c]..cl.link_start[c + 1]] {
+                if c2 >= n_in {
+                    continue;
+                }
+                let blk = &h.hblk[b * nn..(b + 1) * nn];
+                let src = &wa[c2 * nn..(c2 + 1) * nn];
+                let dst = &mut wbar_a[c2 * nn..(c2 + 1) * nn];
+                for al in 0..n {
+                    for be in 0..n {
+                        let mut acc = 0.0;
+                        for d in 0..n {
+                            acc += gc[al * n + d] * src[be * n + d];
+                        }
+                        hbar[al * n + be] = acc;
+                        let hv = blk[al * n + be];
+                        for d in 0..n {
+                            dst[be * n + d] += hv * gc[al * n + d];
+                        }
+                    }
+                }
+                bond_grad(b, &hbar);
+            }
+            if c < n_in {
+                let o = cl.origin[c];
+                let lev = &h.onsite[o * n..(o + 1) * n];
+                let src = &wa[c * nn..(c + 1) * nn];
+                let dst = &mut wbar_a[c * nn..(c + 1) * nn];
+                for al in 0..n {
+                    let mut acc = 0.0;
+                    for d in 0..n {
+                        acc += gc[al * n + d] * src[al * n + d];
+                        dst[al * n + d] += lev[al] * gc[al * n + d];
+                    }
+                    onsite_bar[o * n + al] += acc;
+                }
+            }
+        }
+    }
+}
+
+/// Backward pass.  `gmu[d * (nmom+1) + k]` is dE/dmu_k of start orbital d.
+/// Calls `bond_grad(b, hbar)` with the contribution `dE/dH_b` (row-major,
+/// `norb * norb`) of every application of bond block `b`, and adds dE/d(onsite)
+/// to `onsite_bar` (`n_atoms * norb`).
+pub fn backward(
+    cl: &Cluster,
+    h: &HamiltonianData,
+    nmom: usize,
+    wk: &Walk,
+    gmu: &[f64],
+    onsite_bar: &mut [f64],
+    mut bond_grad: impl FnMut(usize, &[f64]),
+) {
+    let f = &mut bond_grad;
+    dispatch!(h.norb, backward_impl(cl, h, nmom, wk, gmu, onsite_bar, f))
+}
