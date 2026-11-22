@@ -113,3 +113,19 @@ def test_noncollinear_with_spin_orbit():
     e_tilted = atoms.get_potential_energy()
     atoms.set_initial_magnetic_moments([[0.0, 0.0, 2.5]] * 2)
     assert abs(atoms.get_potential_energy() - e_tilted) > 1e-7
+
+
+def test_magnetic_field_moment_and_energy():
+    """In a field the energy falls by about mu_B B.M, and the reported moment
+    is -(1/mu_B) dE/dB of the self-consistent energy."""
+    from bopfox_rs import MU_B
+    atoms = iron_cell(rattle=0.02)
+    e = {}
+    for b in (-2.0, 0.0, 2.0):
+        atoms.calc = iron_calc(tol=1e-11, magnetic_field=[0.0, 0.0, b])
+        e[b] = atoms.get_potential_energy()
+        if b == 0.0:
+            m = atoms.calc.results["magnetic_moment"].sum(axis=0)
+    fd = -(e[2.0] - e[-2.0]) / 4.0 / MU_B
+    assert m[2] == pytest.approx(fd, rel=1e-4)
+    assert m[2] > 30  # 16 atoms of about 2.3 Bohr magnetons

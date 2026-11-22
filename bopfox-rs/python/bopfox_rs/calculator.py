@@ -36,7 +36,7 @@ class BOPCalculator(Calculator):
 
     def __init__(self, model, species=None, condition="stationary", tol=1e-8,
                  warm_start=True, extrapolation="linear", scf_options=None,
-                 raise_on_failure=True, axes=None, **kwargs):
+                 raise_on_failure=True, axes=None, magnetic_field=None, **kwargs):
         """
         model         bopfox-rs model (dict, JSON string or ``Potential``)
         species       chemical symbol -> species index of the model; may be
@@ -49,6 +49,12 @@ class BOPCalculator(Calculator):
         axes          (N, 3) local spin axes of a noncollinear model; by
                       default the directions of the initial magnetic moments
                       (vectors), or z
+        magnetic_field  external field in Tesla, (3,) or (N, 3): Zeeman term
+                      -mu_B B.(L + g/2 sigma) (magnetic models; the orbital
+                      part in noncollinear ones).  ``results`` then also hold
+                      ``spin_moment``, ``orbital_moment`` and
+                      ``magnetic_moment`` (N, 3), -(1/mu_B) dE/dB in Bohr
+                      magnetons (these are there at zero field too).
 
         For a noncollinear model ``magmoms`` are vectors along the axes and
         ``results["axes_gradient"]`` holds dE/d(axes) (eV per unit of the
@@ -67,6 +73,8 @@ class BOPCalculator(Calculator):
         self.raise_on_failure = raise_on_failure
         self.axes = None if axes is None else np.asarray(axes, dtype=float)
         self.noncollinear = self.pot.model.get("spin", "none") == "noncollinear"
+        self.magnetic_field = (None if magnetic_field is None
+                               else np.asarray(magnetic_field, dtype=float))
         self._previous = []  # shifts of the last calculations, newest last
         self._key = None
         self.scf_info = {}  # evaluations, residual, converged of the last calculation
@@ -140,7 +148,8 @@ class BOPCalculator(Calculator):
         shifts0 = self._start(atoms)
         out = self.pot.scf(atoms.positions, self._species(atoms), cell, shifts0, tol=self.tol,
                            condition=self.condition, reuse_history=bool(self._previous),
-                           axes=self._axes(atoms), **self.scf_options)
+                           axes=self._axes(atoms), magnetic_field=self.magnetic_field,
+                           **self.scf_options)
         self.scf_info = {"evaluations": len(out["history"]), "residual": out["residual"],
                          "converged": out["converged"],
                          "adjoint_iterations": out["adjoint_iterations"]}
@@ -167,6 +176,9 @@ class BOPCalculator(Calculator):
         else:
             self.results["magmoms"] = np.zeros(len(atoms))
             self.results["magmom"] = 0.0
+        for key in ("spin_moment", "orbital_moment", "magnetic_moment"):
+            if key in out:
+                self.results[key] = out[key]
         if cell is not None:
             stress = out["virial"] / atoms.get_volume()
             self.results["stress"] = full_3x3_to_voigt_6_stress(stress)

@@ -229,3 +229,55 @@ def test_noncollinear(xi):
     assert out["converged"]
     assert out["energy"] == pytest.approx(ref.energy, abs=1e-9)
     np.testing.assert_allclose(out["shifts"], np.asarray(ref.shifts), atol=1e-7)
+
+
+@pytest.mark.parametrize("spin,xi", [("collinear", 0.0), ("noncollinear", 0.0),
+                                     ("noncollinear", 0.06)])
+def test_magnetic_field(spin, xi):
+    """Zeeman term of an external field: energy, forces, dE/dshifts,
+    dE/daxes and the magnetic moments of bopjax.make_magnetic_moment, then
+    the self-consistent state in the field."""
+    a = 2.83
+    pos = a * np.array([[0, 0, 0], [0.5, 0.5, 0.5], [1, 0, 0], [1.5, 0.5, 0.5]])
+    pos = pos + np.random.default_rng(11).normal(scale=0.04, size=pos.shape)
+    cell = np.diag([2 * a, a, a])
+    n = len(pos)
+    field = np.array([3.0, -2.0, 10.0])  # Tesla
+    cfg = bj.BOPConfig(spin=spin, spin_orbit=xi > 0, **dict(IRON_CONFIG, nmom=7))
+    params = dict(iron(), magnetic_field=jnp.array(field))
+    axes = None
+    if spin == "noncollinear":
+        axes = np.array([[0.0, 0.0, 1.0], [0.3, 0.1, 0.9], [-0.2, 0.4, 0.8], [0.1, -0.3, 1.0]])
+        params["spin_axes"] = jnp.array(axes)
+    if xi > 0:
+        params["spin_orbit"] = jnp.array([[xi]])
+    shifts = np.zeros((n, 2, 1))
+    shifts[:, 0], shifts[:, 1] = -1.2, 1.2
+    shifts += np.random.default_rng(12).normal(scale=0.02, size=shifts.shape)
+
+    topo = bj.build_topology(pos, [0] * n, cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2)
+    energy = bj.make_energy_fn(topo, cfg, radial=hamiltonian.v0_bond)
+    p, c, s = jnp.array(pos), jnp.array(cell), jnp.array(shifts)
+    e_ref = energy(s, p, c, params)[0]
+    g_s, g_p = jax.grad(lambda s_, p_: energy(s_, p_, c, params)[0], argnums=(0, 1))(s, p)
+    mom = bj.make_magnetic_moment(energy)(s, p, c, params)
+
+    rs = bopfox_rs.Potential(bopfox_rs.model_from_bopjax(cfg, params, hamiltonian.v0_bond))
+    out = rs.compute(pos, [0] * n, cell, shifts, axes=axes, magnetic_field=field)
+    assert out["energy"] == pytest.approx(float(e_ref), abs=1e-9)
+    np.testing.assert_allclose(out["forces"], -np.asarray(g_p), atol=1e-8)
+    np.testing.assert_allclose(out["shift_gradient"].reshape(shifts.shape), np.asarray(g_s),
+                               atol=1e-8)
+    for key in ("spin", "orbital", "total"):
+        name = {"spin": "spin_moment", "orbital": "orbital_moment", "total": "magnetic_moment"}[key]
+        np.testing.assert_allclose(out[name], np.asarray(mom[key]), atol=1e-8)
+    if axes is not None:
+        g_a = jax.grad(lambda a_: energy(s, p, c, dict(params, spin_axes=a_))[0])(jnp.array(axes))
+        np.testing.assert_allclose(out["axes_gradient"], np.asarray(g_a), atol=1e-8)
+
+    ref = bj.make_scf(energy)(p, c, params, shifts0=s, tol=1e-10)
+    assert ref.converged
+    out = rs.scf(pos, [0] * n, cell, shifts, tol=1e-10, axes=axes, magnetic_field=field)
+    assert out["converged"]
+    assert out["energy"] == pytest.approx(ref.energy, abs=1e-9)
+    np.testing.assert_allclose(out["shifts"], np.asarray(ref.shifts), atol=1e-7)

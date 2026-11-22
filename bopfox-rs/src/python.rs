@@ -38,7 +38,8 @@ impl Potential {
     /// (N, 3), species (N,), cell (3, 3) rows = lattice vectors or None, and
     /// onsite shifts flattened as [atom][spin][shell] (default zero).
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (positions, species, cell=None, shifts=None, gradients=true, axes=None))]
+    #[pyo3(signature = (positions, species, cell=None, shifts=None, gradients=true, axes=None,
+                        spin_field=None, orbital_field=None, magnetic_field=None))]
     fn compute<'py>(
         &self,
         py: Python<'py>,
@@ -48,11 +49,20 @@ impl Potential {
         shifts: Option<Vec<f64>>,
         gradients: bool,
         axes: Option<Vec<[f64; 3]>>,
+        spin_field: Option<Vec<[f64; 3]>>,
+        orbital_field: Option<Vec<[f64; 3]>>,
+        magnetic_field: Option<Vec<[f64; 3]>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         self.check(&positions, &species)?;
         if axes.as_ref().is_some_and(|a| a.len() != positions.len()) {
             return Err(PyValueError::new_err("axes needs one entry per atom"));
         }
+        self.check_fields(
+            positions.len(),
+            &spin_field,
+            &orbital_field,
+            &magnetic_field,
+        )?;
         let n_shift = positions.len() * self.shifts_per_atom();
         let shifts = shifts.unwrap_or_else(|| vec![0.0; n_shift]);
         if shifts.len() != n_shift {
@@ -62,7 +72,13 @@ impl Potential {
         let r = py.allow_threads(|| {
             let topo =
                 Topology::build(&positions, &species, cell.as_ref(), m.rcut, m.nmom, m.rcut2);
-            with_axes(Bop::new(m, &topo), &axes).compute(&positions, &cell, &shifts, gradients)
+            let bop = with_fields(
+                with_axes(Bop::new(m, &topo), &axes),
+                &spin_field,
+                &orbital_field,
+                &magnetic_field,
+            );
+            bop.compute(&positions, &cell, &shifts, gradients)
         });
         results_dict(py, r, gradients)
     }
@@ -73,7 +89,8 @@ impl Potential {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (positions, species, cell=None, shifts0=None, tol=1e-10, max_iter=200,
                         mixing=None, history=None, max_step=0.5, free=None, refresh=4,
-                        condition="stationary", adjoint_tol=1e-10, reuse_history=false, axes=None))]
+                        condition="stationary", adjoint_tol=1e-10, reuse_history=false, axes=None,
+                        spin_field=None, orbital_field=None, magnetic_field=None))]
     fn scf<'py>(
         &self,
         py: Python<'py>,
@@ -92,6 +109,9 @@ impl Potential {
         adjoint_tol: f64,
         reuse_history: bool,
         axes: Option<Vec<[f64; 3]>>,
+        spin_field: Option<Vec<[f64; 3]>>,
+        orbital_field: Option<Vec<[f64; 3]>>,
+        magnetic_field: Option<Vec<[f64; 3]>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let condition = match condition {
             "stationary" => Condition::Stationary,
@@ -102,6 +122,12 @@ impl Potential {
         if axes.as_ref().is_some_and(|a| a.len() != positions.len()) {
             return Err(PyValueError::new_err("axes needs one entry per atom"));
         }
+        self.check_fields(
+            positions.len(),
+            &spin_field,
+            &orbital_field,
+            &magnetic_field,
+        )?;
         let n_shift = positions.len() * self.shifts_per_atom();
         if shifts0.as_ref().is_some_and(|s| s.len() != n_shift) {
             return Err(PyValueError::new_err(format!("expected {n_shift} shifts")));
@@ -133,7 +159,13 @@ impl Potential {
         let r = py.allow_threads(|| {
             let topo =
                 Topology::build(&positions, &species, cell.as_ref(), m.rcut, m.nmom, m.rcut2);
-            with_axes(Bop::new(m, &topo), &axes).scf_continued(
+            with_fields(
+                with_axes(Bop::new(m, &topo), &axes),
+                &spin_field,
+                &orbital_field,
+                &magnetic_field,
+            )
+            .scf_continued(
                 &positions,
                 &cell,
                 shifts0.as_deref(),
@@ -152,6 +184,19 @@ impl Potential {
     }
 }
 
+fn with_fields<'a>(
+    bop: Bop<'a>,
+    spin: &Option<Vec<[f64; 3]>>,
+    orbital: &Option<Vec<[f64; 3]>>,
+    field: &Option<Vec<[f64; 3]>>,
+) -> Bop<'a> {
+    let bop = bop.with_fields(spin.as_deref(), orbital.as_deref());
+    match field {
+        Some(f) => bop.with_magnetic_field(f),
+        None => bop,
+    }
+}
+
 fn with_axes<'a>(bop: Bop<'a>, axes: &Option<Vec<[f64; 3]>>) -> Bop<'a> {
     match axes {
         Some(a) => bop.with_axes(a),
@@ -160,6 +205,29 @@ fn with_axes<'a>(bop: Bop<'a>, axes: &Option<Vec<[f64; 3]>>) -> Bop<'a> {
 }
 
 impl Potential {
+    fn check_fields(
+        &self,
+        n: usize,
+        spin: &Option<Vec<[f64; 3]>>,
+        orbital: &Option<Vec<[f64; 3]>>,
+        field: &Option<Vec<[f64; 3]>>,
+    ) -> PyResult<()> {
+        for f in [spin, orbital, field].into_iter().flatten() {
+            if f.len() != n {
+                return Err(PyValueError::new_err("fields need one vector per atom"));
+            }
+        }
+        if (spin.is_some() || field.is_some()) && self.model.nspin() != 2 {
+            return Err(PyValueError::new_err("a field needs a magnetic model"));
+        }
+        if orbital.is_some() && self.model.spin != crate::model::Spin::Noncollinear {
+            return Err(PyValueError::new_err(
+                "an orbital field needs spin = noncollinear",
+            ));
+        }
+        Ok(())
+    }
+
     fn check(&self, positions: &[[f64; 3]], species: &[usize]) -> PyResult<()> {
         if species.len() != positions.len() {
             return Err(PyValueError::new_err(
@@ -195,6 +263,12 @@ fn results_dict(py: Python<'_>, r: crate::Results, gradients: bool) -> PyResult<
         d.set_item("dos", r.dos)?;
         if !r.axes_gradient.is_empty() {
             d.set_item("axes_gradient", r.axes_gradient)?;
+        }
+        if !r.spin_field_gradient.is_empty() {
+            d.set_item("spin_field_gradient", r.spin_field_gradient)?;
+        }
+        if !r.orbital_field_gradient.is_empty() {
+            d.set_item("orbital_field_gradient", r.orbital_field_gradient)?;
         }
         d.set_item("occupations", r.occupations)?;
         Ok(d)

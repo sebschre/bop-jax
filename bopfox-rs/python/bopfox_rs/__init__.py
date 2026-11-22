@@ -26,22 +26,37 @@ class Potential:
         """Forget the Anderson history kept for ``scf(reuse_history=True)``."""
         self._core.clear_history()
 
-    def compute(self, positions, species, cell=None, shifts=None, gradients=True, axes=None):
+    def compute(self, positions, species, cell=None, shifts=None, gradients=True, axes=None,
+                magnetic_field=None, spin_field=None, orbital_field=None):
         """Dict of numpy arrays: energy, energy_atom, fermi, n_shell, charge,
         moments, a_inf, b_inf (and moment when magnetic); with ``gradients``
         also forces (-dE/dpositions), virial (dE/dstrain) and shift_gradient
         (dE/dshifts, shaped like the shifts: (N, nspin, nshell)).  For
         ``spin="noncollinear"``, ``axes`` (N, 3) are the local spin axes
-        (default z) and ``axes_gradient`` is dE/daxes."""
+        (default z) and ``axes_gradient`` is dE/daxes.
+
+        Fields (magnetic models): ``magnetic_field`` in Tesla, (3,) or (N, 3),
+        adds the Zeeman term ``-mu_B B.(L + g/2 sigma)`` (the orbital part in
+        noncollinear models only); ``spin_field`` (eV, ``h_i.sigma``) and
+        ``orbital_field`` (eV, ``b_i.L``) are its lower-level sources, as in
+        bopjax.  With gradients the result holds the magnetic moments in
+        Bohr magnetons, ``-(1/mu_B) dE/dB``: ``spin_moment`` (g/2 <sigma>),
+        ``orbital_moment`` (<L>) and ``magnetic_moment``, (N, 3) each, as
+        ``bopjax.make_magnetic_moment``."""
         pos = np.asarray(positions, dtype=float).tolist()
         sp = [int(s) for s in np.asarray(species).ravel()]
         c = None if cell is None else np.asarray(cell, dtype=float).tolist()
         s = None if shifts is None else np.asarray(shifts, dtype=float).ravel().tolist()
-        return _arrays(self._core.compute(pos, sp, c, s, gradients, _axes(axes)))
+        n = len(pos)
+        out = _arrays(self._core.compute(pos, sp, c, s, gradients, _axes(axes),
+                                         _field(spin_field, n), _field(orbital_field, n),
+                                         _field(magnetic_field, n)))
+        return _moments(out)
 
     def scf(self, positions, species, cell=None, shifts0=None, tol=1e-10, max_iter=200,
             mixing=None, history=None, max_step=0.5, free=None, refresh=4,
-            condition="stationary", adjoint_tol=1e-10, reuse_history=False, axes=None):
+            condition="stationary", adjoint_tol=1e-10, reuse_history=False, axes=None,
+            magnetic_field=None, spin_field=None, orbital_field=None):
         """Self-consistent onsite shifts by preconditioned Anderson mixing,
         from ``shifts0`` (default zero).  ``condition`` is "stationary"
         (dE/dshifts = 0, BOPfox; ``tol`` on max |dE/dshift|) or "potential"
@@ -65,9 +80,31 @@ class Potential:
         fr = None if free is None else [bool(f) for f in np.asarray(free).ravel()]
         out = _arrays(self._core.scf(pos, sp, c, s, tol, max_iter, mixing, history, max_step, fr,
                                        refresh, condition, adjoint_tol, reuse_history,
-                                       _axes(axes)))
+                                       _axes(axes), _field(spin_field, len(pos)),
+                                       _field(orbital_field, len(pos)),
+                                       _field(magnetic_field, len(pos))))
         out["shifts"] = out["shifts"].reshape(len(pos), -1, len(self.model["basis"]))
-        return out
+        return _moments(out)
+
+
+G_SPIN = 2.00231930436  # electron spin g-factor
+MU_B = 5.7883818060e-5  # Bohr magneton in eV / T
+
+
+def _field(field, n):
+    if field is None:
+        return None
+    return np.broadcast_to(np.asarray(field, dtype=float), (n, 3)).tolist()
+
+
+def _moments(out):
+    """Magnetic moments -(1/mu_B) dE/dB from the field-source gradients."""
+    if "spin_field_gradient" in out:
+        out["spin_moment"] = 0.5 * G_SPIN * out["spin_field_gradient"]
+        orbital = out.get("orbital_field_gradient", np.zeros_like(out["spin_moment"]))
+        out["orbital_moment"] = orbital
+        out["magnetic_moment"] = out["spin_moment"] + orbital
+    return out
 
 
 def _axes(axes):
@@ -87,7 +124,8 @@ def model_from_bopjax(cfg, params, radial="powerlaw") -> dict:
     """Model dict from a ``bopjax.BOPConfig`` and a bopjax parameter dict.
 
     For ``spin="noncollinear"`` the spin axes are not part of the model:
-    pass ``params["spin_axes"]`` as ``axes`` to ``compute`` / ``scf``.
+    pass ``params["spin_axes"]`` as ``axes`` to ``compute`` / ``scf``; fields
+    (``params["magnetic_field"]`` etc.) likewise go to ``compute`` / ``scf``.
 
     ``radial`` names the bond-integral form: "powerlaw"
     (``bopjax.hamiltonian.powerlaw``), "v0" (``v0_bond``) or "exp_sum"
@@ -95,9 +133,7 @@ def model_from_bopjax(cfg, params, radial="powerlaw") -> dict:
     """
     if callable(radial):
         radial = {"powerlaw": "powerlaw", "v0_bond": "v0", "exp_sum": "exp_sum"}[radial.__name__]
-    fields = [k for k in ("magnetic_field", "spin_field", "orbital_field") if k in params]
     unsupported = [name for name, on in [
-        ("external fields " + ", ".join(fields), bool(fields)),
         ("screening", cfg.screening), ("yukawa", cfg.yukawa), ("kT > 0", cfg.kT > 0),
         ("coulomb != diagonal", cfg.coulomb != "diagonal"),
         ("Beer-Pettifor-Aoki bandwidth", cfg.bandwidth.startswith("beerpettiforaoki"))] if on]

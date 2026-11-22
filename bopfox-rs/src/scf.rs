@@ -197,12 +197,11 @@ impl Precond {
         for i in 0..n {
             let sp = bop.topo.species[i];
             let qi = &mut q[i * nc * nc..(i + 1) * nc * nc];
-            for s in 0..ns {
-                let r = &res.local_response[i][s];
-                for a in 0..nsh {
-                    for b in 0..nsh {
-                        qi[(s * nsh + a) * nc + s * nsh + b] = -0.5 * (r[a][b] + r[b][a]);
-                    }
+            let r = &res.local_response[i];
+            for c in 0..nc {
+                for c2 in 0..nc {
+                    let (rc, rc2) = (r[c / nsh][c % nsh][c2], r[c2 / nsh][c2 % nsh][c]);
+                    qi[c * nc + c2] = -0.5 * (rc + rc2);
                 }
             }
             for c in 0..nc {
@@ -434,6 +433,9 @@ fn anderson(
     };
     let mut beta = opt.mixing;
     let mut it = 0;
+    // evaluations since the best measure last fell by 10%
+    let mut stalled = 0usize;
+    let patience = opt.history.max(10);
     while err > opt.tol && it < opt.max_iter {
         it += 1;
         let h = df.len();
@@ -468,11 +470,15 @@ fn anderson(
         }
         let (f_new, e_new) = eval(&y_new);
         history.push(e_new);
+        stalled = if e_new < 0.9 * e_best { 0 } else { stalled + 1 };
         if e_new < e_best {
             e_best = e_new;
             y_best.clone_from(&y_new);
         }
-        if e_new.is_nan() || e_new > 10.0 * e_best {
+        // diverging, or stuck on a plateau with a history that no longer
+        // describes the problem: restart from the best iterate
+        if e_new.is_nan() || e_new > 10.0 * e_best || stalled >= patience {
+            stalled = 0;
             dy.clear();
             df.clear();
             beta *= 0.5;
@@ -660,7 +666,10 @@ impl<'a> Bop<'a> {
             add3(&mut virial, &w_rep);
         }
         res.energy = res.energy_atom.iter().sum();
-        let ge = self.seeded_backward(&fw, pos, cell, 1.0, &p, true);
+        let mut ge = self.seeded_backward(&fw, pos, cell, 1.0, &p, true);
+        self.add_explicit_zeeman(&res.moment, &mut ge);
+        let (mut spin_field_grad, mut orbital_field_grad) =
+            (ge.spin_field.clone(), ge.orbital_field.clone());
         let (sg, g_e, w_e) = (ge.shifts, ge.pos, ge.virial);
         let mut axes_grad = ge.axes;
         for i in 0..n {
@@ -715,6 +724,18 @@ impl<'a> Bop<'a> {
             }
         }
         res.axes_gradient = axes_grad;
+        for (a, b) in spin_field_grad.iter_mut().zip(&gs.spin_field) {
+            for c in 0..3 {
+                a[c] -= b[c];
+            }
+        }
+        for (a, b) in orbital_field_grad.iter_mut().zip(&gs.orbital_field) {
+            for c in 0..3 {
+                a[c] -= b[c];
+            }
+        }
+        res.spin_field_gradient = spin_field_grad;
+        res.orbital_field_gradient = orbital_field_grad;
         for a in 0..3 {
             for b in 0..3 {
                 virial[a][b] -= w_s[a][b];

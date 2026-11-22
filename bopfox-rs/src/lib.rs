@@ -21,7 +21,7 @@ pub mod real;
 pub mod scf;
 pub mod spinor;
 
-pub use energy::{Bop, Cell, Mode, Results};
+pub use energy::{Bop, Cell, Mode, Results, G_SPIN, MU_B};
 pub use geometry::Topology;
 pub use model::Model;
 pub use scf::{Condition, MixingHistory, ScfOptions, ScfResult};

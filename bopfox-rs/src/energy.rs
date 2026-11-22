@@ -22,6 +22,11 @@ use rayon::prelude::*;
 
 pub type Cell = Option<[[f64; 3]; 3]>;
 
+/// Bohr magneton in eV / T
+pub const MU_B: f64 = 5.7883818060e-5;
+/// electron spin g-factor
+pub const G_SPIN: f64 = 2.00231930436;
+
 /// Which derivatives [`Bop::compute_mode`] evaluates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -61,12 +66,18 @@ pub struct Results {
     pub b_inf: Vec<Vec<Vec<f64>>>,
     /// local density of states at the Fermi level, dN/d(ef) [atom][spin][shell]
     pub dos: Vec<Vec<Vec<f64>>>,
-    /// dN_{i s k} / d(level_{i s k'}) at fixed Fermi level, the response of
-    /// an atom's occupations to its own levels, [atom][spin][k][k'] (ScfStep)
+    /// dN_{i s k} / d(level_{i s' k'}) at fixed Fermi level, the response of
+    /// an atom's occupations to its own levels, [atom][s][k][s' * nshell + k'] (ScfStep)
     pub local_response: Vec<Vec<Vec<Vec<f64>>>>,
     /// dE/d(spin axes) [atom] (noncollinear; the axes need not be normalised,
     /// so the component along an axis is zero)
     pub axes_gradient: Vec<[f64; 3]>,
+    /// dE/dh of the spin field source `h_i.sigma` [atom] (magnetic): `<sigma>`;
+    /// the spin magnetic moment is `g/2` times it
+    pub spin_field_gradient: Vec<[f64; 3]>,
+    /// dE/db of the orbital field source `b_i.L` [atom] (noncollinear):
+    /// the orbital moment `<L>`
+    pub orbital_field_gradient: Vec<[f64; 3]>,
     /// dE/dshift [atom][spin][shell]; zero at self-consistency
     pub shift_gradient: Vec<Vec<Vec<f64>>>,
     /// -dE/dpositions
@@ -91,10 +102,74 @@ pub struct Bop<'a> {
     axes: Vec<[f64; 3]>,
     /// onsite spin-orbit block per species, `M x M` (noncollinear)
     spin_orbit: Vec<Vec<C64>>,
+    /// sources `h_i` of `h_i.sigma` (eV) per atom, empty for none
+    spin_field: Vec<[f64; 3]>,
+    /// sources `b_i` of `b_i.L` (eV) per atom (noncollinear), empty for none
+    orbital_field: Vec<[f64; 3]>,
 }
 
 impl<'a> Bop<'a> {
     /// Sets the local spin axes (noncollinear; need not be normalised).
+    /// Adds onsite field sources: `h_i.sigma` (`spin`, eV) and `b_i.L`
+    /// (`orbital`, eV, noncollinear only), one per atom.  In collinear
+    /// calculations only the z component of `h` couples.
+    pub fn with_fields(mut self, spin: Option<&[[f64; 3]]>, orbital: Option<&[[f64; 3]]>) -> Self {
+        let n = self.topo.n_atoms;
+        let add = |dst: &mut Vec<[f64; 3]>, src: &[[f64; 3]]| {
+            assert_eq!(src.len(), n, "one field vector per atom");
+            if dst.is_empty() {
+                *dst = vec![[0.0; 3]; n];
+            }
+            for (d, s) in dst.iter_mut().zip(src) {
+                for x in 0..3 {
+                    d[x] += s[x];
+                }
+            }
+        };
+        if let Some(h) = spin {
+            add(&mut self.spin_field, h);
+        }
+        if let Some(b) = orbital {
+            assert!(
+                self.noncollinear,
+                "an orbital field needs spin = noncollinear"
+            );
+            add(&mut self.orbital_field, b);
+        }
+        self
+    }
+
+    /// Adds the Zeeman term `-mu_B B.(L + g/2 sigma)` of an external field
+    /// `B` (Tesla, one vector per atom): `h = -mu_B g/2 B`, `b = -mu_B B`.  The
+    /// orbital term only in noncollinear calculations.
+    pub fn with_magnetic_field(self, field: &[[f64; 3]]) -> Self {
+        assert!(
+            self.model.nspin() == 2,
+            "a magnetic field needs a magnetic calculation"
+        );
+        let h: Vec<[f64; 3]> = field
+            .iter()
+            .map(|b| b.map(|v| -0.5 * G_SPIN * MU_B * v))
+            .collect();
+        let b: Vec<[f64; 3]> = field.iter().map(|b| b.map(|v| -MU_B * v)).collect();
+        let nc = self.noncollinear;
+        self.with_fields(Some(&h), nc.then_some(&b[..]))
+    }
+
+    /// The spin field along the local axis of atom i (collinear: along z).
+    fn h_par(&self, i: usize) -> f64 {
+        if self.spin_field.is_empty() {
+            return 0.0;
+        }
+        let h = self.spin_field[i];
+        if self.noncollinear {
+            let e = unit(self.axes[i]);
+            h[0] * e[0] + h[1] * e[1] + h[2] * e[2]
+        } else {
+            h[2]
+        }
+    }
+
     pub fn with_axes(mut self, axes: &[[f64; 3]]) -> Self {
         assert_eq!(axes.len(), self.topo.n_atoms, "one spin axis per atom");
         self.axes = axes.to_vec();
@@ -161,6 +236,8 @@ impl<'a> Bop<'a> {
             noncollinear: model.spin == crate::model::Spin::Noncollinear,
             axes: vec![[0.0, 0.0, 1.0]; topo.n_atoms],
             spin_orbit: Self::spin_orbit_blocks(model, &slices_for_so(model), norb),
+            spin_field: Vec::new(),
+            orbital_field: Vec::new(),
         }
     }
 
@@ -219,12 +296,18 @@ impl<'a> Bop<'a> {
         let (n, ns, nsh) = (self.topo.n_atoms, self.nspin, self.nshell);
         (0..ns)
             .map(|s| {
+                // the spin field along the axis moves spin up down and spin down up
+                let sign = if s == 0 { 1.0 } else { -1.0 };
+                let zeeman: Vec<f64> = (0..n)
+                    .map(|i| if ns == 2 { sign * self.h_par(i) } else { 0.0 })
+                    .collect();
                 let mut lev = vec![0.0; n * self.norb];
                 for i in 0..n {
                     let e0 = &self.model.onsite[self.topo.species[i]];
                     for al in 0..self.norb {
                         let k = self.orb_shell[al];
-                        lev[i * self.norb + al] = e0[k] + shifts[(i * ns + s) * nsh + k];
+                        lev[i * self.norb + al] =
+                            e0[k] + shifts[(i * ns + s) * nsh + k] + zeeman[i];
                     }
                 }
                 lev
@@ -480,9 +563,12 @@ impl<'a> Bop<'a> {
         }
         res.energy = res.energy_atom.iter().sum();
         if gradients {
-            let gr = self.seeded_backward(&fw, pos, cell, 1.0, &p, forces);
+            let mut gr = self.seeded_backward(&fw, pos, cell, 1.0, &p, forces);
+            self.add_explicit_zeeman(&res.moment, &mut gr);
             res.shift_gradient = self.unflatten(&gr.shifts);
             res.axes_gradient = gr.axes;
+            res.spin_field_gradient = gr.spin_field;
+            res.orbital_field_gradient = gr.orbital_field;
             if forces {
                 for i in 0..n {
                     for x in 0..3 {
@@ -565,6 +651,13 @@ impl<'a> Bop<'a> {
                     p[i][1][k] += 0.5 * ist * mk;
                     mom += mk;
                 }
+                // (h.e) m: the spin field along the axis, as a free-atom level
+                let hp = self.h_par(i);
+                e_atom += hp * mom;
+                for k in 0..nsh {
+                    p[i][0][k] += hp;
+                    p[i][1][k] -= hp;
+                }
             }
             res.dos.push(
                 (0..ns)
@@ -617,7 +710,8 @@ impl<'a> Bop<'a> {
                                 recomputed = walk(cl, &hd, nmom);
                                 &recomputed
                             };
-                            let mut resp = vec![vec![0.0; nsh]; nsh];
+                            // collinear: no response across the spin channels
+                            let mut resp = vec![vec![0.0; ns * nsh]; nsh];
                             for (k2, &orb) in self.slices.iter().enumerate() {
                                 let dmu = moments_tangent(cl, &hd, nmom, wk, i, orb);
                                 for (k, &(a, b)) in self.slices.iter().enumerate() {
@@ -628,7 +722,7 @@ impl<'a> Bop<'a> {
                                             v += fd[q] * dmu[d * (nmom + 1) + q];
                                         }
                                     }
-                                    resp[k][k2] = self.degeneracy[k] * v / (b - a) as f64;
+                                    resp[k][s * nsh + k2] = self.degeneracy[k] * v / (b - a) as f64;
                                 }
                             }
                             resp
@@ -661,11 +755,27 @@ impl<'a> Bop<'a> {
         }
         let (shifts, pos_grad, virial) =
             self.seeded_backward_collinear(fw, pos, cell, wbond, p, lambda, forces);
+        let nsh = self.nshell;
+        // the spin field along z moves the levels of the two channels apart
+        let spin_field = if self.nspin == 2 {
+            (0..self.topo.n_atoms)
+                .map(|i| {
+                    let g: f64 = (0..nsh)
+                        .map(|k| shifts[i * 2 * nsh + k] - shifts[(i * 2 + 1) * nsh + k])
+                        .sum();
+                    [0.0, 0.0, g]
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Grad {
             shifts,
             pos: pos_grad,
             virial,
             axes: Vec::new(),
+            spin_field,
+            orbital_field: Vec::new(),
         }
     }
 
@@ -918,6 +1028,11 @@ pub struct Grad {
     pub virial: [[f64; 3]; 3],
     /// d/d(spin axes) (noncollinear)
     pub axes: Vec<[f64; 3]>,
+    /// d/dh of the spin field sources through the levels and the onsite
+    /// blocks (magnetic models)
+    pub spin_field: Vec<[f64; 3]>,
+    /// d/db of the orbital field sources (noncollinear)
+    pub orbital_field: Vec<[f64; 3]>,
 }
 
 fn unit(a: [f64; 3]) -> [f64; 3] {
@@ -979,6 +1094,42 @@ impl<'a> Bop<'a> {
                     *x += *y;
                 }
             }
+            if !self.spin_field.is_empty() {
+                // h_perp.sigma, the part across the axis (the part along it is in the levels)
+                let (h, e) = (self.spin_field[i], unit(self.axes[i]));
+                let hp = self.h_par(i);
+                let perp = [h[0] - hp * e[0], h[1] - hp * e[1], h[2] - hp * e[2]];
+                let sigma = pauli();
+                for a in 0..norb {
+                    for t in 0..2 {
+                        for u in 0..2 {
+                            let mut v = ZERO;
+                            for x in 0..3 {
+                                v += sigma[x][t * 2 + u] * perp[x];
+                            }
+                            o[(a * 2 + t) * m + a * 2 + u] += v;
+                        }
+                    }
+                }
+            }
+            if !self.orbital_field.is_empty() {
+                let b = self.orbital_field[i];
+                for (&sh, &(a0, a1)) in self.model.basis.iter().zip(&self.slices) {
+                    let l = angular_momentum(sh);
+                    let nl = a1 - a0;
+                    for a in 0..nl {
+                        for c in 0..nl {
+                            let mut v = ZERO;
+                            for x in 0..3 {
+                                v += l[x][a * nl + c] * b[x];
+                            }
+                            for t in 0..2 {
+                                o[((a0 + a) * 2 + t) * m + (a0 + c) * 2 + t] += v;
+                            }
+                        }
+                    }
+                }
+            }
         }
         out
     }
@@ -988,7 +1139,7 @@ impl<'a> Bop<'a> {
             norb: self.norb,
             hblk: h,
             onsite,
-            orbital_diagonal: self.spin_orbit.is_empty(),
+            orbital_diagonal: self.spin_orbit.is_empty() && self.orbital_field.is_empty(),
         }
     }
 
@@ -1076,19 +1227,22 @@ impl<'a> Bop<'a> {
                 let cl = &self.topo.clusters[i];
                 let mut store = None;
                 let wk = self.spinor_walk_of(fw, i, &sd, &mut store);
-                (0..2)
-                    .map(|s| {
-                        let mut resp = vec![vec![0.0; nsh]; nsh];
-                        for (k2, &(a0, a1)) in self.slices.iter().enumerate() {
-                            let mut d_o = vec![ZERO; m * m];
-                            for a in a0..a1 {
-                                for t in 0..2 {
-                                    for u in 0..2 {
-                                        d_o[(a * 2 + t) * m + a * 2 + u] = fw.proj[i][s][t * 2 + u];
-                                    }
+                // the level of channel (s2, k2) moves the occupations of both
+                // local spin channels: with canted neighbours or spin-orbit
+                // coupling the channels are not independent
+                let mut resp = vec![vec![vec![0.0; 2 * nsh]; nsh]; 2];
+                for s2 in 0..2 {
+                    for (k2, &(a0, a1)) in self.slices.iter().enumerate() {
+                        let mut d_o = vec![ZERO; m * m];
+                        for a in a0..a1 {
+                            for t in 0..2 {
+                                for u in 0..2 {
+                                    d_o[(a * 2 + t) * m + a * 2 + u] = fw.proj[i][s2][t * 2 + u];
                                 }
                             }
-                            let dm = spinor::moment_matrices_tangent(cl, &sd, nmom, wk, i, &d_o);
+                        }
+                        let dm = spinor::moment_matrices_tangent(cl, &sd, nmom, wk, i, &d_o);
+                        for s in 0..2 {
                             for (k, &(a, b)) in self.slices.iter().enumerate() {
                                 let fd = &fw.derivs[i][s][k].fill.d;
                                 let mut v = 0.0;
@@ -1102,12 +1256,12 @@ impl<'a> Bop<'a> {
                                             );
                                     }
                                 }
-                                resp[k][k2] = self.degeneracy[k] * v / (b - a) as f64;
+                                resp[s][k][s2 * nsh + k2] = self.degeneracy[k] * v / (b - a) as f64;
                             }
                         }
-                        resp
-                    })
-                    .collect()
+                    }
+                }
+                resp
             })
             .collect()
     }
@@ -1257,6 +1411,95 @@ impl<'a> Bop<'a> {
                 grad.axes[i][x] = v;
             }
         }
+        // field sources: dE/dh_par through the levels, dE/dh_perp and dE/db
+        // through the onsite blocks
+        let sigma = pauli();
+        let orbital = !(self.spin_orbit.is_empty() && self.orbital_field.is_empty());
+        grad.spin_field = vec![[0.0; 3]; n];
+        grad.orbital_field = vec![[0.0; 3]; n];
+        let lmat: Vec<[Vec<C64>; 3]> = self
+            .model
+            .basis
+            .iter()
+            .map(|&sh| angular_momentum(sh))
+            .collect();
+        for i in 0..n {
+            let e = unit(self.axes[i]);
+            let g_par: f64 = (0..nsh)
+                .map(|k| grad.shifts[i * 2 * nsh + k] - grad.shifts[(i * 2 + 1) * nsh + k])
+                .sum();
+            let mut sv = [0.0; 3];
+            for x in 0..3 {
+                sv[x] = (0..norb).map(|a| pair(i, a, &sigma[x])).sum();
+            }
+            let es = e[0] * sv[0] + e[1] * sv[1] + e[2] * sv[2];
+            for x in 0..3 {
+                grad.spin_field[i][x] = g_par * e[x] + sv[x] - es * e[x];
+            }
+            if orbital {
+                let o = &obar[i * mm..(i + 1) * mm];
+                for (k, &(a0, a1)) in self.slices.iter().enumerate() {
+                    let nl = a1 - a0;
+                    for x in 0..3 {
+                        let mut v = 0.0;
+                        for a in 0..nl {
+                            for c in 0..nl {
+                                for t in 0..2 {
+                                    v += o[((a0 + a) * 2 + t) * m + (a0 + c) * 2 + t]
+                                        .dot_re(lmat[k][x][a * nl + c]);
+                                }
+                            }
+                        }
+                        grad.orbital_field[i][x] += v;
+                    }
+                }
+            }
+            if !self.spin_field.is_empty() {
+                // the levels hold h.e and the onsite block h - (h.e) e, both
+                // functions of the axis: de/da = (1 - e e^T) / |a|
+                let h = self.spin_field[i];
+                let hp = self.h_par(i);
+                let na =
+                    (self.axes[i][0].powi(2) + self.axes[i][1].powi(2) + self.axes[i][2].powi(2))
+                        .sqrt();
+                let proj = |v: [f64; 3]| -> [f64; 3] {
+                    let ev = e[0] * v[0] + e[1] * v[1] + e[2] * v[2];
+                    [
+                        (v[0] - ev * e[0]) / na,
+                        (v[1] - ev * e[1]) / na,
+                        (v[2] - ev * e[2]) / na,
+                    ]
+                };
+                let (ph, ps) = (proj(h), proj(sv));
+                for x in 0..3 {
+                    grad.axes[i][x] += (g_par - es) * ph[x] - hp * ps[x];
+                }
+            }
+        }
         grad
+    }
+
+    /// The explicit Zeeman energy `sum_i (h_i.e_i) m_i` (collinear: `h_z m`)
+    /// at fixed occupations, added to an energy gradient.
+    pub(crate) fn add_explicit_zeeman(&self, moments: &[f64], grad: &mut Grad) {
+        if self.spin_field.is_empty() || moments.is_empty() {
+            return;
+        }
+        for i in 0..self.topo.n_atoms {
+            let m = moments[i];
+            if self.noncollinear {
+                let e = unit(self.axes[i]);
+                let a = self.axes[i];
+                let na = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+                let h = self.spin_field[i];
+                let hp = self.h_par(i);
+                for x in 0..3 {
+                    grad.spin_field[i][x] += m * e[x];
+                    grad.axes[i][x] += m * (h[x] - hp * e[x]) / na;
+                }
+            } else {
+                grad.spin_field[i][2] += m;
+            }
+        }
     }
 }
