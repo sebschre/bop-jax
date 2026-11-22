@@ -14,10 +14,22 @@ docs/iron-carbon.md.  The fitted values are printed in the form of
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 import time
 
-import numpy as np
+import jax
+
+# compiled functions are cached on disk, so the short-lived cell processes
+# of the fit load them instead of compiling again
+jax.config.update("jax_compilation_cache_dir",
+                  os.environ.get("BOPJAX_JAX_CACHE", os.path.expanduser("~/.cache/bopjax/jax")))
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)
+
+import jax.numpy as jnp  # noqa: E402
+
+import numpy as np  # noqa: E402
 from _iron_carbon import (Calculator, Cell, bcc_fe, bcc_supercell, cementite, diamond,
                           fe_moments, fe_with_carbon, iron_carbon)
 
@@ -68,57 +80,56 @@ FREE = {
 }
 
 
-def _cell_worker(name, exact, gtol, conn):
-    """One cell in its own process: its compiled functions (exact forces and
-    stress of Fe16C take several GB to compile) and its warm starts stay
-    there.  Commands are parameter dicts; the answer is a dict of results."""
+CELLS = {"oct": lambda: fe_with_carbon("octahedral"), "tet": lambda: fe_with_carbon("tetrahedral"),
+         "cem": cementite}
+
+
+def cell_job(name, values, mode, state, out_path, exact):
+    """One cell, one evaluation, in a process of its own (``--cell``): exact
+    forces and stress of Fe16C take several GB to compile, and three cells
+    kept in one process, or in three resident workers, ran out of 15 GB.
+    The persistent compilation cache makes a fresh process cheap; warm
+    starts (shifts, shell amplitudes, positions) go through ``state``."""
     config = dict(IRON_CARBON_CONFIG, batch=4)  # exact forces otherwise need > 15 GB
-    geometry = {"oct": fe_with_carbon("octahedral"), "tet": fe_with_carbon("tetrahedral"),
-                "cem": cementite()}[name]
-    calc = Calculator(Cell(name, *geometry), config=config)
+    calc = Calculator(Cell(name, *CELLS[name]()), config=config)
     calc.exact = exact
-    while True:
-        msg = conn.recv()
-        if msg is None:
-            break
-        values, mode = msg
-        p = iron_carbon(**values)
-        try:
-            if mode == "relax":  # every atom (report); the tetrahedral C stays on its site
-                e, aux = calc.relax(p, fixed=[16] if name == "tet" else None)
-            elif name == "cem":
-                e, aux = calc.solve(p)
-            else:
-                e, aux = calc.relax_shells(p, gtol=gtol)
-            out = {"energy": e, "moment": np.asarray(aux["moment"]),
-                   "charge": np.asarray(aux["charge"]),
-                   "positions": np.asarray(calc.positions),
-                   "amplitudes": np.asarray(getattr(calc, "amplitudes", [])),
-                   "stationarity": calc.stationarity, "volume": calc.volume()}
-            if name in ("oct", "cem"):
-                out["stress"] = calc.stress(p)
-            conn.send(out)
-        except Exception as err:  # noqa: BLE001
-            conn.send({"error": str(err)})
+    if os.path.exists(state):
+        st = np.load(state)
+        calc._x = jnp.asarray(st["shifts"])
+        if "amplitudes" in st and len(st["amplitudes"]):
+            calc._modes = jnp.asarray(calc.shell_modes())
+            calc._base = calc.positions
+            calc.amplitudes = st["amplitudes"]
+        calc.positions = jnp.asarray(st["positions"])
+    p = iron_carbon(**values)
+    gtol = 0.15 if exact else 2e-3  # exact gradients carry noise from the adjoint solve
+    if mode == "relax":  # every atom (report); the tetrahedral C stays on its site
+        e, aux = calc.relax(p, fixed=[16] if name == "tet" else None)
+    elif name == "cem":
+        e, aux = calc.solve(p)
+    else:
+        e, aux = calc.relax_shells(p, gtol=gtol)
+    out = {"energy": e, "moment": np.asarray(aux["moment"]), "charge": np.asarray(aux["charge"]),
+           "positions": np.asarray(calc.positions),
+           "amplitudes": np.asarray(getattr(calc, "amplitudes", [])),
+           "stationarity": calc.stationarity, "volume": calc.volume()}
+    if name in ("oct", "cem"):
+        out["stress"] = calc.stress(p)
+    np.savez(out_path, **out)
+    if mode == "fit":  # warm start for the next evaluation
+        np.savez(state, shifts=np.asarray(calc._x), positions=out["positions"],
+                 amplitudes=out["amplitudes"])
 
 
 class Model:
-    def __init__(self, exact=True, checkpoint=None):
-        import multiprocessing as mp
-
+    def __init__(self, exact=True, checkpoint=None,
+                 workdir=os.path.expanduser("~/.cache/bopjax/fit_state")):
         # exact (implicit-differentiation) forces and stress, or partial
         # derivatives at fixed shifts: those are off by up to 0.76 eV/A at
-        # the parameters of the first fit.  Exact gradients carry noise from
-        # the adjoint solve (about 0.1), hence the loose tolerance.
-        gtol = 0.15 if exact else 2e-3
-        ctx = mp.get_context("spawn")
-        self.workers = {}
-        for name in ("oct", "tet", "cem"):
-            here, there = ctx.Pipe()
-            proc = ctx.Process(target=_cell_worker, args=(name, exact, gtol, there),
-                               daemon=True)
-            proc.start()
-            self.workers[name] = (here, proc)
+        # the parameters of the first fit
+        self.exact = exact
+        self.workdir = workdir
+        os.makedirs(workdir, exist_ok=True)
         self.checkpoint = checkpoint
         p = iron_carbon()
         self.e_fe = Calculator(Cell("bcc Fe", *bcc_fe())).solve(p)[0] / 2
@@ -132,13 +143,21 @@ class Model:
         self.best = (np.inf, None)
 
     def _ask(self, name, values, mode="fit"):
-        conn = self.workers[name][0]
-        conn.send(({k: float(v) if v is not None else None for k, v in values.items()},
-                   mode))
-        out = conn.recv()
-        if "error" in out:
-            raise RuntimeError(out["error"])
-        return out
+        out = os.path.join(self.workdir, f"{name}_out.npz")
+        if os.path.exists(out):
+            os.remove(out)
+        cmd = [sys.executable, "-u", os.path.abspath(__file__), "--cell", name, "--mode", mode,
+               "--values", json.dumps({k: (None if v is None else float(v))
+                                       for k, v in values.items()}),
+               "--state", os.path.join(self.workdir, f"{name}_state.npz"), "--out", out]
+        if not self.exact:
+            cmd.append("--partial")
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0 or not os.path.exists(out):
+            tail = (res.stderr or "").strip().splitlines()[-3:]
+            raise RuntimeError(f"{name} job failed ({res.returncode}): {' | '.join(tail)}")
+        with np.load(out) as d:
+            return {k: d[k] for k in d.files}
 
     def properties(self, values, relax_cementite=False, full=False):
         """Fit quantities.  The fit relaxes the breathing modes of the first
@@ -150,6 +169,9 @@ class Model:
         t = self._ask("tet", values, mode)
         c = self._ask("cem", values, "relax" if relax_cementite else "fit")
         out = {"u oct": o["amplitudes"], "u tet": t["amplitudes"]}
+        o = {k: (float(v) if np.ndim(v) == 0 else v) for k, v in o.items()}
+        t = {k: (float(v) if np.ndim(v) == 0 else v) for k, v in t.items()}
+        c = {k: (float(v) if np.ndim(v) == 0 else v) for k, v in c.items()}
         out["E_sol oct"] = o["energy"] - 16 * self.e_fe - self.e_c
         out["E tet - oct"] = t["energy"] - o["energy"]
         dp = -(o["stress"] - self.host_stress) * o["volume"] / 160.21766
@@ -225,9 +247,21 @@ def main():
     ap.add_argument("--start", help="JSON checkpoint to start from")
     ap.add_argument("--no-full-report", action="store_true",
                     help="report the fitted (shell-relaxed) properties only")
+    ap.add_argument("--workdir", default=os.path.expanduser("~/.cache/bopjax/fit_state"),
+                    help="directory for the warm starts of the cells")
+    # internal: one cell, one evaluation (see cell_job)
+    ap.add_argument("--cell", help=argparse.SUPPRESS)
+    ap.add_argument("--mode", default="fit", help=argparse.SUPPRESS)
+    ap.add_argument("--values", help=argparse.SUPPRESS)
+    ap.add_argument("--state", help=argparse.SUPPRESS)
+    ap.add_argument("--out", help=argparse.SUPPRESS)
     args = ap.parse_args()
+    if args.cell:
+        cell_job(args.cell, json.loads(args.values), args.mode, args.state, args.out,
+                 exact=not args.partial)
+        return
 
-    model = Model(exact=not args.partial, checkpoint=args.checkpoint)
+    model = Model(exact=not args.partial, checkpoint=args.checkpoint, workdir=args.workdir)
     start = dict(IRON_CARBON_FIT)
     if start.get("decay_pi") is None:
         start["decay_pi"] = start["decay"]
