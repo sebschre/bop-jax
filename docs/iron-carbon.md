@@ -94,22 +94,26 @@ cross parameters, bounded least squares, starting from the partial-force fit
 below; about 10-25 minutes per evaluation, each cell in its own process.
 Cost 16.9 at the start, 16.6 at the end (17 evaluations). FM Fe16C cells;
 "shells" relaxes the breathing modes of the first two Fe shells around C,
-as in the fit; "all atoms" relaxes every atom at fixed cell. Cementite at
-the experimental lattice ("shells": experimental positions; "all atoms":
-relaxed).
+as in the fit. Cementite at the experimental lattice and positions.
 
-| Property | Shells (fitted) | All atoms | Target |
-|---|---|---|---|
-| E_sol, octahedral, relative to diamond (eV) | 0.717 | | 0.72 +- 0.15 |
-| E(tetrahedral) - E(octahedral) (eV) | 0.746 | | 0.86 +- 0.10 |
-| dipole tensor, axial (eV) | **4.29** | | 8.0 +- 1.5 |
-| dipole tensor, transverse (eV) | **6.92** | | 3.4 +- 1.5 |
-| formation energy of Fe3C (eV/atom) | 0.034 | | +0.03 +- 0.04 |
-| pressure of Fe3C at the experimental lattice (GPa) | -6.5 | | 0 +- 5 |
-| mean Fe moment of Fe3C (muB) | 2.11 | | 1.95 +- 0.15 |
-| electrons gained by octahedral C | -0.06 | | +0.3 +- 0.4 |
+| Property | Shells (fitted) | Target |
+|---|---|---|
+| E_sol, octahedral, relative to diamond (eV) | 0.717 | 0.72 +- 0.15 |
+| E(tetrahedral) - E(octahedral) (eV) | 0.746 | 0.86 +- 0.10 |
+| dipole tensor, axial (eV) | **4.29** | 8.0 +- 1.5 |
+| dipole tensor, transverse (eV) | **6.92** | 3.4 +- 1.5 |
+| formation energy of Fe3C (eV/atom) | 0.034 | +0.03 +- 0.04 |
+| pressure of Fe3C at the experimental lattice (GPa) | -6.5 | 0 +- 5 |
+| mean Fe moment of Fe3C (muB) | 2.11 | 1.95 +- 0.15 |
+| electrons gained by octahedral C | -0.06 | +0.3 +- 0.4 |
 
-(The all-atom column is being computed.)
+The relaxation of every atom with exact forces (`report(full=True)`,
+more than 4 hours) was cut short twice by container restarts and is not
+in the table. With the partial-force parameters, relaxing every atom
+lowered the solution energy by about 0.1 eV and the tet - oct difference
+by about 0.2 eV (partial-derivative forces), so the barrier with every atom
+relaxed may be below 0.75 eV; the dipole anisotropy changed by less than
+0.1 eV.
 
 - **Energetics.** The solution energy of octahedral carbon (0.72 eV), the
   formation energy of cementite (+0.034 eV/atom, marginally metastable as in
@@ -171,7 +175,8 @@ transverse neighbours at 2.02 A (a separate decay or onset for them) or an
 angular term; not tried.
 
 **Other limitations.**
-- The migration barrier, 0.75 eV, is about 0.1 eV low.
+- The migration barrier, 0.75 eV, is about 0.1 eV low, and may be lower
+  with every atom relaxed (not computed with exact forces).
 - Carbon loses charge to iron where DFT has it gain some.
 - Fe16C is not the dilute limit, and three of the targets were taken from
   memory, not checked against the papers (see [Targets](#targets-examplesfit_iron_carbonpy)).
@@ -259,12 +264,11 @@ refit; as a fitted BOP it still reproduces its targets.
 
 Fe16C cells (2x2x2 bcc, a = 2.8394 A, the equilibrium of the Egorov iron),
 FM, the breathing modes of the first two Fe shells around C relaxed during
-the fit (all atoms at fixed cell for the report; a full relaxation needs
-fresh levels after almost every step and costs about an hour), C held on
+the fit (`report(full=True)` relaxes every atom at fixed cell, more than
+4 hours with exact forces), C held on
 the tetrahedral site (the saddle point). The dipole tensor is -V times the stress of the relaxed cell
 minus that of pure Fe16. Cementite is at the experimental lattice and
-positions (Wood et al., J. Appl. Cryst. 37, 2004) during the fit and
-relaxed at fixed cell for the report. The tolerances are loose: a 16-atom
+positions (Wood et al., J. Appl. Cryst. 37, 2004). The tolerances are loose: a 16-atom
 cell is not the dilute limit, and three of the targets were not checked
 against the papers.
 
