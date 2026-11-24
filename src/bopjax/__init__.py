@@ -11,7 +11,7 @@ try:
 except PackageNotFoundError:  # running from a source tree without installation
     __version__ = "0+unknown"
 
-from .bop import (BOPConfig, make_energy_fn, make_orbital_moment, moments,  # noqa: E402
+from .bop import (BOPConfig, SpeciesSettings, make_energy_fn, make_orbital_moment, moments,  # noqa: E402
                   stoner_shifts)
 from .geometry import Topology, build_topology, needs_rebuild  # noqa: E402
 from .zeeman import make_magnetic_moment  # noqa: E402
@@ -21,6 +21,7 @@ from .scf import (SCFResult, make_forces, make_potential, make_scf,  # noqa: E40
 __all__ = [
     "BOPConfig",
     "SCFResult",
+    "SpeciesSettings",
     "Topology",
     "build_topology",
     "make_energy_fn",

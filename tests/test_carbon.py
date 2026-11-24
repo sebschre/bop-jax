@@ -12,7 +12,7 @@ from bopjax.hamiltonian import v0_bond
 from bopjax.models import CARBON_CONFIG, carbon
 
 FCC = 0.5 * np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0.0]])
-A_DIAMOND = 3.5651
+A_DIAMOND = 3.5653
 
 
 def diamond(a):
@@ -55,13 +55,13 @@ def e_diamond():
 
 
 def test_structural_order(e_diamond):
-    e_gr = solve(graphene(2.4394))[0]
+    e_gr = solve(graphene(2.4477))[0]
     e_lon = solve(lonsdaleite(A_DIAMOND))[0]
-    e_sc = solve(sc(1.9218))[0]
-    # fitted (each phase at its own equilibrium): graphene +0.096, lonsdaleite
-    # +0.011, sc +2.87 eV/atom above diamond
-    assert 0.03 < e_gr - e_diamond < 0.16
-    assert 0.0 < e_lon - e_diamond < 0.04
+    e_sc = solve(sc(1.9449))[0]
+    # each phase at its own equilibrium: graphene +0.012, lonsdaleite
+    # +0.003, sc +2.68 eV/atom above diamond
+    assert 0.0 < e_gr - e_diamond < 0.06
+    assert 0.0 < e_lon - e_diamond < 0.02
     assert 2.0 < e_sc - e_diamond < 3.5
 
 
