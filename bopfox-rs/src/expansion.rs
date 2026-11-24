@@ -359,6 +359,28 @@ fn terminated_chain<T: Real>(
     (a_hat, b_hat)
 }
 
+/// b_inf, widened where needed so that the scaled recursion chain has its
+/// spectrum inside [-1, 1] (`bopjax.expansion.guarded_width`: three passes,
+/// a smooth max(1, reach) of width 0.02).  The extreme eigenvalues carry
+/// exact first derivatives (Rayleigh quotients of the eigenvectors).
+fn guarded_width<T: Real>(a: &[T], b: &[T], ainf: T, binf: T, m: &Model, nrec: usize) -> T {
+    let smooth = 0.02;
+    let abs = |x: T| if x.val() < 0.0 { -x } else { x };
+    let mut binf = binf;
+    for _ in 0..3 {
+        let (a_hat, b_hat) = terminated_chain(a, b, ainf, binf, m, nrec);
+        let (lo, hi, _, _) = extreme_eigenvalues(&a_hat, &b_hat[1..]);
+        let reach = if abs(hi).val() >= abs(lo).val() {
+            abs(hi)
+        } else {
+            abs(lo)
+        };
+        let over = reach - 1.0;
+        binf *= (over + (over * over + smooth * smooth).sqrt()) * 0.5 + 1.0;
+    }
+    binf
+}
+
 /// Band centre, half width and Chebyshev moments sigma_0..sigma_nexp of one
 /// local DOS from its moments.
 pub fn local_expansion<T: Real>(mu: &[T], m: &Model, kern: &[f64]) -> (T, T, Vec<T>) {
@@ -366,6 +388,11 @@ pub fn local_expansion<T: Real>(mu: &[T], m: &Model, kern: &[f64]) -> (T, T, Vec
     let (ainf, binf) = band_centre_and_width(&a, &b, m);
     let nexp = m.n_expansion();
     let nrec = n_recursion(nexp).1.max(1);
+    let binf = if m.bandwidth_guard {
+        guarded_width(&a, &b, ainf, binf, m, nrec)
+    } else {
+        binf
+    };
     let (a_hat, b_hat) = terminated_chain(&a, &b, ainf, binf, m, nrec);
     let mut k_prev = vec![T::zero(); nrec + 1];
     let mut k = vec![T::zero(); nrec + 1];
@@ -533,8 +560,19 @@ pub struct Local {
 }
 
 impl Local {
+    /// An absent shell: no states (the band only keeps the Fermi-level
+    /// bracket finite, as in bopjax).
+    pub fn absent() -> Self {
+        Local {
+            ainf: 0.0,
+            binf: 1.0,
+            sigma: vec![0.0],
+            gamma0: 0.0,
+        }
+    }
+
     pub fn new(mu: &[f64], m: &Model, kern: &[f64]) -> Self {
-        let (ainf, binf, sigma) = local_expansion(mu, m, kern);
+        let (ainf, binf, sigma) = local_expansion(&mu[..=m.nmom], m, kern);
         let gamma0 = sigma[1] / kern[1];
         Local {
             ainf,
@@ -555,6 +593,20 @@ pub struct LocalDerivs {
     pub bond: D,
 }
 
+impl LocalDerivs {
+    /// An absent shell: no electrons, no energy.
+    pub fn absent() -> Self {
+        LocalDerivs {
+            fill: D::zero(),
+            bond: D::zero(),
+        }
+    }
+}
+
+///
+/// `mu` holds the moments up to the walk's `nmom` (that of the whole model);
+/// the expansion of `m` (one species) may use fewer.  The derivative layout
+/// is always that of `mu`: entry `mu.len()` is the Fermi level.
 pub fn local_derivs(
     mu: &[f64],
     ef: f64,
@@ -562,10 +614,10 @@ pub fn local_derivs(
     kern: &[f64],
     smear: Option<&Smearing>,
 ) -> LocalDerivs {
-    let nmom = m.nmom;
+    let nmom = mu.len() - 1;
     let mud: Vec<D> = mu.iter().enumerate().map(|(i, &x)| D::var(x, i)).collect();
     let efd = D::var(ef, nmom + 1);
-    let (ainf, binf, sigma) = local_expansion(&mud, m, kern);
+    let (ainf, binf, sigma) = local_expansion(&mud[..=m.nmom], m, kern);
     let gamma0 = sigma[1] / kern[1];
     let (fill, bond) = filling_bond(&sigma, ainf, binf, efd, gamma0, smear);
     LocalDerivs { fill, bond }

@@ -99,7 +99,21 @@ pub struct Bop<'a> {
     slices: Vec<(usize, usize)>,
     orb_shell: Vec<usize>,
     degeneracy: Vec<f64>,
-    kernel: Vec<f64>,
+    /// expansion settings per species (`Model::species_model`) and kernels
+    sp_models: Vec<Model>,
+    sp_kernels: Vec<Vec<f64>>,
+    /// [species][shell]: whether the species carries the shell
+    has_shell: Vec<Vec<bool>>,
+    /// [species][orbital] 1 or 0 (bond blocks into absent shells vanish)
+    orb_on: Vec<Vec<f64>>,
+    /// per species, the projector (nspin * nshell)^2 of the shifts onto the
+    /// independent ones: shells and spins tied together (`atomic_shifts`,
+    /// `spin_polarized = false`) share their mean, absent shells get none;
+    /// None without per-species settings (identity)
+    tie: Option<Vec<Vec<f64>>>,
+    /// [species] the start orbitals of its walks (its own orbitals; empty:
+    /// all orbitals)
+    starts: Vec<Vec<usize>>,
     smear: Option<expansion::Smearing>,
     noncollinear: bool,
     /// local spin axes (noncollinear), default all along z
@@ -236,7 +250,47 @@ impl<'a> Bop<'a> {
             slices,
             orb_shell,
             degeneracy,
-            kernel: expansion::kernel(model),
+            sp_models: (0..model.nspecies())
+                .map(|s| model.species_model(s))
+                .collect(),
+            sp_kernels: (0..model.nspecies())
+                .map(|s| expansion::kernel(&model.species_model(s)))
+                .collect(),
+            has_shell: (0..model.nspecies())
+                .map(|s| {
+                    (0..model.basis.len())
+                        .map(|k| model.has_shell(s, k))
+                        .collect()
+                })
+                .collect(),
+            orb_on: (0..model.nspecies())
+                .map(|s| {
+                    model
+                        .basis
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(k, sh)| {
+                            std::iter::repeat_n(
+                                f64::from(u8::from(model.has_shell(s, k))),
+                                sh.norb(),
+                            )
+                        })
+                        .collect()
+                })
+                .collect(),
+            tie: Self::tie_projectors(model, nspin),
+            starts: (0..model.nspecies())
+                .map(|s| {
+                    if model.species.is_none() {
+                        return Vec::new();
+                    }
+                    let (sl, _) = shell_slices(&model.basis);
+                    (0..model.basis.len())
+                        .filter(|&k| model.has_shell(s, k))
+                        .flat_map(|k| sl[k].0..sl[k].1)
+                        .collect()
+                })
+                .collect(),
             smear: expansion::smearing(model),
             noncollinear: model.spin == crate::model::Spin::Noncollinear,
             axes: vec![[0.0, 0.0, 1.0]; topo.n_atoms],
@@ -244,6 +298,63 @@ impl<'a> Bop<'a> {
             spin_field: Vec::new(),
             orbital_field: Vec::new(),
         }
+    }
+
+    fn tie_projectors(model: &Model, nspin: usize) -> Option<Vec<Vec<f64>>> {
+        let st = model.species.as_ref()?;
+        let nsh = model.basis.len();
+        let nc = nspin * nsh;
+        Some(
+            (0..model.nspecies())
+                .map(|sp| {
+                    let key = |c: usize| -> Option<(usize, usize)> {
+                        let (s, k) = (c / nsh, c % nsh);
+                        if !model.has_shell(sp, k) {
+                            return None;
+                        }
+                        let kk = if st[sp].atomic_shifts { usize::MAX } else { k };
+                        let ss = if !st[sp].spin_polarized {
+                            usize::MAX
+                        } else {
+                            s
+                        };
+                        Some((kk, ss))
+                    };
+                    let mut pm = vec![0.0; nc * nc];
+                    for c in 0..nc {
+                        let Some(kc) = key(c) else { continue };
+                        let members: Vec<usize> = (0..nc).filter(|&d| key(d) == Some(kc)).collect();
+                        for &d in &members {
+                            pm[c * nc + d] = 1.0 / members.len() as f64;
+                        }
+                    }
+                    pm
+                })
+                .collect(),
+        )
+    }
+
+    /// The shifts (or a gradient with respect to them: the projector is
+    /// symmetric) projected onto the independent shifts; identity without
+    /// per-species settings.
+    pub fn project_shifts(&self, x: &[f64]) -> Vec<f64> {
+        let Some(tie) = &self.tie else {
+            return x.to_vec();
+        };
+        let nc = self.nspin * self.nshell;
+        let mut out = vec![0.0; x.len()];
+        for i in 0..self.topo.n_atoms {
+            let pm = &tie[self.topo.species[i]];
+            for c in 0..nc {
+                out[i * nc + c] = (0..nc).map(|d| pm[c * nc + d] * x[i * nc + d]).sum();
+            }
+        }
+        out
+    }
+
+    /// The tie projector of atom i, or None (identity).
+    pub(crate) fn tie_of(&self, i: usize) -> Option<&[f64]> {
+        self.tie.as_ref().map(|t| &t[self.topo.species[i]][..])
     }
 
     pub fn shift_len(&self) -> usize {
@@ -335,6 +446,29 @@ impl<'a> Bop<'a> {
                 }
             })
             .collect();
+        let per_bond: Vec<(Vec<f64>, Vec<f64>)> = if m.species.is_none() {
+            per_bond
+        } else {
+            per_bond
+                .into_iter()
+                .enumerate()
+                .map(|(b, (mut v, mut d))| {
+                    let (oi, oj) = (&self.orb_on[sp[owners[b]]], &self.orb_on[sp[nl.j[b]]]);
+                    for al in 0..self.norb {
+                        for be in 0..self.norb {
+                            if oi[al] * oj[be] == 0.0 {
+                                let e = al * self.norb + be;
+                                v[e] = 0.0;
+                                for x in 0..d.len() / nn {
+                                    d[x * nn + e] = 0.0;
+                                }
+                            }
+                        }
+                    }
+                    (v, d)
+                })
+                .collect()
+        };
         let mut h = Vec::with_capacity(nl.n_bonds() * nn);
         let mut dh = Vec::with_capacity(if with_deriv {
             nl.n_bonds() * nd * nn
@@ -377,6 +511,8 @@ impl<'a> Bop<'a> {
     /// Onsite levels per spin channel, `[spin][atom * norb + orbital]`.
     fn onsite_levels(&self, shifts: &[f64]) -> Vec<Vec<f64>> {
         let (n, ns, nsh) = (self.topo.n_atoms, self.nspin, self.nshell);
+        let projected = self.project_shifts(shifts);
+        let shifts = &projected[..];
         (0..ns)
             .map(|s| {
                 // the spin field along the axis moves spin up down and spin down up
@@ -435,6 +571,7 @@ impl<'a> Bop<'a> {
                             norb: self.norb,
                             hblk: h,
                             onsite: &levels[s],
+                            starts: &self.starts[self.topo.species[i]],
                         };
                         let (wk, mu) = moments(&self.topo.clusters[i], &hd, nmom);
                         if keep {
@@ -567,9 +704,23 @@ impl<'a> Bop<'a> {
         };
         let locals: Vec<Vec<Vec<Local>>> = mu
             .par_iter()
-            .map(|at| {
+            .enumerate()
+            .map(|(i, at)| {
+                let s_i = topo.species[i];
+                let (ms, kern) = (&self.sp_models[s_i], &self.sp_kernels[s_i]);
                 at.iter()
-                    .map(|sp| sp.iter().map(|x| Local::new(x, m, &self.kernel)).collect())
+                    .map(|sp| {
+                        sp.iter()
+                            .enumerate()
+                            .map(|(k, x)| {
+                                if self.has_shell[s_i][k] {
+                                    Local::new(x, ms, kern)
+                                } else {
+                                    Local::absent()
+                                }
+                            })
+                            .collect()
+                    })
                     .collect()
             })
             .collect();
@@ -581,11 +732,21 @@ impl<'a> Bop<'a> {
         // filling and bond energy with derivatives, per atom, spin, shell
         let derivs: Vec<Vec<Vec<expansion::LocalDerivs>>> = mu
             .par_iter()
-            .map(|at| {
+            .enumerate()
+            .map(|(i, at)| {
+                let s_i = topo.species[i];
+                let (ms, kern) = (&self.sp_models[s_i], &self.sp_kernels[s_i]);
                 at.iter()
                     .map(|sp| {
                         sp.iter()
-                            .map(|x| local_derivs(x, ef, m, &self.kernel, self.smear.as_ref()))
+                            .enumerate()
+                            .map(|(k, x)| {
+                                if self.has_shell[s_i][k] {
+                                    local_derivs(x, ef, ms, kern, self.smear.as_ref())
+                                } else {
+                                    expansion::LocalDerivs::absent()
+                                }
+                            })
                             .collect()
                     })
                     .collect()
@@ -815,6 +976,7 @@ impl<'a> Bop<'a> {
                                 norb,
                                 hblk: h,
                                 onsite: &levels[s],
+                                starts: &self.starts[self.topo.species[i]],
                             };
                             let cl = &topo.clusters[i];
                             let recomputed;
@@ -884,7 +1046,7 @@ impl<'a> Bop<'a> {
             Vec::new()
         };
         Grad {
-            shifts,
+            shifts: self.project_shifts(&shifts),
             pos: pos_grad,
             virial,
             axes: Vec::new(),
@@ -980,6 +1142,7 @@ impl<'a> Bop<'a> {
                                 norb,
                                 hblk: h,
                                 onsite: &levels[s],
+                                starts: &self.starts[self.topo.species[i]],
                             };
                             let cl = &topo.clusters[i];
                             let recomputed;

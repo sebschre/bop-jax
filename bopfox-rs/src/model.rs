@@ -58,6 +58,16 @@ pub enum RepulsionForm {
     Powerlaw,
     /// Egorov et al.: exponential + core pair term, Gaussian densities
     Egorov,
+    /// iron-carbon (`bopjax.models.FECARBON_REPULSION`): Egorov pair and core
+    /// term times a cosine taper `p[5], p[6]`; density Gaussian plus
+    /// exponential `p0 exp(-p1 (r - p2)^2) + p3 exp(-p4 r)` times a taper
+    /// `p[5], p[6]`; power-law embedding
+    Fecarbon,
+}
+
+/// 1 below `rc - dc`, 0 above `rc`, half cosine in between (`models._taper`).
+fn taper<T: Real>(r: T, rc: f64, dc: f64) -> T {
+    crate::hamiltonian::cosine_cutoff(r, rc, dc)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,14 +86,8 @@ impl Repulsion {
         match self.form {
             RepulsionForm::V0 => (-(r / p[2] - 1.0) * p[1]).exp() * p[0],
             RepulsionForm::Powerlaw => (r.powf(-1.0) * p[2]).powf(p[1]) * p[0],
-            RepulsionForm::Egorov => {
-                let mut e = (-r.powf(p[2]) * p[1]).exp() * p[0];
-                if r.val() < p[3] {
-                    let d = -r + p[3];
-                    e += d * d * d / r * d.exp() * p[4];
-                }
-                e
-            }
+            RepulsionForm::Egorov => egorov_pair(p, r),
+            RepulsionForm::Fecarbon => egorov_pair(p, r) * taper(r, p[5], p[6]),
         }
     }
 
@@ -100,6 +104,17 @@ impl Repulsion {
                 let d = r - p[2];
                 (-(d * d) * p[1]).exp() * p[0]
             }
+            RepulsionForm::Fecarbon => {
+                let d = r - p[2];
+                let mut rho = T::zero();
+                if p[0] != 0.0 {
+                    rho += (-(d * d) * p[1]).exp() * p[0];
+                }
+                if p[3] != 0.0 {
+                    rho += (-r * p[4]).exp() * p[3];
+                }
+                rho * taper(r, p[5], p[6])
+            }
         }
     }
 
@@ -110,6 +125,47 @@ impl Repulsion {
         let p = &self.embed[s];
         rho.powf(p[1]) * p[0]
     }
+}
+
+fn egorov_pair<T: Real>(p: &[f64], r: T) -> T {
+    let mut e = (-r.powf(p[2]) * p[1]).exp() * p[0];
+    if r.val() < p[3] {
+        let d = -r + p[3];
+        e += d * d * d / r * d.exp() * p[4];
+    }
+    e
+}
+
+/// Shells and expansion settings of one species (`bopjax.SpeciesSettings`):
+/// `basis` is the subset of the model's basis this species carries (no
+/// hopping into the others, no electrons in them); entries left out take
+/// the model's values.  `nmom` may not exceed the model's, which sets how far
+/// the moments are walked.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpeciesSettings {
+    pub basis: Vec<Shell>,
+    #[serde(default)]
+    pub nmom: Option<usize>,
+    #[serde(default)]
+    pub nexp: Option<usize>,
+    #[serde(default)]
+    pub bandwidth: Option<Bandwidth>,
+    #[serde(default)]
+    pub terminator: Option<Terminator>,
+    #[serde(default)]
+    pub kernel: Option<Kernel>,
+    #[serde(default)]
+    pub bandwidth_guard: Option<bool>,
+    /// false: one onsite shift for both spin channels (magnetic models)
+    #[serde(default = "default_true")]
+    pub spin_polarized: bool,
+    /// one onsite shift for all shells of the species
+    #[serde(default)]
+    pub atomic_shifts: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Coulomb interaction between the charges of different atoms.
@@ -196,6 +252,14 @@ pub struct Model {
     pub alpha_weight: f64,
     #[serde(default = "default_kernel")]
     pub kernel: Kernel,
+    /// widen b_inf where the scaled recursion chain has eigenvalues outside
+    /// [-1, 1] (`bopjax.expansion.guarded_width`)
+    #[serde(default)]
+    pub bandwidth_guard: bool,
+    /// per-species shells and expansion settings (None: every species has
+    /// the whole basis and the settings above)
+    #[serde(default)]
+    pub species: Option<Vec<SpeciesSettings>>,
     pub rcut: f64,
     #[serde(default)]
     pub dcut: f64,
@@ -270,6 +334,34 @@ impl Model {
         }
     }
 
+    /// The expansion settings of species `s` as a model (nmom, nexp,
+    /// bandwidth, terminator, kernel and guard; everything else as `self`).
+    pub fn species_model(&self, s: usize) -> Model {
+        let mut m = self.clone();
+        m.species = None;
+        if let Some(st) = self.species.as_ref().map(|v| &v[s]) {
+            m.nmom = st.nmom.unwrap_or(self.nmom);
+            m.nexp = match (st.nexp, st.nmom) {
+                (Some(n), _) => Some(n),
+                (None, None) => self.nexp,
+                (None, Some(_)) => None,
+            };
+            m.bandwidth = st.bandwidth.unwrap_or(self.bandwidth);
+            m.terminator = st.terminator.unwrap_or(self.terminator);
+            m.kernel = st.kernel.unwrap_or(self.kernel);
+            m.bandwidth_guard = st.bandwidth_guard.unwrap_or(self.bandwidth_guard);
+        }
+        m
+    }
+
+    /// Whether species `s` carries shell `k` of the basis.
+    pub fn has_shell(&self, s: usize, k: usize) -> bool {
+        match &self.species {
+            None => true,
+            Some(v) => v[s].basis.contains(&self.basis[k]),
+        }
+    }
+
     pub fn nspecies(&self) -> usize {
         self.onsite.len()
     }
@@ -304,6 +396,23 @@ impl Model {
             && self.rcut2.is_none()
         {
             return Err("repulsion, Yukawa and intersite Coulomb need rcut2".into());
+        }
+        if let Some(st) = &self.species {
+            if st.len() < ns {
+                return Err("species settings needed for every species".into());
+            }
+            for x in st {
+                if !x.basis.iter().all(|b| self.basis.contains(b)) {
+                    return Err("a species' basis must be part of the model basis".into());
+                }
+                if x.nmom.is_some_and(|n| n > self.nmom) {
+                    return Err("a species' nmom may not exceed the model's".into());
+                }
+            }
+            let ties = st.iter().any(|x| x.atomic_shifts || !x.spin_polarized);
+            if ties && self.spin == Spin::Noncollinear {
+                return Err("tied shifts are not supported with noncollinear spin".into());
+            }
         }
         if self.screening.is_some() && !self.basis.contains(&Shell::D) {
             return Err("screening acts on d-d bond integrals; the basis has no d shell".into());

@@ -353,6 +353,13 @@ def iron_carbon(iron_values=None, carbon_values=None, **values):
                           embedding density that a C neighbour adds on Fe
                           (``rho_fe``) and an Fe neighbour adds on C
                           (``rho_c``), both ``* exp(-rho_decay (r / r0 - 1))``
+      rho_gauss_fe, rho_gauss_c, rho_gauss_r, rho_gauss_w
+                          Gaussian embedding densities a C neighbour adds on
+                          Fe and an Fe neighbour adds on C,
+                          ``amplitude * exp(-((r - rho_gauss_r) / rho_gauss_w)^2)``
+                          (default amplitude 0: none); centred near the
+                          transverse neighbours of the octahedral site
+                          (2.02 A) it binds them without pushing on them
       rcut, dcut          range of every Fe-C term (taper from rcut - dcut)
       hubbard_c           onsite Coulomb integral of carbon (eV); it does
                           nothing in pure carbon (no charge transfer)
@@ -401,11 +408,15 @@ def iron_carbon(iron_values=None, carbon_values=None, **values):
         (FE, C): [*x_pair, v["core_r"], v["core"], *x_cut],
         (C, FE): [*x_pair, v["core_r"], v["core"], *x_cut]}, zero7)
     c_rho = _exp_term(1.0, cv["density_decay"], cv["r0"])[:2]
+    g_width = 1.0 / v.get("rho_gauss_w", 0.3) ** 2
+    g_r = v.get("rho_gauss_r", 2.0)
     density = table({
         (FE, FE): [1.0, fe["embed"][1], fe["embed"][2], 0.0, 0.0, *NO_TAPER],
         (C, C): [0.0, 1.0, 0.0, *c_rho, *c_cut],
-        (FE, C): [0.0, 1.0, 0.0, *_exp_term(v["rho_fe"], v["rho_decay"], v["r0"])[:2], *x_cut],
-        (C, FE): [0.0, 1.0, 0.0, *_exp_term(v["rho_c"], v["rho_decay"], v["r0"])[:2], *x_cut]},
+        (FE, C): [v.get("rho_gauss_fe", 0.0), g_width, g_r,
+                  *_exp_term(v["rho_fe"], v["rho_decay"], v["r0"])[:2], *x_cut],
+        (C, FE): [v.get("rho_gauss_c", 0.0), g_width, g_r,
+                  *_exp_term(v["rho_c"], v["rho_decay"], v["r0"])[:2], *x_cut]},
         zero7)
     y = fe["yukawa"]
 
