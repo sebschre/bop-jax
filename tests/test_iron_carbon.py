@@ -83,18 +83,27 @@ def test_absent_shells_ignore_their_parameters():
     cell = a * FCC
     pos = np.array([[0, 0, 0], [0.5 * a, 0, 0]])
     cfg = bj.BOPConfig(**IRON_CARBON_CONFIG)
+    topo = bj.build_topology(pos, [0, 1], cfg.rcut, cfg.nmom, cell, rcut2=cfg.rcut2)
+    energy = bj.make_energy_fn(topo, cfg, radial=tapered_exp_sum)
+    # the potential self-consistency, as the model is used: in this artificial
+    # cell the stationary one has no solution at the fitted parameters
+    pot = bj.make_potential(energy, tol=1e-10, condition="potential", max_iter=600)
+
+    def solve(params):
+        e, aux = pot(jnp.asarray(pos), jnp.asarray(cell), params,
+                     jnp.zeros(energy.shift_shape))
+        assert float(aux["scf_residual"]) < 1e-8
+        return float(e)
+
     p = iron_carbon()
-    # carbon's shell shifts are tied (only their mean enters), so the solver
-    # drifts freely along their difference; 1e-8 is as far as it gets
-    e, _ = scf_energy(pos, cell, [0, 1], cfg, p, tapered_exp_sum, tol=1e-8)
+    e = solve(p)
     q = dict(p, bond=dict(p["bond"]), onsite=p["onsite"].at[0, 1].set(-3.0).at[1, 2].set(-2.0),
              n0=p["n0"].at[0, 1].set(1.0))
     junk = jnp.array([1.3, 0.5, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 3.0, 0.5])
     q["bond"]["sds"] = q["bond"]["sds"].at[0, 1].set(junk)  # Fe s - C d
     q["bond"]["pps"] = q["bond"]["pps"].at[0, 1].set(junk)  # Fe p - C p
     q["bond"]["dds"] = q["bond"]["dds"].at[1, 1].set(junk)  # C d - C d
-    e2, _ = scf_energy(pos, cell, [0, 1], cfg, q, tapered_exp_sum, tol=1e-8)
-    assert e2 == pytest.approx(e, abs=1e-7)
+    assert solve(q) == pytest.approx(e, abs=1e-8)
 
 
 def test_fe_c_forces_match_finite_differences():
