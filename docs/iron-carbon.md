@@ -79,82 +79,118 @@ bond. A d-p model would have meant dropping the s shell of the carbon model.
 `Calculator` wraps `make_potential(condition="potential")` with warm starts,
 rejects states with an occupation outside a shell, and records the
 stationarity. Exact forces (implicit differentiation, one GMRES adjoint
-solve) cost about 100 s and 12 GB for Fe16C with `remat`; inside the fit,
-forces and stress are partial derivatives at the converged shifts
-(`exact = False`: 5 s, error first order in the stationarity: 0.08 eV/A
-against the exact force at the starting parameters, but 0.76 eV/A at the
-fitted ones, see Results). Exact forces of the octahedral cell need
-`batch=4` to fit in 15 GB. The breathing
-modes of the first two Fe shells around C relax in about 3 minutes.
+solve) cost about 100-230 s and 12 GB for Fe16C with `remat` and
+`batch=4`. Partial derivatives at the converged shifts (`exact = False`,
+5 s) are first order in the stationarity and were off by up to 0.76 eV/A
+at the parameters of the partial-force fit (see [History](#partial-force-fit)),
+so the present fit and its report use exact forces and stress throughout.
+The breathing modes of the first two Fe shells around C relax in a few
+minutes.
 
 ## Results (`IRON_CARBON_FIT`)
 
-Fitted with `examples/fit_iron_carbon.py`: 10 cross parameters, bounded
-least squares, two runs (98 + 80 evaluations, about 5 minutes each on 4
-cores; the first run was cut short by a container restart and the second
-started from its best point), cost 593 at the start, 15.0 at the end.
-FM Fe16C cells; "shells" relaxes the breathing modes of the first two Fe
-shells around C, with partial-derivative forces as in the fit or with exact
-forces; "all atoms" relaxes every atom at fixed cell (partial-derivative
-forces). Cementite at the experimental lattice, atoms relaxed.
+Fitted with `examples/fit_iron_carbon.py` with exact forces and stress: 13
+cross parameters, bounded least squares, starting from the partial-force fit
+below; about 10-25 minutes per evaluation, each cell in its own process.
+Cost 16.9 at the start, 16.6 at the end (17 evaluations). FM Fe16C cells;
+"shells" relaxes the breathing modes of the first two Fe shells around C,
+as in the fit; "all atoms" relaxes every atom at fixed cell. Cementite at
+the experimental lattice ("shells": experimental positions; "all atoms":
+relaxed).
 
-| Property | Shells, exact forces | Shells (fitted) | All atoms | Target |
-|---|---|---|---|---|
-| E_sol, octahedral, relative to diamond (eV) | **0.715** | 0.75 | 0.61 | 0.72 +- 0.15 |
-| E(tetrahedral) - E(octahedral) (eV) | **0.794** | 0.76 | 0.56 | 0.86 +- 0.10 |
-| dipole tensor, axial (eV) | | 5.8 | 5.5 | 8.0 +- 1.5 |
-| dipole tensor, transverse (eV) | | 7.5 | 7.2 | 3.4 +- 1.5 |
-| formation energy of Fe3C (eV/atom) | | -0.013 | -0.013 | +0.03 +- 0.04 |
-| pressure of Fe3C at the experimental lattice (GPa) | | -5.2 | -5.2 | 0 +- 5 |
-| mean Fe moment of Fe3C (muB) | | 2.10 | 2.10 | 1.95 +- 0.15 |
-| electrons gained by octahedral C | -0.10 | -0.11 | -0.11 | +0.3 +- 0.4 |
-| Fe moment next to octahedral C (muB) | 2.11 | | 2.12 | (bulk 2.86) |
-| moment of octahedral C (muB) | -0.25 | | | antiparallel |
-| largest stationarity, max dE/dshift (eV) | 0.16 | | 0.15 | |
+| Property | Shells (fitted) | All atoms | Target |
+|---|---|---|---|
+| E_sol, octahedral, relative to diamond (eV) | 0.717 | | 0.72 +- 0.15 |
+| E(tetrahedral) - E(octahedral) (eV) | 0.746 | | 0.86 +- 0.10 |
+| dipole tensor, axial (eV) | **4.29** | | 8.0 +- 1.5 |
+| dipole tensor, transverse (eV) | **6.92** | | 3.4 +- 1.5 |
+| formation energy of Fe3C (eV/atom) | 0.034 | | +0.03 +- 0.04 |
+| pressure of Fe3C at the experimental lattice (GPa) | -6.5 | | 0 +- 5 |
+| mean Fe moment of Fe3C (muB) | 2.11 | | 1.95 +- 0.15 |
+| electrons gained by octahedral C | -0.06 | | +0.3 +- 0.4 |
 
-**Partial-derivative forces are not good enough at the fitted
-parameters.** At the start of the fit they were within 0.08 eV/A of the
-exact forces; at the fitted parameters the stationarity has grown (0.08 to
-0.14-0.16 eV) and at the octahedral geometry the fit relaxed to, the exact
-force is 0.76 eV/A where the partial one is about zero. Relaxed with exact
-forces the first shell moves out by 0.029 A instead of 0.073 A and the cell
-is 37 meV lower; the tetrahedral cell changes by 3 meV. The column with
-exact forces is therefore the reliable one, and the full relaxations and the
-dipole tensors (partial derivatives too) are uncertain at this level. Use
-exact forces (`Calculator.exact = True`, the default; `make_potential` with
-`jax.grad`) for anything with these parameters.
+(The all-atom column is being computed.)
 
-- **Energetics.** The solution energy of octahedral carbon (0.715 eV), the
-  formation energy of cementite and its Fe moment are close to their
-  targets; the octahedral site is the stable one. Cementite comes out marginally stable
-  against FM bcc iron and diamond (-13 meV/atom) where experiment and DFT
-  have it marginally metastable.
-- **Migration barrier.** With exact forces the tetrahedral site is
-  0.79 eV above the octahedral one (target 0.86). With all atoms relaxed
-  (partial-derivative forces) it drops to 0.56 eV, so the barrier may be
-  0.1-0.3 eV low once every atom is relaxed with exact forces, which was not
-  done (about 100 s per force for Fe16C).
-- **Dipole tensor: wrong anisotropy.** Transverse comes out larger than
-  axial, where carbon pushes its two axial neighbours (1.43 A) hardest. The
-  Fe-C terms share one decay length for bond integrals and one for the pair
-  term, which does not separate the 1.43 A and 2.02 A neighbours enough;
-  the stress is also a partial derivative at fixed shifts, which the force
-  comparison above shows is not reliable here. Strain fields of
-  carbon (martensite tetragonality, carbon-dislocation interaction) are not
-  reliable with these parameters.
+- **Energetics.** The solution energy of octahedral carbon (0.72 eV), the
+  formation energy of cementite (+0.034 eV/atom, marginally metastable as in
+  experiment and DFT) and its Fe moment are close to their targets; the
+  octahedral site is the stable one.
+- **Migration barrier.** The tetrahedral site is 0.75 eV above the
+  octahedral one (target 0.86).
+- **Dipole tensor: wrong anisotropy**, see [Limitations](#limitations).
 - **Magnetism and charge.** Iron next to carbon keeps a sizeable moment
-  (2.11 muB on the axial neighbours of the octahedral site, bulk 2.86), and
-  cementite averages 2.10 muB per Fe; octahedral carbon carries -0.25 muB,
-  antiparallel to iron, as in DFT. Carbon loses about 0.1 electron, where
-  DFT charge analyses give it a gain; the tight-binding charge is not a
-  Bader charge, and the target was loose.
+  (bulk 2.86 muB), cementite averages 2.11 muB per Fe, and octahedral carbon
+  carries a small moment antiparallel to iron, as in DFT. Carbon loses
+  about 0.06 electron, where DFT charge analyses give it a gain; the
+  tight-binding charge is not a Bader charge, and the target was loose.
 - **Self-consistency.** Every cell converges with the potential condition.
-  The stationarity, at most 0.15 eV, means energies are off from the
-  stationary ones to first order in it; differences between similar cells
-  (octahedral and tetrahedral) should be less affected than absolute
-  energies.
+  Energies are off from the stationary ones to first order in the
+  stationarity; differences between similar cells (octahedral and
+  tetrahedral) should be less affected than absolute energies.
+
+## Limitations
+
+**The elastic dipole tensor of octahedral carbon is reversed.** Carbon on
+the octahedral site has two Fe neighbours along one cube axis (1.43 A) and
+four in the plane across it (2.02 A). In DFT it pushes the two axial
+neighbours hardest: P axial 8.0 eV, P transverse 3.4 eV, an anisotropy
+P axial - P transverse of +4.6 eV. This model gives 4.3 and 6.9 eV,
+an anisotropy of -2.6 eV, with a trace (the volume change) of 18.1 eV
+against 14.8. What follows from that:
+
+| Property | Depends on | With this model |
+|---|---|---|
+| solution energy, migration barrier, cementite | energetics | usable (see Results) |
+| lattice expansion with carbon content, carbon at edge dislocations, drift to tensile regions | trace of P (pressure coupling) | right sign, about 20 % too strong |
+| martensite tetragonality (Zener ordering of C on one octahedral sublattice) | sign of the anisotropy | **wrong sign**: c/a < 1 instead of > 1 |
+| Snoek relaxation, carbon redistribution under uniaxial stress | anisotropy, squared for the strength | **wrong site preference** under stress; Snoek strength about (2.6/4.6)^2 = 1/3 of the real one |
+| carbon at screw dislocations (strain ageing, pinning) | anisotropy only (a screw has no pressure field) | **wrong sites** around the core, binding about half as strong |
+| elastic carbon-carbon interactions (clustering, ordering) | anisotropy | unreliable |
+
+Use the model for carbon energetics, diffusion barriers, cementite and
+carbon near vacancies or edge dislocations; not for martensite
+tetragonality, Snoek damping, carbon at screw dislocations or carbon
+ordering.
+
+**Why, and what was tried.** The anisotropy has to come from the two close
+neighbours at 1.43 A being pushed away much harder than the four at 2.02 A.
+The refit separated the decay of the pi bond (`decay_pi`) from the sigma
+bonds and added a short-range Fe-C core repulsion
+(Egorov's core form, `core (core_r - r)^3 / r exp(core_r - r)` below
+`core_r` = 1.70 A: about 0.018 `core` at the octahedral 1.43 A, 20 times
+less at the tetrahedral 1.59 A). A weak core (2 eV, this fit) leaves the anisotropy
+reversed. A strong one (30 eV, a second exact-force run, three days, cost
+24 against 16.6) turns it the right way (axial 7.1, transverse 6.1 eV) but
+also raises the octahedral site against the tetrahedral one, whose four
+neighbours at 1.59 A barely feel it: the barrier dropped to 0.47 eV and
+the solution energy rose to 0.81 eV. The core already separates 1.43 A from
+1.59 A; what it cannot do is push the axial neighbours without raising
+the octahedral energy. Compensating that needs a term that lowers the
+octahedral site at the same time, such as more Fe-C bonding to the four
+transverse neighbours at 2.02 A (a separate decay or onset for them) or an
+angular term; not tried.
+
+**Other limitations.**
+- The migration barrier, 0.75 eV, is about 0.1 eV low.
+- Carbon loses charge to iron where DFT has it gain some.
+- Fe16C is not the dilute limit, and three of the targets were taken from
+  memory, not checked against the papers (see [Targets](#targets-examplesfit_iron_carbonpy)).
+- The model needs the potential self-consistency and exact forces; see
+  [Calculator](#calculator-examples_iron_carbonpy).
+- The carbon model's own expansion is far from its exact tight binding in
+  graphene - diamond; see [Carbon](carbon.md) and the benchmark below.
 
 ## History: what did not work
+
+### Partial-force fit
+
+The first fit on the Egorov iron used partial-derivative forces and stress
+(10 parameters, no `decay_pi` or core; two runs, 98 + 80 evaluations, cost
+15.0). Its octahedral solution energy (0.715 eV) and tet - oct difference
+(0.79 eV) held up with exact forces, but at its parameters the exact force at
+the octahedral geometry the fit relaxed to was 0.76 eV/A where the partial one
+was about zero, and its dipole tensor (5.8 axial, 7.5 transverse, from the
+partial stress) was already reversed. The present fit starts from it.
 
 ### Stationary self-consistency on the earlier iron models
 
@@ -234,21 +270,23 @@ against the papers.
 
 ## Cross parameters
 
-| e_c | sds | pds | pdp | decay | pair | pair_decay | rho_fe | rho_c | hubbard_c |
-|---|---|---|---|---|---|---|---|---|---|
-| 3.13 | -0.262 | -0.567 | 0.659 | 4.29 | 1.52 | 5.71 | 0.372 | 0.718 | 10.0 |
+| e_c | sds | pds | pdp | decay | decay_pi | pair | pair_decay | rho_fe | rho_c | hubbard_c | core | core_r |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2.56 | -0.250 | -0.558 | 0.655 | 4.15 | 4.37 | 1.49 | 5.69 | 0.364 | 0.713 | 9.79 | 2.05 | 1.70 |
 
 (eV, at r0 = 1.95 A; decays dimensionless; rho_decay fixed at 3, Fe-C range
-2.5-3.0 A.) The carbon levels sit 3.1 eV above the iron d level, the
-C 2p - Fe 3d pi bond (`pdp`) is larger than the C 2s - Fe 3d sigma bond, and
-the carbon Hubbard term (10 eV) keeps carbon near neutral.
+2.5-3.0 A; core_r in A.) The carbon levels sit 2.6 eV above the iron d
+level, the C 2p - Fe 3d pi bond (`pdp`) is larger than the C 2s - Fe 3d
+sigma bond, and the carbon Hubbard term (9.8 eV) keeps carbon near neutral.
 
 What the parameters are:
 
-`e_c` (C levels against Fe d), `sds`, `pds`, `pdp` and their
-common decay `decay` at r0 = 1.95 A, the Fe-C pair term (`pair`,
-`pair_decay`), the embedding densities a C neighbour adds on Fe (`rho_fe`)
-and an Fe neighbour on C (`rho_c`), decaying with `rho_decay` (fixed at 3),
-and the onsite Coulomb integral of carbon (`hubbard_c`), which does
-nothing in pure carbon. 10 parameters, bounded least squares. One more target keeps carbon's charge moderate
+`e_c` (C levels against Fe d), `sds`, `pds`, `pdp`, with the decay `decay`
+of the sigma bonds and `decay_pi` of the pi bond, at r0 = 1.95 A; the Fe-C
+pair term (`pair`, `pair_decay`) and a short-range core of Egorov's pair
+form (amplitude `core`, onset `core_r`); the embedding densities a C
+neighbour adds on Fe (`rho_fe`) and an Fe neighbour on C (`rho_c`),
+decaying with `rho_decay` (fixed at 3); and the onsite Coulomb integral of
+carbon (`hubbard_c`), which does nothing in pure carbon. 13 parameters,
+bounded least squares. One more target keeps carbon's charge moderate
 (+0.3 +- 0.4 electrons in the octahedral site).
