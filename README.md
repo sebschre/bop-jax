@@ -132,7 +132,7 @@ This prints -6.0112485448437 eV per atom, the BOPfox value to all 13 digits.
 | [Screening](docs/screening.md) | environment-dependent d-d bond integrals |
 | [Iron](docs/iron.md) | magnetic d-band iron models: the fit of this repository, and the Fe model of Egorov et al. used for dislocations |
 | [Carbon](docs/carbon.md) | sp-valent carbon model: fit, diamond, graphene and dense phases, elastic constants |
-| [Iron-carbon](docs/iron-carbon.md) | Fe-C on the Egorov iron and sp carbon models: fitted cross terms, C in bcc Fe, cementite |
+| [Iron-carbon](docs/iron-carbon.md) | Fe-C on the Egorov iron and sp carbon models: fitted cross terms, C in bcc Fe, cementite; limitations (reversed dipole anisotropy of carbon) |
 | [Limitations](docs/limitations.md) | what is not implemented, caveats |
 
 ## References

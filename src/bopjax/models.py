@@ -308,12 +308,14 @@ NO_TAPER = (100.0, 1.0)  # leaves a pair to the global cosine cutoff
 
 
 # fitted Fe-C cross terms (examples/fit_iron_carbon.py, docs/iron-carbon.md):
-# two runs, 98 + 80 evaluations, cost 15.0
+# partial-force fit (two runs, 98 + 80 evaluations), then an exact-force refit
+# with a separate pi decay and a short-range Fe-C core (cost 16.6). Known limitation:
+# the dipole tensor of octahedral carbon is reversed (P axial < P transverse).
 IRON_CARBON_FIT = {
-    "e_c": 3.1324, "sds": -0.2622, "pds": -0.5674, "pdp": 0.6585, "decay": 4.2942,
-    "pair": 1.5242, "pair_decay": 5.7070, "rho_fe": 0.3719, "rho_c": 0.7177, "rho_decay": 3.0,
-    "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 10.0152,
-    "decay_pi": None, "core": 0.0, "core_r": 1.7,
+    "e_c": 2.5578, "sds": -0.2497, "pds": -0.5582, "pdp": 0.6553, "decay": 4.1452,
+    "pair": 1.4934, "pair_decay": 5.6932, "rho_fe": 0.3642, "rho_c": 0.7132, "rho_decay": 3.0,
+    "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 9.7912,
+    "decay_pi": 4.3714, "core": 2.0459, "core_r": 1.7039,
 }
 
 FE, C = 0, 1  # species indices of the iron-carbon model
