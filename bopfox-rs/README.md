@@ -293,7 +293,7 @@ coupling).
 `bopjax.models.iron_carbon` with `IRON_CARBON_CONFIG` (`radial=models.tapered_exp_sum`)
 converts with `model_from_bopjax` and runs with both self-consistency
 conditions; the potential condition is the one the model is fitted with
-(`examples/_iron_carbon_rs.py`, `examples/fit_iron_carbon_rs.py`).
+(`examples/_iron_carbon_rs.py`, `examples/fit_iron_carbon.py`).
 
 - **Per-species settings** (`"species"`, one entry per species with `basis`,
   `nmom`, `nexp`, `bandwidth`, `terminator`, `kernel`, `bandwidth_guard`,

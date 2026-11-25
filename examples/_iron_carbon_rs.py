@@ -11,14 +11,21 @@ and scipy.
 
 from __future__ import annotations
 
-import numpy as np
-
 import bopfox_rs
+import numpy as np
+from _iron_carbon import (  # noqa: F401
+    A_DIAMOND,
+    A_FE,
+    EV_A3_TO_GPA,
+    bcc_fe,
+    bcc_supercell,
+    cementite,
+    diamond,
+    fe_with_carbon,
+)
+
 import bopjax as bj
 from bopjax.models import FE, IRON_CARBON_CONFIG, tapered_exp_sum
-
-from _iron_carbon import (A_DIAMOND, A_FE, EV_A3_TO_GPA, bcc_fe, bcc_supercell, cementite,  # noqa: F401
-                          diamond, fe_with_carbon)
 
 
 def site_symmetry(cell, positions, species, centre, tol=1e-6):

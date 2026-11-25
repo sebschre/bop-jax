@@ -26,12 +26,10 @@
 ## Caveats
 
 - The iron-carbon model needs the potential self-consistency and, with it,
-  exact (implicit-differentiation) forces. Fe16C has several self-consistent
-  magnetic states, so take results on the lowest one. With every atom
-  relaxed, the earlier bopjax fit (`IRON_CARBON_FIT_JAX`) collapses: carbon
-  moves onto one Fe neighbour. The present fit (on bopfox-rs) has the
-  dipole anisotropy of octahedral carbon with the right sign at about three
-  quarters of DFT's size (+3.5 eV against +4.6), and the trace right. Its
+  exact (implicit-differentiation) forces. Iron next to carbon has several
+  self-consistent magnetic states, so take results on the lowest one. The
+  dipole anisotropy of octahedral carbon has the right sign at about three
+  quarters of DFT's size (+3.5 eV against +4.6), with the trace right. The
   migration saddle lies off the tetrahedral site. See
   [Iron-carbon](iron-carbon.md#limitations).
 - `bandwidth_guard` and `atomic_shifts` change a model's energies; a model

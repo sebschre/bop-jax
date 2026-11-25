@@ -1,9 +1,10 @@
 """Migration barrier of carbon in bcc iron with the iron-carbon BOP: NEB on
-bopfox-rs from one octahedral site to the next, through the tetrahedral site.
+bopfox-rs from one octahedral site to the next.
 
-Checks that the minimum energy path goes through the symmetric tetrahedral
-saddle that ``fit_iron_carbon_rs.py`` fits to (E(tet) - E(oct)).
-Fe16C, every atom relaxed, potential self-consistency with exact forces.
+Checks the barrier that ``fit_iron_carbon.py`` fits to: the lowest energy in
+the plane half way between the two sites (the saddle lies there, off the
+tetrahedral site).  Fe16C, every atom relaxed, the end points on their
+lowest magnetic state, potential self-consistency with exact forces.
 
 Run with:  uv run python examples/neb_iron_carbon_rs.py [checkpoint.json] [--images 5]
 """
@@ -12,9 +13,9 @@ import argparse
 import json
 
 import numpy as np
-
 from _iron_carbon_rs import A_FE, RsCell, bcc_supercell, make_potential
 from bopfox_rs.neb import image_forces, neb
+
 from bopjax.models import C, iron_carbon
 
 
@@ -25,7 +26,10 @@ def main():
     ap.add_argument("--fmax", type=float, default=0.02)
     ap.add_argument("--out", help="JSON file for the band energies and barrier")
     args = ap.parse_args()
-    values = json.load(open(args.checkpoint))["values"] if args.checkpoint else {}
+    values = {}
+    if args.checkpoint:
+        with open(args.checkpoint) as fh:
+            values = json.load(fh)["values"]
     p = iron_carbon(**values)
     cell, pos, sp = bcc_supercell()
     sp = sp + [C]
