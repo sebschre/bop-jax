@@ -15,7 +15,7 @@ import numpy as np
 
 from _iron_carbon_rs import A_FE, RsCell, bcc_supercell, make_potential
 from bopfox_rs.neb import image_forces, neb
-from bopjax.models import C, FE, iron_carbon
+from bopjax.models import C, iron_carbon
 
 
 def main():
@@ -23,6 +23,7 @@ def main():
     ap.add_argument("checkpoint", nargs="?", help="fit checkpoint (default IRON_CARBON_FIT)")
     ap.add_argument("--images", type=int, default=5, help="images between the end points")
     ap.add_argument("--fmax", type=float, default=0.02)
+    ap.add_argument("--out", help="JSON file for the band energies and barrier")
     args = ap.parse_args()
     values = json.load(open(args.checkpoint))["values"] if args.checkpoint else {}
     p = iron_carbon(**values)
@@ -34,7 +35,7 @@ def main():
         c = RsCell("oct", cell, np.vstack([pos, A_FE * np.array(frac)]), sp)
         c.set_params(p)
         c.positions = c.positions + 0.01 * rng.standard_normal(c.positions.shape)
-        out = c.relax(ftol=2e-3)
+        out = c.relax_ground(ftol=2e-3)  # on the lowest-energy magnetic state
         ends.append((c.positions.copy(), out))
         print(f"end point E {out['energy']:.5f}  fmax {c.max_force:.4f}", flush=True)
     a, b = ends[0][0], ends[1][0]
@@ -42,10 +43,10 @@ def main():
     d -= np.round(d @ np.linalg.inv(cell)) @ cell  # minimum image
     n_img = args.images + 2
     band = np.array([a + t * d for t in np.linspace(0.0, 1.0, n_img)])
-    m = np.zeros((len(sp), 3))
-    m[np.array(sp) == FE, 2] = 2.4
-    import bopjax as bj
-    x0 = np.asarray(bj.stoner_shifts(m, float(p["stoner"][FE, 2])))
+    # every image starts from the self-consistent shifts of the first end
+    # point (its magnetic state) and then follows its own warm starts
+    x0 = ends[0][1]["shifts"]
+    print(f"end points differ by {ends[1][1]['energy'] - ends[0][1]['energy']:+.5f} eV", flush=True)
     pot = make_potential(p)
     ff = image_forces(pot, sp, cell, x0, n_img, tol=1e-6, condition="potential",
                       scf_options={"adjoint_tol": 1e-7})
@@ -56,6 +57,11 @@ def main():
     print(f"barrier {e.max():.4f} eV")
     saddle = res.images[int(np.argmax(e))]
     print("C at the saddle (fractional):", np.round(saddle[-1] / A_FE % 2, 3))
+    if args.out:
+        with open(args.out, "w") as fh:
+            json.dump({"energies": e.tolist(), "barrier": float(e.max()),
+                       "converged": bool(res.converged),
+                       "saddle_C": (saddle[-1] / A_FE % 2).tolist()}, fh, indent=1)
 
 
 if __name__ == "__main__":

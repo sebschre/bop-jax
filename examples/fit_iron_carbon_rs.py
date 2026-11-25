@@ -29,7 +29,10 @@ from fit_iron_carbon import TARGETS
 
 # fitted parameters: name, lower and upper bound
 BOUNDS = {
-    "e_c": (-6.0, 6.0),
+    # below about 1 eV (the C levels near the Fe d band) relaxed cementite
+    # loses its Fe moments: 0.6 muB at e_c = 0.5 eV, 2.0 muB at 1.5 eV, a jump
+    # the least-squares steps walk into and cannot climb out of
+    "e_c": (1.3, 6.0),
     "sds": (-4.0, 0.0),
     "pds": (-5.0, 0.0),
     "pdp": (0.0, 3.0),
