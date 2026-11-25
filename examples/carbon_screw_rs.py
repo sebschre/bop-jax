@@ -248,6 +248,35 @@ def run_job(job, geo, args):
         x = geo.prismatic_site(el)
         cell, out, s = relax_cell(job, geo, np.vstack([el, x]), sp_c, args)
         save(args.out, job, cell, out, s, carbon_start=x)
+    elif job in ("hard_C_held", "hard_C_free"):
+        # From a symmetric prism no self-consistent state is found (cold
+        # starts); reach the centre by continuation from the relaxed
+        # off-centre state, carbon moved along the line in 0.1 A steps.
+        src = require(args.out, "offcentre_hardC" if job == "hard_C_held" else "hard_C_held")
+        pos = np.asarray(src["positions"], float).copy()
+        cell = RsCell(job, geo.cell, pos, sp_c, tol=1e-6, accept=1e-5, adjoint_tol=1e-7)
+        cell.set_params(iron_carbon())
+        cell._x = np.asarray(src["shifts"])
+        n_c = geo.n
+        if job == "hard_C_held":
+            target = geo.prismatic_site(pos)[2]
+            dz = target - pos[n_c, 2]
+            dz -= B * np.round(dz / B)
+            steps = int(np.ceil(abs(dz) / 0.1))
+            for k in range(1, steps + 1):
+                p = pos.copy()
+                p[n_c, 2] += dz * k / steps
+                o = cell.solve(p)
+                print(f"{job}: C moved {dz * k / steps:+.3f} A, E {o['energy']:.5f}", flush=True)
+            pos[n_c, 2] += dz
+            cell.positions = pos
+            fixed_components = ((n_c, 2),)
+        else:
+            fixed_components = ()
+        t0 = time.time()
+        out = cell.relax(fixed=geo.fixed_atoms(), ftol=args.fmax, maxiter=args.steps,
+                         verbose=True, fixed_components=fixed_components)
+        save(args.out, job, cell, out, time.time() - t0)
     elif job.startswith("shear_"):
         shear(job[6:], geo, args)
     elif job.startswith("oct_"):
@@ -380,7 +409,7 @@ def report(geo, args):
               f"({describe(geo, e['hard'])})")
     rows = []
     for job, d in e.items():
-        if (job.startswith("oct_") or job == "hard_C") and e_sol is not None and "easy" in e:
+        if (job.startswith("oct_") or job.startswith("hard_C") or job == "offcentre_hardC") and e_sol is not None and "easy" in e:
             eb = d["energy"] - e["easy"]["energy"] - e_sol
             rows.append((job, eb, d))
     rows.sort(key=lambda r: r[1])
