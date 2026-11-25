@@ -263,13 +263,29 @@ def run_job(job, geo, args):
             dz = target - pos[n_c, 2]
             dz -= B * np.round(dz / B)
             steps = int(np.ceil(abs(dz) / 0.1))
-            for k in range(1, steps + 1):
-                p = pos.copy()
-                p[n_c, 2] += dz * k / steps
-                o = cell.solve(p)
+            z0 = pos[n_c, 2]
+            k = 1
+            while k <= steps:
+                p = cell.positions.copy()
+                p[n_c, 2] = z0 + dz * k / steps
+                try:
+                    o = cell.solve(p)
+                except RuntimeError:
+                    # no state at fixed Fe: relax the lattice at the last
+                    # carbon position, carbon held along the line, and retry
+                    if getattr(cell, "_relaxed_at", None) == k:
+                        raise
+                    cell._relaxed_at = k
+                    print(f"{job}: relaxing at C {dz * (k - 1) / steps:+.3f} A", flush=True)
+                    cell.relax(fixed=geo.fixed_atoms(), ftol=0.05, maxiter=40,
+                               fixed_components=((n_c, 2),))
+                    print(f"{job}: C held at {dz * (k - 1) / steps:+.3f} A, relaxed "
+                          f"E {cell.out['energy']:.5f}", flush=True)
+                    continue
+                cell.positions = p
                 print(f"{job}: C moved {dz * k / steps:+.3f} A, E {o['energy']:.5f}", flush=True)
-            pos[n_c, 2] += dz
-            cell.positions = pos
+                k += 1
+            pos = cell.positions
             fixed_components = ((n_c, 2),)
         else:
             fixed_components = ()
