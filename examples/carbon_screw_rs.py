@@ -455,7 +455,7 @@ def main():
     ap.add_argument("--chunk", type=int, default=15, help="relaxation steps per checkpoint")
     ap.add_argument("--plateau", type=float, default=2e-3,
                     help="stop when a chunk gains less than this (eV) ...")
-    ap.add_argument("--fplateau", type=float, default=0.05, help="... and fmax is below (eV/A)")
+    ap.add_argument("--fplateau", type=float, default=0.2, help="... and fmax is below (eV/A)")
     ap.add_argument("--taus", type=float, nargs="+",
                     default=[0.5, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.4, 2.7, 3.0],
                     help="resolved shear stresses of the shear jobs (GPa)")
