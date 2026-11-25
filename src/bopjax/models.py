@@ -310,15 +310,16 @@ NO_TAPER = (100.0, 1.0)  # leaves a pair to the global cosine cutoff
 # fitted Fe-C cross terms (examples/fit_iron_carbon_rs.py on bopfox-rs,
 # docs/iron-carbon.md): every atom of the Fe16C cells relaxed on exact forces,
 # each cell on its lowest-energy magnetic state, cementite relaxed too, the
-# tetrahedral saddle held by its symmetry; Gaussian Fe-C embedding densities
-# and a strong short-range core.
+# migration barrier from the saddle in the plane between two octahedral
+# sites (it agrees with NEB); Gaussian Fe-C embedding densities and a strong
+# short-range core.
 IRON_CARBON_FIT = {
-    "e_c": 1.3998, "sds": -0.16517, "pds": -0.4181, "pdp": 0.66202, "decay": 4.61691,
-    "pair": 1.77745, "pair_decay": 4.73193, "rho_fe": 0.34438, "rho_c": 0.97736,
-    "rho_decay": 3.0, "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 6.58369,
-    "decay_pi": 4.0573, "core": 165.80214, "core_r": 1.70488,
-    "rho_gauss_fe": 0.04916, "rho_gauss_c": 0.10881, "rho_gauss_r": 2.00754,
-    "rho_gauss_w": 0.21105,
+    "e_c": 1.30483, "sds": -0.25827, "pds": -0.47268, "pdp": 0.62705, "decay": 4.34798,
+    "pair": 1.86696, "pair_decay": 4.28099, "rho_fe": 0.32776, "rho_c": 0.93649,
+    "rho_decay": 3.0, "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 3.32112,
+    "decay_pi": 4.15288, "core": 125.01467, "core_r": 1.70398,
+    "rho_gauss_fe": 0.10332, "rho_gauss_c": 0.29459, "rho_gauss_r": 2.00367,
+    "rho_gauss_w": 0.2038,
 }
 
 # the earlier fit on bopjax (examples/fit_iron_carbon.py: breathing modes of

@@ -318,6 +318,20 @@ conditions; the potential condition is the one the model is fitted with
     Hubbard potential. Neither enters the energy.
   - The stationary condition is not supported with tied shifts (its
     preconditioner inverts `Q`), nor are tied shifts with non-collinear spin.
+- **Centred walks.** Each start column walks `H - c`, with c the level of
+  its own orbital, and the expansion is evaluated at `ef - c`. The reported
+  moments are converted back to those of `H`.
+  - Why: carbon 2s lies 11 eV below the iron d band, so carbon's uncentred
+    moments reached 1e10 and the moments-to-recursion map lost about 9
+    digits.
+  - The effect: its dE/dshift jumped by up to 0.3 under perturbations of
+    1e-12, and the implicit forces were off by up to 0.1 eV/A.
+  - Scope: shifting is exact for a symmetric Hamiltonian
+    (`tests/centred_moments.rs`), so it is applied only then: collinear or
+    no spin, no screening, same-shell channels symmetric in the species. The
+    deliberately asymmetric test models keep the plain walk.
+  - Now the forces of Fe-C cells match finite differences of the
+    self-consistent energy.
 - **Forms:** `"tapered_exp_sum"` bond integrals and the `"fecarbon"`
   repulsion (Egorov pair and core, Gaussian plus exponential density, each
   with its own cosine taper).
