@@ -307,11 +307,25 @@ FECARBON_REPULSION = pw.Repulsion(pair=_tapered_pair, density=_tapered_density,
 NO_TAPER = (100.0, 1.0)  # leaves a pair to the global cosine cutoff
 
 
-# fitted Fe-C cross terms (examples/fit_iron_carbon.py, docs/iron-carbon.md):
-# partial-force fit (two runs, 98 + 80 evaluations), then an exact-force refit
-# with a separate pi decay and a short-range Fe-C core (cost 16.6). Known limitation:
-# the dipole tensor of octahedral carbon is reversed (P axial < P transverse).
+# fitted Fe-C cross terms (examples/fit_iron_carbon_rs.py on bopfox-rs,
+# docs/iron-carbon.md): every atom of the Fe16C cells relaxed on exact forces,
+# each cell on its lowest-energy magnetic state, the tetrahedral saddle held
+# by its symmetry; Gaussian Fe-C embedding densities and a strong short-range
+# core (cost 0.51 along the fit, 0.68 re-evaluated from scratch).
 IRON_CARBON_FIT = {
+    "e_c": -0.87893, "sds": -0.16281, "pds": -0.4383, "pdp": 0.70206, "decay": 4.53308,
+    "pair": 1.74048, "pair_decay": 4.81015, "rho_fe": 0.27568, "rho_c": 0.91059,
+    "rho_decay": 3.0, "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 6.10517,
+    "decay_pi": 4.04395, "core": 179.29942, "core_r": 1.72147,
+    "rho_gauss_fe": 0.05082, "rho_gauss_c": 0.10736, "rho_gauss_r": 2.03731,
+    "rho_gauss_w": 0.25686,
+}
+
+# the earlier fit on bopjax (examples/fit_iron_carbon.py: breathing modes of
+# two Fe shells relaxed, cost 16.6). Its octahedral site is not stable: with
+# every atom free, carbon moves 0.5 A onto one axial Fe (Fe-C 1.09 A) and the
+# solution energy drops to -1.7 eV; its dipole tensor is reversed as well.
+IRON_CARBON_FIT_JAX = {
     "e_c": 2.5578, "sds": -0.2497, "pds": -0.5582, "pdp": 0.6553, "decay": 4.1452,
     "pair": 1.4934, "pair_decay": 5.6932, "rho_fe": 0.3642, "rho_c": 0.7132, "rho_decay": 3.0,
     "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 9.7912,

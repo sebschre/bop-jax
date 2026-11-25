@@ -107,6 +107,7 @@ class Model:
         self.last = None
         self.last_x = None
         self.ground_next = True  # the first evaluation finds the ground states
+        self.relax_cementite = False
 
     def snapshot(self):
         return {c.name: (c.positions.copy(), None if c._x is None else c._x.copy())
@@ -175,7 +176,8 @@ class Model:
         if self.ref is not None:
             self.restore(self.ref)
         try:
-            out = self.properties(dict(self.fixed, **values), ground=self.ground_next)
+            out = self.properties(dict(self.fixed, **values), ground=self.ground_next,
+                                  relax_cementite=self.relax_cementite)
         except Exception as err:  # noqa: BLE001 (a failed evaluation is a bad point)
             print("failed:", err, file=sys.stderr, flush=True)
             for c in (self.oct, self.tet, self.cem):  # start the next one afresh
@@ -262,6 +264,9 @@ def main():
     ap.add_argument("--free", help="comma-separated parameters to fit (default: all of BOUNDS)")
     ap.add_argument("--set", help="JSON dict of fixed values overriding the start")
     ap.add_argument("--verbose", action="store_true", help="print every evaluation")
+    ap.add_argument("--relax-cementite", action="store_true",
+                    help="relax the atoms of cementite (at the experimental cell) in the fit;"
+                         " at experimental positions it can hide a collapse of the Fe moments")
     args = ap.parse_args()
 
     start = dict(IRON_CARBON_FIT)
@@ -275,6 +280,7 @@ def main():
     names = args.free.split(",") if args.free else list(BOUNDS)
     model = Model(checkpoint=args.checkpoint, verbose=args.verbose)
     model.fixed = {k: v for k, v in start.items() if k not in names}
+    model.relax_cementite = args.relax_cementite
     x0 = np.array([start[k] for k in names])
     lo = np.array([BOUNDS[k][0] for k in names])
     hi = np.array([BOUNDS[k][1] for k in names])
