@@ -100,7 +100,7 @@ class RsCell:
         tries = []
         if self._x is not None:
             tries += [(self._x, True, 1.0), (self._x, False, None)]
-        tries.append((self._start(), False, None))
+        tries += [(self._start(), False, None), (self._start(), False, 0.05)]
         for x0, reuse, mixing in tries:
             if not reuse:
                 self.pot.clear_history()
@@ -114,6 +114,56 @@ class RsCell:
                 return out
         self._x = None
         raise RuntimeError(f"{self.name}: no self-consistent state (residual {out['residual']:.1e})")
+
+    def ground_state(self, positions=None, moments=(1.6, 2.0, 2.4, 2.8, 3.2),
+                     mixings=(None, 0.05)):
+        """The lowest-energy self-consistent state at the given (default:
+        current) positions, from the current state and cold starts with
+        Fe moments ``moments`` (and each mixing).  Iron next to carbon has
+        several self-consistent magnetic states, eV apart in Fe16C; a warm
+        start keeps whichever it came from."""
+        pos = self.positions if positions is None else np.asarray(positions, float)
+        best = None
+        if self._x is not None:
+            try:
+                best = self.solve(pos)
+            except RuntimeError:
+                pass
+        if self.magnetic:
+            keep = self.fe_moment
+            for mom in moments:
+                for mixing in mixings:
+                    self.fe_moment = mom
+                    self.pot.clear_history()
+                    out = self.pot.scf(pos, self.species, self.cell, self._start(),
+                                       condition="potential", tol=self.tol, max_iter=600,
+                                       mixing=mixing, adjoint_tol=self.adjoint_tol)
+                    self.evaluations += out["evaluations"]
+                    if (out["residual"] < self.accept and np.isfinite(out["energy"])
+                            and self.sane(out)
+                            and (best is None or out["energy"] < best["energy"] - 1e-6)):
+                        best = out
+            self.fe_moment = keep
+        if best is None:
+            raise RuntimeError(f"{self.name}: no self-consistent state")
+        self._x, self.out = best["shifts"], best
+        self.pot.clear_history()
+        return best
+
+    def relax_ground(self, rounds=3, **kw):
+        """Relax on the lowest-energy magnetic state: find it at the current
+        positions, relax, and repeat while another state is lower at the
+        relaxed positions.  Takes the arguments of ``relax``."""
+        self.ground_state()
+        for _ in range(rounds):
+            out = self.relax(**kw)
+            e = out["energy"]
+            new = self.ground_state()
+            if new["energy"] > e - 1e-4:
+                self.ground_state_switches = getattr(self, "ground_state_switches", 0)
+                return out
+            self.ground_state_switches = getattr(self, "ground_state_switches", 0) + 1
+        return self.relax(**kw)
 
     def volume(self):
         return float(abs(np.linalg.det(self.cell)))

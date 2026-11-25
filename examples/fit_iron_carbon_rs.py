@@ -106,6 +106,7 @@ class Model:
         self.ref = None  # relaxed state at the current iterate (see jacobian)
         self.last = None
         self.last_x = None
+        self.ground_next = True  # the first evaluation finds the ground states
 
     def snapshot(self):
         return {c.name: (c.positions.copy(), None if c._x is None else c._x.copy())
@@ -116,7 +117,7 @@ class Model:
             c.positions, x = snap[c.name][0].copy(), snap[c.name][1]
             c._x = None if x is None else x.copy()
 
-    def properties(self, values, relax_cementite=False, reset=False):
+    def properties(self, values, relax_cementite=False, reset=False, ground=False):
         """Fit quantities: Fe16C cells with every atom relaxed at fixed cell
         (the tetrahedral C held on its site, the saddle point); cementite at
         the experimental positions unless ``relax_cementite``."""
@@ -127,13 +128,18 @@ class Model:
             if reset or min_fe_c(c) < MIN_FE_C:  # start afresh after a collapse
                 c.positions = self.start[c.name].copy()
                 c._x = None
-        o = self.oct.relax(ftol=self.ftol)
-        t = self.tet.relax(fixed=(16,), ftol=self.ftol, fix_centre=True, symmetry=self.tet_ops)
+        # with ``ground`` every cell is put on its lowest-energy magnetic state
+        # (several cold starts; done at each iterate of the fit, the Jacobian
+        # columns and trial steps follow that state by warm starts)
+        relax = (lambda c_, **kw: c_.relax_ground(**kw)) if ground else (
+            lambda c_, **kw: c_.relax(**kw))
+        o = relax(self.oct, ftol=self.ftol)
+        t = relax(self.tet, fixed=(16,), ftol=self.ftol, fix_centre=True, symmetry=self.tet_ops)
         if relax_cementite:
-            c = self.cem.relax(ftol=self.ftol)
+            c = relax(self.cem, ftol=self.ftol)
         else:
             self.cem.positions = self.ideal["cem"].copy()
-            c = self.cem.solve()
+            c = self.cem.ground_state() if ground else self.cem.solve()
         out = {}
         out["E_sol oct"] = o["energy"] - 16 * self.e_fe - self.e_c
         out["E tet - oct"] = t["energy"] - o["energy"]
@@ -169,7 +175,7 @@ class Model:
         if self.ref is not None:
             self.restore(self.ref)
         try:
-            out = self.properties(dict(self.fixed, **values))
+            out = self.properties(dict(self.fixed, **values), ground=self.ground_next)
         except Exception as err:  # noqa: BLE001 (a failed evaluation is a bad point)
             print("failed:", err, file=sys.stderr, flush=True)
             for c in (self.oct, self.tet, self.cem):  # start the next one afresh
@@ -182,6 +188,7 @@ class Model:
         r = np.nan_to_num(r, nan=1e2, posinf=1e2, neginf=-1e2)
         self.n_eval += 1
         cost = float(r @ r)
+        self.ground_next = False
         self.last_x, self.last_r = np.array(x, float), r
         self.last_state = self.snapshot()
         if self.verbose or cost < self.best[0]:
@@ -210,6 +217,7 @@ def jacobian(model, lo, hi, step=1e-2):
         if model.last_x is None or not np.array_equal(model.last_x, x):
             model.residuals(x, names)
         model.ref = model.last_state
+        model.ground_next = True  # the iterate on its lowest magnetic states
         r0 = model.residuals(x, names)  # from the new reference: consistent columns
         model.ref = model.last_state
         cols = []
@@ -229,10 +237,11 @@ def jacobian(model, lo, hi, step=1e-2):
 
 
 def report(model, values, relax_cementite=True):
-    out = model.properties(values, relax_cementite=False, reset=True)
+    out = model.properties(values, relax_cementite=False, reset=True, ground=True)
     rows = [("Fe16C relaxed", out)]
     if relax_cementite:
-        rows.append(("+ Fe3C relaxed", model.properties(values, relax_cementite=True)))
+        rows.append(("+ Fe3C relaxed", model.properties(values, relax_cementite=True,
+                                                         ground=True)))
     print(f"{'property':14s} " + " ".join(f"{n:>16s}" for n, _ in rows) + f" {'target':>9s}")
     for k, (t, _) in TARGETS.items():
         print(f"{k:14s} " + " ".join(f"{o[k]:16.4f}" for _, o in rows) + f" {t:9.4f}")
