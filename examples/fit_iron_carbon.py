@@ -30,6 +30,7 @@ import time
 
 import numpy as np
 from _iron_carbon_rs import (
+    A_FE,
     RsCell,
     bcc_fe,
     bcc_supercell,
@@ -126,12 +127,14 @@ class Model:
                       for k, v in self.ideal.items()}
         # the migration saddle: carbon held at the tetrahedral site's y (half
         # way along the path from the octahedral site at y = a/2 to the one at
-        # y = 0), free in that plane, the Fe free with their centre held; the
-        # displaced start lets carbon leave the tetrahedral point, which is a
-        # higher-order saddle (``tet_symmetric`` holds it there instead)
+        # y = 0), free in that plane, the Fe free with their centre held.  The
+        # tetrahedral point is a higher-order saddle (``tet_symmetric`` holds
+        # carbon there instead); from it the relaxation can stall, so carbon
+        # starts 0.06 a off it in the plane (the saddle is at about 0.12 a;
+        # starts at 0.06 and 0.10 a reach the NEB barrier to 1e-4 eV)
         rng = np.random.default_rng(12)
         self.start["tet"] = self.ideal["tet"] + 0.02 * rng.standard_normal((17, 3))
-        self.start["tet"][16, 1] = self.ideal["tet"][16, 1]
+        self.start["tet"][16] = self.ideal["tet"][16] + A_FE * np.array([0.06, 0.0, 0.06])
         p = iron_carbon()
         fe = RsCell("bcc Fe", *bcc_fe())
         fe.set_params(p)

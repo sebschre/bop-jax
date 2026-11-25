@@ -111,9 +111,11 @@ Each evaluation of the fit:
   way between two octahedral sites: carbon is held along the path only,
   with the Fe centre held. The saddle lies in that plane, as the two sites'
   mirror symmetry requires, but off the tetrahedral point. This agrees with
-  NEB (0.281 against 0.282 eV, and 0.844 against 0.843 eV at the fitted
-  parameters). The symmetric tetrahedral site is a higher-order saddle in
-  this model (`--tet-symmetric` fits to it instead).
+  NEB: 0.281 against 0.282 eV at earlier parameters, and 0.8435 against
+  0.8435 eV at the fitted ones. Carbon starts 0.06 a off the tetrahedral
+  point in the plane, because from the point itself the relaxation can stall
+  (1.19 eV). The symmetric tetrahedral site is a higher-order saddle in this
+  model (`--tet-symmetric` fits to it instead).
 - **Deterministic residuals.** Every evaluation starts from the relaxed state
   of the current iterate. Relaxations warm-started from wherever the previous
   evaluation ended reach slightly different minima, and a finite-difference
