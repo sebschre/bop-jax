@@ -174,7 +174,7 @@ class RsCell:
         return np.asarray(out["virial"]) / self.volume() * EV_A3_TO_GPA
 
     def relax(self, fixed=(), ftol=2e-3, maxiter=200, max_step=0.05, memory=12, verbose=False,
-              fix_centre=False, symmetry=None):
+              fix_centre=False, symmetry=None, fixed_components=()):
         """Relax every atom but ``fixed`` at fixed cell on the exact forces:
         L-BFGS with no atom moving more than ``max_step`` A per step (small
         moves keep each warm start close), a step accepted when the energy
@@ -185,21 +185,27 @@ class RsCell:
         held on a saddle site, the lattice would otherwise slide rigidly
         around it into a stable site.  ``symmetry`` (from ``site_symmetry``)
         averages every gradient over those operations, so that symmetric
-        positions stay symmetric (a saddle point held by its symmetry)."""
-        free = np.ones(self.n, bool)
-        free[list(fixed)] = False
+        positions stay symmetric (a saddle point held by its symmetry).
+        ``fixed_components`` holds single coordinates, (atom, axis): carbon's
+        coordinate along a migration path, with the Fe centre held, gives the
+        lowest energy in the plane of the saddle (the drag method)."""
+        mask = np.ones((self.n, 3))
+        mask[list(fixed)] = 0.0
+        for a, k in fixed_components:
+            mask[a, k] = 0.0
+        lattice = (mask.sum(axis=1) == 3) & (self.species == FE)  # whose centre is held
         pos = self.positions.copy()
         out = self.solve(pos)
 
         def gradient(o):
-            g_ = -o["forces"] * free[:, None]
+            g_ = -o["forces"] * mask
             if symmetry:
                 gs = np.zeros_like(g_)
                 for r, perm in symmetry:
                     gs[perm] += g_ @ r.T
-                g_ = gs / len(symmetry) * free[:, None]
+                g_ = gs / len(symmetry) * mask
             if fix_centre:
-                g_[free] -= g_[free].mean(axis=0)
+                g_[lattice] -= g_[lattice].mean(axis=0)
             return g_
 
         g = gradient(out)
@@ -224,7 +230,7 @@ class RsCell:
             for (s, y), a in zip(zip(s_hist, y_hist), reversed(alphas)):
                 b = (y @ q) / (y @ s)
                 q += (a - b) * s
-            step = -q.reshape(-1, 3) * free[:, None]
+            step = -q.reshape(-1, 3) * mask
             if (step.ravel() @ g.ravel()) >= 0:  # not a descent direction
                 s_hist, y_hist = [], []
                 step = -0.01 * g

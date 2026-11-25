@@ -74,6 +74,136 @@ bond. A d-p model would have meant dropping the s shell of the carbon model.
   (2s held 2.3 electrons at the tetrahedral site). The guard widens it
   where needed; carbon was refitted with it.
 
+## Fit on bopfox-rs (`IRON_CARBON_FIT`)
+
+The present cross terms were fitted with the Rust port
+([bopfox-rs](../bopfox-rs/README.md#iron-carbon)): `examples/_iron_carbon_rs.py`
+(calculator), `examples/fit_iron_carbon_rs.py` (fit),
+`examples/neb_iron_carbon_rs.py` (migration path). The model, targets and
+self-consistency (potential condition, exact implicit forces and stress) are
+those of the earlier bopjax fit, `IRON_CARBON_FIT_JAX` ([below](#earlier-fit-on-bopjax-iron_carbon_fit_jax)).
+What changed is the cost:
+
+- Fe16C self-consistency with exact forces takes about 2 s on four cores
+  from a warm start. bopjax needs minutes per solve, 6-7 minutes for the
+  forces or the stress, and 12 GB.
+- So **every atom is relaxed** in each evaluation, cementite included (about
+  0.5-1.5 minutes per evaluation, warm-started). The bopjax fit could only
+  afford the breathing modes of two Fe shells.
+
+### What the full relaxations showed
+
+- **The earlier fit's octahedral site is not stable.** Relaxed from slightly
+  displaced positions, carbon moves 0.5 A along the axis onto one axial Fe,
+  which comes 0.18 A to meet it. That leaves Fe-C at 1.09 A, the Fe moment
+  at 0.75 muB, and the solution energy at -1.7 eV instead of +0.72. Its weak
+  Fe-C core (2 eV) cannot stop the short-range Fe-C bonding. The fit now
+  starts the octahedral cell from displaced positions, so such an
+  instability shows up in the cost; a relaxed Fe-C distance below 1.5 A is
+  also penalised.
+- **The tetrahedral site needs both constraints.**
+  - With only carbon held, the Fe lattice slides rigidly around it into an
+    octahedral site, so the Fe centre is held as well.
+  - Even then the Fe break the D2d symmetry and distort toward an
+    octahedral environment, about 0.4 eV lower: the lattice going down the
+    migration path, not the saddle.
+  - The gradient is therefore symmetrised over the eight point operations of
+    the site (`site_symmetry`), and E(tet) is the symmetric saddle.
+- **Several self-consistent magnetic states.** Iron next to carbon converges
+  to states eV apart in Fe16C, depending on the starting moments; a warm
+  start keeps whichever it came from. `RsCell.ground_state` tries cold starts
+  with several Fe moments and keeps the lowest. The fit puts every iterate on
+  its ground states, and the Jacobian columns follow them by warm starts.
+- **Relaxed cementite can lose its moments.** At experimental positions
+  cementite stays ferromagnetic over the whole range of parameters tried.
+  Relaxed, its Fe moments collapse once the carbon levels come near the Fe
+  d band: 0.6 muB at `e_c` = 0.5 eV, 2.0 muB at 1.5 eV. A first fit with
+  cementite at experimental positions went to `e_c` = -0.9 eV, where relaxed
+  cementite is non-magnetic, with -22 GPa. Cementite is now relaxed in the
+  fit, and `e_c` is bounded below at 1.3 eV, because least squares walks into
+  the collapse and cannot climb back out.
+- **Numerics.** Carbon 2s lies 11 eV below the iron d band, so carbon's
+  moments reach 1e10, and the moments-to-recursion map lost about 9 digits.
+  This made the analytic shift gradient, and through it the implicit forces,
+  wrong by up to 0.1 eV/A and stalled relaxations. bopfox-rs now walks
+  `H - c` with c each orbital's own level ([bopfox-rs](../bopfox-rs/README.md#iron-carbon)),
+  and the forces match finite differences of the self-consistent energy.
+- **Deterministic residuals.** Relaxations warm-started from wherever the
+  previous evaluation ended reach slightly different minima, and a
+  finite-difference Jacobian of those was noise. Every evaluation now starts
+  from the relaxed state of the current iterate.
+
+### Results
+
+Fe16C (2x2x2 bcc, a = 2.8394 A), every atom relaxed at fixed cell, each cell
+on its lowest magnetic state. The tetrahedral C is held on its site, with the
+Fe centre and the D2d symmetry kept. Cementite is at the experimental lattice,
+at the experimental positions or relaxed. Recomputed from scratch with
+`IRON_CARBON_FIT` (`report`):
+
+| Property | `IRON_CARBON_FIT` | `IRON_CARBON_FIT_JAX`, 2 shells relaxed | `IRON_CARBON_FIT_JAX`, all atoms | Target |
+|---|---|---|---|---|
+| E_sol, octahedral, relative to diamond (eV) | 0.727 | 0.717 | **-1.71** (collapse) | 0.72 +- 0.15 |
+| E(tetrahedral) - E(octahedral) (eV) | 0.843 | 0.746 | | 0.86 +- 0.10 |
+| dipole tensor, axial (eV) | 9.48 | **4.29** | | 8.0 +- 1.5 |
+| dipole tensor, transverse (eV) | 4.78 | **6.92** | | 3.4 +- 1.5 |
+| formation energy of Fe3C (eV/atom), experimental positions / relaxed | 0.023 / 0.016 | 0.034 / | | +0.03 +- 0.04 |
+| pressure of Fe3C (GPa), experimental positions / relaxed | -1.5 / -3.5 | -6.5 / | | 0 +- 5 |
+| mean Fe moment of Fe3C (muB), experimental positions / relaxed | 2.06 / 1.99 | 2.11 / | | 1.95 +- 0.15 |
+| electrons gained by octahedral C | 0.02 | -0.06 | | +0.3 +- 0.4 |
+| cost | 3.0 | 16.6 | | |
+
+Also, with `IRON_CARBON_FIT`:
+- the axial Fe neighbours of octahedral C relax from 1.42 to 1.63 A, the
+  transverse ones from 2.01 to 2.03 A, and the shortest Fe-C distance in the
+  tetrahedral cell is 1.59 A;
+- the axial Fe keep 2.03 muB (bulk 2.87), and octahedral carbon carries
+  -0.24 muB, antiparallel to iron;
+- NEB_PLACEHOLDER
+
+**Dipole tensor: right anisotropy, too large a trace.** P axial - P transverse
+is +4.7 eV (DFT +4.6), so the anisotropy is right in sign and size. The trace
+(the volume change) is 19.0 eV against 14.8:
+- **Usable:** martensite tetragonality (the sign of the anisotropy), Snoek
+  relaxation and carbon around screw dislocations (the anisotropy).
+- **About 30 % too strong:** couplings to pressure (lattice expansion with
+  carbon, carbon at edge dislocations).
+
+The axial component (9.5 eV) is the one off its target. A bigger trace with
+the right anisotropy is the trade-off the cost found: the strong core
+(166 eV, below 1.70 A) pushes the axial neighbours, and Gaussian Fe-C
+embedding densities at 2.01 A (width 0.21 A) bind the transverse ones
+without pushing on them.
+
+### Cross parameters (`IRON_CARBON_FIT`)
+
+| e_c | sds | pds | pdp | decay | decay_pi | pair | pair_decay | rho_fe | rho_c | hubbard_c | core | core_r | rho_gauss_fe | rho_gauss_c | rho_gauss_r | rho_gauss_w |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1.40 | -0.165 | -0.418 | 0.662 | 4.62 | 4.06 | 1.78 | 4.73 | 0.344 | 0.977 | 6.58 | 166 | 1.705 | 0.049 | 0.109 | 2.008 | 0.211 |
+
+Units are as in [Cross parameters of the earlier fit](#cross-parameters-of-the-earlier-fit-iron_carbon_fit_jax), plus the Gaussian
+embedding densities `amplitude * exp(-((r - rho_gauss_r) / rho_gauss_w)^2)`
+that a C neighbour adds on Fe (`rho_gauss_fe`) and an Fe neighbour on C
+(`rho_gauss_c`). The carbon levels sit 1.4 eV above the iron d level, at the
+bound that keeps relaxed cementite magnetic.
+
+### Limitations
+
+- **Pressure coupling is too strong:** the dipole trace is 19.0 eV against
+  14.8 (above).
+- **Several magnetic states.** Iron next to carbon has several
+  self-consistent magnetic states. Take results on the lowest
+  (`RsCell.ground_state` / `relax_ground`); a warm start keeps whichever
+  state it came from.
+- **Cementite near the collapse.** At `e_c` = 1.4 eV, relaxed cementite is
+  magnetic. Below about 1 eV it is not; strained or defective carbides near
+  that boundary have not been checked.
+- **Not the dilute limit.** Fe16C cells, and three targets taken from memory,
+  as before ([Targets](#targets-examplesfit_iron_carbonpy)).
+- **Relaxations that stop short.** A step that lands on another magnetic
+  state can end a relaxation early, so check `RsCell.max_force`. Every
+  structure in the table relaxed to 1e-3 eV/A.
+
 ## Calculator (`examples/_iron_carbon.py`)
 
 `Calculator` wraps `make_potential(condition="potential")` with warm starts,
@@ -87,7 +217,13 @@ so the present fit and its report use exact forces and stress throughout.
 The breathing modes of the first two Fe shells around C relax in a few
 minutes.
 
-## Results (`IRON_CARBON_FIT`)
+## Earlier fit on bopjax (`IRON_CARBON_FIT_JAX`)
+
+The cross terms before the Rust fit. Relaxing every atom (above) showed that
+their octahedral site is unstable; the account below is kept as it was
+written.
+
+### Results
 
 Fitted with `examples/fit_iron_carbon.py` with exact forces and stress: 13
 cross parameters, bounded least squares, starting from the partial-force fit
@@ -132,7 +268,7 @@ relaxed may be below 0.75 eV; the dipole anisotropy changed by less than
   stationarity; differences between similar cells (octahedral and
   tetrahedral) should be less affected than absolute energies.
 
-## Limitations
+### Limitations
 
 **The elastic dipole tensor of octahedral carbon is reversed.** Carbon on
 the octahedral site has two Fe neighbours along one cube axis (1.43 A) and
@@ -272,7 +408,7 @@ positions (Wood et al., J. Appl. Cryst. 37, 2004). The tolerances are loose: a 1
 cell is not the dilute limit, and three of the targets were not checked
 against the papers.
 
-## Cross parameters
+## Cross parameters of the earlier fit (`IRON_CARBON_FIT_JAX`)
 
 | e_c | sds | pds | pdp | decay | decay_pi | pair | pair_decay | rho_fe | rho_c | hubbard_c | core | core_r |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|

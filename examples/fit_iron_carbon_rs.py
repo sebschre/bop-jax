@@ -111,6 +111,13 @@ class Model:
         self.last_x = None
         self.ground_next = True  # the first evaluation finds the ground states
         self.relax_cementite = False
+        # the saddle of the migration: the symmetric tetrahedral site, or
+        # (False) carbon held there with the Fe free to break the symmetry,
+        # which is lower when the symmetric site is a higher-order saddle
+        self.tet_symmetric = True
+        # the saddle as the lowest energy in the plane half way between the
+        # two octahedral sites (carbon's y held), see --tet-plane
+        self.tet_plane = False
 
     def snapshot(self):
         return {c.name: (c.positions.copy(), None if c._x is None else c._x.copy())
@@ -138,7 +145,13 @@ class Model:
         relax = (lambda c_, **kw: c_.relax_ground(**kw)) if ground else (
             lambda c_, **kw: c_.relax(**kw))
         o = relax(self.oct, ftol=self.ftol)
-        t = relax(self.tet, fixed=(16,), ftol=self.ftol, fix_centre=True, symmetry=self.tet_ops)
+        if self.tet_plane:
+            # carbon held only along the path (y, from the octahedral site at
+            # y = a/2 to the one at y = 0), free in the plane of the saddle
+            t = relax(self.tet, fixed_components=((16, 1),), ftol=self.ftol, fix_centre=True)
+        else:
+            t = relax(self.tet, fixed=(16,), ftol=self.ftol, fix_centre=True,
+                      symmetry=self.tet_ops if self.tet_symmetric else None)
         if relax_cementite:
             c = relax(self.cem, ftol=self.ftol)
         else:
@@ -267,6 +280,13 @@ def main():
     ap.add_argument("--free", help="comma-separated parameters to fit (default: all of BOUNDS)")
     ap.add_argument("--set", help="JSON dict of fixed values overriding the start")
     ap.add_argument("--verbose", action="store_true", help="print every evaluation")
+    ap.add_argument("--tet-plane", action="store_true",
+                    help="migration saddle as the lowest energy in the plane half way between two"
+                         " octahedral sites (carbon held along the path only): the NEB saddle"
+                         " lies in that plane but off the symmetric tetrahedral site")
+    ap.add_argument("--tet-free", action="store_true",
+                    help="tetrahedral cell without the D2d symmetry (C and the Fe centre held):"
+                         " the energy of the lower saddle when the symmetric site is unstable")
     ap.add_argument("--relax-cementite", action="store_true",
                     help="relax the atoms of cementite (at the experimental cell) in the fit;"
                          " at experimental positions it can hide a collapse of the Fe moments")
@@ -284,6 +304,16 @@ def main():
     model = Model(checkpoint=args.checkpoint, verbose=args.verbose)
     model.fixed = {k: v for k, v in start.items() if k not in names}
     model.relax_cementite = args.relax_cementite
+    if args.tet_plane:
+        model.tet_plane = True
+        rng = np.random.default_rng(12)
+        model.start["tet"] = model.ideal["tet"] + 0.02 * rng.standard_normal((17, 3))
+        model.start["tet"][16, 1] = model.ideal["tet"][16, 1]
+    if args.tet_free:
+        model.tet_symmetric = False
+        rng = np.random.default_rng(12)
+        model.start["tet"] = model.ideal["tet"] + 0.02 * rng.standard_normal((17, 3))
+        model.start["tet"][16] = model.ideal["tet"][16]
     x0 = np.array([start[k] for k in names])
     lo = np.array([BOUNDS[k][0] for k in names])
     hi = np.array([BOUNDS[k][1] for k in names])
