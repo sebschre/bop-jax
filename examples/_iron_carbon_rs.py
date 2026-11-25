@@ -21,6 +21,35 @@ from _iron_carbon import (A_DIAMOND, A_FE, EV_A3_TO_GPA, bcc_fe, bcc_supercell, 
                           diamond, fe_with_carbon)
 
 
+def site_symmetry(cell, positions, species, centre, tol=1e-6):
+    """Point operations of the cell about atom ``centre``: the signed
+    permutation matrices R (of the 48 cubic ones) that map every atom onto
+    an atom of the same species (minimum image).  Returns a list of (R, perm)
+    with ``positions[perm[i]] = c + R (positions[i] - c)`` (mod the cell)."""
+    from itertools import permutations, product
+    cell = np.asarray(cell, float)
+    inv = np.linalg.inv(cell)
+    c = positions[centre]
+    ops = []
+    for perm_axes in permutations(range(3)):
+        for signs in product((1, -1), repeat=3):
+            r = np.zeros((3, 3))
+            for k in range(3):
+                r[k, perm_axes[k]] = signs[k]
+            img = c + (positions - c) @ r.T
+            perm = []
+            for i, x in enumerate(img):
+                d = positions - x
+                d -= np.round(d @ inv) @ cell
+                j = int(np.argmin(np.linalg.norm(d, axis=1)))
+                if np.linalg.norm(d[j]) > tol or species[j] != species[i]:
+                    break
+                perm.append(j)
+            else:
+                ops.append((r, np.array(perm)))
+    return ops
+
+
 def make_potential(params, magnetic=True):
     cfg = bj.BOPConfig(spin="collinear" if magnetic else "none", **IRON_CARBON_CONFIG)
     return bopfox_rs.Potential(bopfox_rs.model_from_bopjax(cfg, params, tapered_exp_sum))
@@ -94,18 +123,36 @@ class RsCell:
         out = self.out if out is None else out
         return np.asarray(out["virial"]) / self.volume() * EV_A3_TO_GPA
 
-    def relax(self, fixed=(), ftol=2e-3, maxiter=200, max_step=0.05, memory=12, verbose=False):
+    def relax(self, fixed=(), ftol=2e-3, maxiter=200, max_step=0.05, memory=12, verbose=False,
+              fix_centre=False, symmetry=None):
         """Relax every atom but ``fixed`` at fixed cell on the exact forces:
         L-BFGS with no atom moving more than ``max_step`` A per step (small
         moves keep each warm start close), a step accepted when the energy
         does not rise, else halved with the memory cleared.  Stops when no
         force component exceeds ``ftol`` (eV/A).  Returns the results at the
-        relaxed positions."""
+        relaxed positions.  ``fix_centre`` also keeps the centre of the free
+        atoms in place (their mean force is removed): with only a carbon atom
+        held on a saddle site, the lattice would otherwise slide rigidly
+        around it into a stable site.  ``symmetry`` (from ``site_symmetry``)
+        averages every gradient over those operations, so that symmetric
+        positions stay symmetric (a saddle point held by its symmetry)."""
         free = np.ones(self.n, bool)
         free[list(fixed)] = False
         pos = self.positions.copy()
         out = self.solve(pos)
-        g = -out["forces"] * free[:, None]
+
+        def gradient(o):
+            g_ = -o["forces"] * free[:, None]
+            if symmetry:
+                gs = np.zeros_like(g_)
+                for r, perm in symmetry:
+                    gs[perm] += g_ @ r.T
+                g_ = gs / len(symmetry) * free[:, None]
+            if fix_centre:
+                g_[free] -= g_[free].mean(axis=0)
+            return g_
+
+        g = gradient(out)
         s_hist, y_hist = [], []
         scale = max_step
         self.n_steps = 0
@@ -133,15 +180,18 @@ class RsCell:
                 step = -0.01 * g
             longest = np.linalg.norm(step, axis=1).max()
             step *= min(1.0, scale / longest)
-            new = self.solve(pos + step)
-            if new["energy"] > out["energy"] + 1e-7:
+            try:
+                new = self.solve(pos + step)
+            except RuntimeError:  # no self-consistent state there: a bad step
+                new = None
+            if new is None or new["energy"] > out["energy"] + 1e-7:
                 s_hist, y_hist = [], []
                 scale = 0.5 * min(scale, longest)
                 if scale < 1e-4:
                     break
                 self.solve(pos)  # back to the warm start of pos
                 continue
-            g_new = -new["forces"] * free[:, None]
+            g_new = gradient(new)
             s, y = step.ravel(), (g_new - g).ravel()
             if s @ y > 1e-12:
                 s_hist.append(s)

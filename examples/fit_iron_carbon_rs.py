@@ -23,7 +23,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from _iron_carbon_rs import (RsCell, bcc_fe, bcc_supercell, cementite, diamond,
-                             fe_with_carbon)
+                             fe_with_carbon, site_symmetry)
 from bopjax.models import FE, IRON_CARBON_FIT, iron_carbon
 from fit_iron_carbon import TARGETS
 
@@ -79,9 +79,16 @@ class Model:
         # Fe neighbour, as with the JAX fit's parameters) is found
         rng = np.random.default_rng(11)
         self.ideal = {c.name: c.positions.copy() for c in (self.oct, self.tet, self.cem)}
-        self.start = {k: v + (0.02 * rng.standard_normal(v.shape) if k != "cem" else 0.0)
+        tet = fe_with_carbon("tetrahedral")
+        self.tet_ops = site_symmetry(tet[0], tet[1], np.asarray(tet[2]), 16)
+        self.start = {k: v + (0.02 * rng.standard_normal(v.shape) if k == "oct" else 0.0)
                       for k, v in self.ideal.items()}
-        self.start["tet"][16] = self.ideal["tet"][16]  # the saddle point: C on its site
+        # the tetrahedral site is the saddle point of the migration: C held
+        # there, the Fe relaxed from the ideal sites, which keeps the D2d
+        # symmetry of the saddle, enforced by symmetrising every step (left
+        # alone the Fe break it and distort toward an octahedral environment
+        # around the held C, about 0.4 eV lower near the fitted parameters:
+        # the lattice sliding down the migration path, not the saddle)
         p = iron_carbon()
         fe = RsCell("bcc Fe", *bcc_fe())
         fe.set_params(p)
@@ -96,6 +103,18 @@ class Model:
         self.species = np.asarray(cementite()[2])
         self.n_eval = 0
         self.best = (np.inf, None, None)
+        self.ref = None  # relaxed state at the current iterate (see jacobian)
+        self.last = None
+        self.last_x = None
+
+    def snapshot(self):
+        return {c.name: (c.positions.copy(), None if c._x is None else c._x.copy())
+                for c in (self.oct, self.tet, self.cem)}
+
+    def restore(self, snap):
+        for c in (self.oct, self.tet, self.cem):
+            c.positions, x = snap[c.name][0].copy(), snap[c.name][1]
+            c._x = None if x is None else x.copy()
 
     def properties(self, values, relax_cementite=False, reset=False):
         """Fit quantities: Fe16C cells with every atom relaxed at fixed cell
@@ -109,7 +128,7 @@ class Model:
                 c.positions = self.start[c.name].copy()
                 c._x = None
         o = self.oct.relax(ftol=self.ftol)
-        t = self.tet.relax(fixed=(16,), ftol=self.ftol)
+        t = self.tet.relax(fixed=(16,), ftol=self.ftol, fix_centre=True, symmetry=self.tet_ops)
         if relax_cementite:
             c = self.cem.relax(ftol=self.ftol)
         else:
@@ -141,7 +160,14 @@ class Model:
         return out
 
     def residuals(self, x, names):
+        """Residuals at x.  Every evaluation starts from the relaxed state of
+        the current iterate (``self.ref``), so that the residuals are a
+        function of x alone: relaxations warm-started from wherever the
+        previous evaluation ended reach slightly different minima, and a
+        finite-difference Jacobian of those is noise."""
         values = dict(zip(names, x))
+        if self.ref is not None:
+            self.restore(self.ref)
         try:
             out = self.properties(dict(self.fixed, **values))
         except Exception as err:  # noqa: BLE001 (a failed evaluation is a bad point)
@@ -150,16 +176,21 @@ class Model:
                 c.positions = self.ideal[c.name].copy()
                 c._x = None
             return np.full(len(TARGETS) + 1, 1e2)
+        self.last = out
         r = np.array([(out[k] - t) / tol for k, (t, tol) in TARGETS.items()]
                      + [max(0.0, MIN_FE_C - out["min Fe-C"]) / 0.05])
         r = np.nan_to_num(r, nan=1e2, posinf=1e2, neginf=-1e2)
         self.n_eval += 1
         cost = float(r @ r)
+        self.last_x, self.last_r = np.array(x, float), r
+        self.last_state = self.snapshot()
         if self.verbose or cost < self.best[0]:
             mark = "*" if cost < self.best[0] else " "
             print(f"[{self.n_eval:4d}]{mark}cost {cost:8.3f} ({out['time']:.0f} s)  "
                   + " ".join(f"{k}={v:.4g}" for k, v in values.items()), flush=True)
-            print("        " + " ".join(f"{k}={out[k]:.3f}" for k in TARGETS), flush=True)
+            print("        " + " ".join(f"{k}={out[k]:.3f}" for k in TARGETS)
+                  + f" | r_ax={out['r axial']:.3f} r_tr={out['r transverse']:.3f}"
+                  f" minFeC={out['min Fe-C']:.3f}", flush=True)
         if cost < self.best[0]:
             self.best = (cost, dict(self.fixed, **values), out)
             if self.checkpoint:
@@ -168,6 +199,33 @@ class Model:
                                "values": {k: float(v) for k, v in self.best[1].items()},
                                "properties": {k: float(v) for k, v in out.items()}}, fh, indent=1)
         return r
+
+
+def jacobian(model, lo, hi, step=1e-2):
+    """Forward-difference Jacobian at the iterate x: every column relaxes
+    from the relaxed state at x (``least_squares`` calls this right after
+    evaluating the residuals at x)."""
+
+    def jac(x, names):
+        if model.last_x is None or not np.array_equal(model.last_x, x):
+            model.residuals(x, names)
+        model.ref = model.last_state
+        r0 = model.residuals(x, names)  # from the new reference: consistent columns
+        model.ref = model.last_state
+        cols = []
+        for j in range(len(x)):
+            h = step * max(1.0, abs(x[j]))
+            if x[j] + h > hi[j]:
+                h = -h
+            xj = np.array(x, float)
+            xj[j] += h
+            cols.append((model.residuals(xj, names) - r0) / h)
+        model.restore(model.ref)  # leave the state of x itself
+        model.last_x, model.last_r = np.array(x, float), r0
+        model.last_state = model.ref
+        return np.array(cols).T
+
+    return jac
 
 
 def report(model, values, relax_cementite=True):
@@ -216,8 +274,9 @@ def main():
     model.residuals(x0, names)
     print(f"one evaluation: {time.time() - t:.1f} s", flush=True)
     if not args.quick:
-        least_squares(model.residuals, x0, args=(names,), bounds=(lo, hi), x_scale="jac",
-                      diff_step=1e-2, max_nfev=args.max_nfev)
+        model.last_x = None
+        least_squares(model.residuals, x0, jac=jacobian(model, lo, hi), args=(names,),
+                      bounds=(lo, hi), x_scale="jac", max_nfev=args.max_nfev)
     values = model.best[1]
     report(model, values)
     print("IRON_CARBON_FIT =", json.dumps({k: round(float(v), 5) for k, v in values.items()},
