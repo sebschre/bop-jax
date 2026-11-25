@@ -268,9 +268,11 @@ def run_job(job, geo, args):
             while k <= steps:
                 p = cell.positions.copy()
                 p[n_c, 2] = z0 + dz * k / steps
+                x_keep, out_keep = cell._x, cell.out
                 try:
                     o = cell.solve(p)
                 except RuntimeError:
+                    cell._x, cell.out = x_keep, out_keep  # solve() drops the warm start
                     # no state at fixed Fe: relax the lattice at the last
                     # carbon position, carbon held along the line, and retry
                     if getattr(cell, "_relaxed_at", None) == k:
