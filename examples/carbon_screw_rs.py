@@ -170,9 +170,25 @@ def relax_cell(name, geo, pos, species, args, fixed=None, fixed_components=()):
     cell.set_params(iron_carbon())
     fixed = geo.fixed_atoms() if fixed is None else fixed
     t0 = time.time()
+    part = os.path.join(args.out, name + ".part.npz")
+    if os.path.exists(part):  # resume an interrupted relaxation
+        cell.positions = np.load(part)["positions"]
+        print(f"{name}: resuming from {part}", flush=True)
     for rnd in range(3):
-        out = cell.relax(fixed=fixed, ftol=args.fmax, maxiter=args.steps, verbose=True,
-                         fixed_components=fixed_components)
+        # chunks of steps; stop on the force tolerance, or once a chunk gains
+        # less than `plateau` eV with forces below `fplateau` (the last steps
+        # of a soft cylinder change the energy by 1e-4 eV per step)
+        e_prev, steps = np.inf, 0
+        while True:
+            out = cell.relax(fixed=fixed, ftol=args.fmax, maxiter=args.chunk, verbose=True,
+                             fixed_components=fixed_components)
+            steps += cell.n_steps
+            e = out["energy"]
+            np.savez(part, positions=cell.positions)
+            if (cell.max_force < args.fmax or steps >= args.steps or cell.n_steps == 0
+                    or (e_prev - e < args.plateau and cell.max_force < args.fplateau)):
+                break
+            e_prev = e
         e = out["energy"]
         if not args.ground_state:
             break
@@ -192,6 +208,9 @@ def save(out_dir, job, cell, out, seconds, **extra):
              species=cell.species, energy=out["energy"], max_force=cell.max_force,
              moments=m, charge=np.asarray(out["charge"]), shifts=out["shifts"],
              seconds=seconds, **extra)
+    part = os.path.join(out_dir, job + ".part.npz")
+    if os.path.exists(part):
+        os.remove(part)
     print(f"{job}: E = {out['energy']:.6f} eV, max force {cell.max_force:.4f} eV/A, "
           f"{seconds / 60:.1f} min", flush=True)
 
@@ -340,7 +359,7 @@ def describe(geo, d):
 def report(geo, args):
     e = {}
     for f in sorted(os.listdir(args.out)):
-        if f.endswith(".npz"):
+        if f.endswith(".npz") and not f.endswith(".part.npz"):
             e[f[:-4]] = load(args.out, f[:-4])
     if "perfect" in e and "perfect_C" in e:
         e_sol = e["perfect_C"]["energy"] - e["perfect"]["energy"]
@@ -380,6 +399,10 @@ def main():
     ap.add_argument("--rmax", type=float, default=4.5, help="octahedral sites within (A)")
     ap.add_argument("--fmax", type=float, default=5e-3)
     ap.add_argument("--steps", type=int, default=250)
+    ap.add_argument("--chunk", type=int, default=15, help="relaxation steps per checkpoint")
+    ap.add_argument("--plateau", type=float, default=2e-3,
+                    help="stop when a chunk gains less than this (eV) ...")
+    ap.add_argument("--fplateau", type=float, default=0.05, help="... and fmax is below (eV/A)")
     ap.add_argument("--taus", type=float, nargs="+",
                     default=[0.5, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.4, 2.7, 3.0],
                     help="resolved shear stresses of the shear jobs (GPa)")
