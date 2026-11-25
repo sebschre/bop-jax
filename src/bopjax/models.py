@@ -307,15 +307,19 @@ FECARBON_REPULSION = pw.Repulsion(pair=_tapered_pair, density=_tapered_density,
 NO_TAPER = (100.0, 1.0)  # leaves a pair to the global cosine cutoff
 
 
-# fitted Fe-C cross terms (examples/fit_iron_carbon.py, docs/iron-carbon.md):
-# partial-force fit (two runs, 98 + 80 evaluations), then an exact-force refit
-# with a separate pi decay and a short-range Fe-C core (cost 16.6). Known limitation:
-# the dipole tensor of octahedral carbon is reversed (P axial < P transverse).
+# fitted Fe-C cross terms (examples/fit_iron_carbon.py on bopfox-rs,
+# docs/iron-carbon.md): every atom of the Fe16C cells relaxed on exact forces,
+# each cell on its lowest-energy magnetic state, cementite relaxed too, the
+# migration barrier from the saddle in the plane between two octahedral
+# sites (it agrees with NEB); Gaussian Fe-C embedding densities and a strong
+# short-range core.
 IRON_CARBON_FIT = {
-    "e_c": 2.5578, "sds": -0.2497, "pds": -0.5582, "pdp": 0.6553, "decay": 4.1452,
-    "pair": 1.4934, "pair_decay": 5.6932, "rho_fe": 0.3642, "rho_c": 0.7132, "rho_decay": 3.0,
-    "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 9.7912,
-    "decay_pi": 4.3714, "core": 2.0459, "core_r": 1.7039,
+    "e_c": 1.30483, "sds": -0.25827, "pds": -0.47268, "pdp": 0.62705, "decay": 4.34798,
+    "pair": 1.86696, "pair_decay": 4.28099, "rho_fe": 0.32776, "rho_c": 0.93649,
+    "rho_decay": 3.0, "r0": 1.95, "rcut": 3.0, "dcut": 0.5, "hubbard_c": 3.32112,
+    "decay_pi": 4.15288, "core": 125.01467, "core_r": 1.70398,
+    "rho_gauss_fe": 0.10332, "rho_gauss_c": 0.29459, "rho_gauss_r": 2.00367,
+    "rho_gauss_w": 0.2038,
 }
 
 FE, C = 0, 1  # species indices of the iron-carbon model
@@ -353,6 +357,13 @@ def iron_carbon(iron_values=None, carbon_values=None, **values):
                           embedding density that a C neighbour adds on Fe
                           (``rho_fe``) and an Fe neighbour adds on C
                           (``rho_c``), both ``* exp(-rho_decay (r / r0 - 1))``
+      rho_gauss_fe, rho_gauss_c, rho_gauss_r, rho_gauss_w
+                          Gaussian embedding densities a C neighbour adds on
+                          Fe and an Fe neighbour adds on C,
+                          ``amplitude * exp(-((r - rho_gauss_r) / rho_gauss_w)^2)``
+                          (default amplitude 0: none); centred near the
+                          transverse neighbours of the octahedral site
+                          (2.02 A) it binds them without pushing on them
       rcut, dcut          range of every Fe-C term (taper from rcut - dcut)
       hubbard_c           onsite Coulomb integral of carbon (eV); it does
                           nothing in pure carbon (no charge transfer)
@@ -401,11 +412,15 @@ def iron_carbon(iron_values=None, carbon_values=None, **values):
         (FE, C): [*x_pair, v["core_r"], v["core"], *x_cut],
         (C, FE): [*x_pair, v["core_r"], v["core"], *x_cut]}, zero7)
     c_rho = _exp_term(1.0, cv["density_decay"], cv["r0"])[:2]
+    g_width = 1.0 / v.get("rho_gauss_w", 0.3) ** 2
+    g_r = v.get("rho_gauss_r", 2.0)
     density = table({
         (FE, FE): [1.0, fe["embed"][1], fe["embed"][2], 0.0, 0.0, *NO_TAPER],
         (C, C): [0.0, 1.0, 0.0, *c_rho, *c_cut],
-        (FE, C): [0.0, 1.0, 0.0, *_exp_term(v["rho_fe"], v["rho_decay"], v["r0"])[:2], *x_cut],
-        (C, FE): [0.0, 1.0, 0.0, *_exp_term(v["rho_c"], v["rho_decay"], v["r0"])[:2], *x_cut]},
+        (FE, C): [v.get("rho_gauss_fe", 0.0), g_width, g_r,
+                  *_exp_term(v["rho_fe"], v["rho_decay"], v["r0"])[:2], *x_cut],
+        (C, FE): [v.get("rho_gauss_c", 0.0), g_width, g_r,
+                  *_exp_term(v["rho_c"], v["rho_decay"], v["r0"])[:2], *x_cut]},
         zero7)
     y = fe["yukawa"]
 

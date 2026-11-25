@@ -18,7 +18,10 @@ Done so far:
   - the remaining model terms: d-d screening, Yukawa repulsion, intersite
     Coulomb, electronic temperature, the Beer-Pettifor-Aoki bandwidths;
   - NEB and the first-order field effect on barriers;
-  - a cell-list neighbour search.
+  - a cell-list neighbour search;
+  - the iron-carbon model (`bopjax.models.iron_carbon`): per-species shells
+    and expansions, the bandwidth guard, tied and unpolarized shifts, the
+    tapered bond integrals and repulsion (see [below](#iron-carbon)).
 
 ## Self-consistency
 
@@ -285,6 +288,67 @@ uses the full per-atom response, including one local spin channel's
 response to the other's level (non-zero with canted neighbours or spin-orbit
 coupling).
 
+## Iron-carbon
+
+`bopjax.models.iron_carbon` with `IRON_CARBON_CONFIG` (`radial=models.tapered_exp_sum`)
+converts with `model_from_bopjax` and runs with both self-consistency
+conditions; the potential condition is the one the model is fitted with
+(`examples/_iron_carbon_rs.py`, `examples/fit_iron_carbon.py`).
+
+- **Per-species settings** (`"species"`, one entry per species with `basis`,
+  `nmom`, `nexp`, `bandwidth`, `terminator`, `kernel`, `bandwidth_guard`,
+  `spin_polarized`, `atomic_shifts`, as `bopjax.SpeciesSettings`):
+  - bond blocks into shells a species lacks are zero, absent shells hold no
+    states;
+  - each atom's walk starts only from its own orbitals (Fe 5, C 4 of the 9
+    s, p, d orbitals), which made Fe16C 2.7 times faster than walking from
+    all of them;
+  - moments are walked to the model's `nmom` for every atom, and each
+    species expands the first `nmom + 1` of them with its own settings.
+- **Bandwidth guard** (`"bandwidth_guard"`, bopjax `guarded_width`): the
+  extreme eigenvalues of the terminated chain come from a Jacobi solve, and
+  their exact first derivatives from the eigenvectors.
+- **Tied shifts** (`atomic_shifts`, `spin_polarized = false` per species):
+  the shift layout stays `[atom][spin][shell]`. The energy sees `Pi x`, with
+  `Pi` the per-atom projector that averages tied entries and zeroes absent
+  shells; gradients are `Pi g` and the potential target is `Pi K N`.
+  - The SCF preconditioner uses `Pi Q Pi` and `Pi K Pi`; the adjoint of the
+    implicit forces is exact, with the seed `K Pi u`.
+  - Converged shifts of absent shells are zero; bopjax leaves them at the
+    Hubbard potential. Neither enters the energy.
+  - The stationary condition is not supported with tied shifts (its
+    preconditioner inverts `Q`), nor are tied shifts with non-collinear spin.
+- **Centred walks.** Each start column walks `H - c`, with c the level of
+  its own orbital, and the expansion is evaluated at `ef - c`. The reported
+  moments are converted back to those of `H`.
+  - Why: carbon 2s lies 11 eV below the iron d band, so carbon's uncentred
+    moments reached 1e10 and the moments-to-recursion map lost about 9
+    digits.
+  - The effect: its dE/dshift jumped by up to 0.3 under perturbations of
+    1e-12, and the implicit forces were off by up to 0.1 eV/A.
+  - Scope: shifting is exact for a symmetric Hamiltonian
+    (`tests/centred_moments.rs`), so it is applied only then: collinear or
+    no spin, no screening, same-shell channels symmetric in the species. The
+    deliberately asymmetric test models keep the plain walk.
+  - Now the forces of Fe-C cells match finite differences of the
+    self-consistent energy.
+- **Forms:** `"tapered_exp_sum"` bond integrals and the `"fecarbon"`
+  repulsion (Egorov pair and core, Gaussian plus exponential density, each
+  with its own cosine taper).
+- **Agreement with bopjax** (`test_iron_carbon`; Fe16C, cementite, diamond):
+  - diamond agrees to 4e-13 eV;
+  - cells with iron next to carbon agree to about 1e-8 eV in energy and
+    1e-5 eV/A in forces. Each code matches its own finite differences to
+    about 4e-6 eV/A, and the energies carry about 1e-9 eV of rounding noise:
+    the 200-term iron expansion amplifies differences in summation order
+    once Fe-C hopping is on (pure Fe16 agrees to 2e-12 eV).
+  - self-consistent energies of the Fe16C and cementite cells agree to
+    1e-7 eV or better.
+- **Cost** (4 cores): Fe16C takes 0.09 s per energy evaluation and about 2 s
+  for self-consistency with exact forces and stress from a warm start.
+  bopjax needs minutes per solve, 6-7 minutes for the exact forces or the
+  stress, and 12 GB.
+
 ## How the derivatives are obtained
 
 - **Moments → bond blocks** (the expensive part) are differentiated by hand
@@ -310,11 +374,12 @@ coupling).
 | | |
 |---|---|
 | basis | any combination of s, p, d; several species |
-| bond integrals | `powerlaw`, `v0` (BOPfox v0), `exp_sum` (Egorov) |
-| expansion | any `nmom` ≤ 14, `nexp`; bandwidths `azero`, `lowest`, `highest`, `avgan_maxbn`, `global`, `averaged`, `findeminemax`, `gershgorin`; terminators `none`, `constantabn`, `weighted`, `oscillation`; Jackson kernel |
+| bond integrals | `powerlaw`, `v0` (BOPfox v0), `exp_sum` (Egorov), `tapered_exp_sum` (iron-carbon) |
+| species | per-species shells and expansion settings, tied (atomic, unpolarized) shifts |
+| expansion | any `nmom` ≤ 14, `nexp`, optional bandwidth guard; bandwidths `azero`, `lowest`, `highest`, `avgan_maxbn`, `global`, `averaged`, `findeminemax`, `gershgorin`; terminators `none`, `constantabn`, `weighted`, `oscillation`; Jackson kernel |
 | magnetism | none, collinear (Stoner), non-collinear with optional onsite spin-orbit coupling |
 | bond integrals, environment | screening of the d-d integrals (three-body) |
-| electrostatics, repulsion | onsite Hubbard `J`, intersite Frauenheim Coulomb; `v0`, `powerlaw`, `egorov` pair + embedding, Yukawa |
+| electrostatics, repulsion | onsite Hubbard `J`, intersite Frauenheim Coulomb; `v0`, `powerlaw`, `egorov`, `fecarbon` pair + embedding, Yukawa |
 | electrons | `kT > 0` (Mermin free energy); all bandwidth estimators including Beer-Pettifor-Aoki |
 | paths | climbing-image NEB, FIRE, first-order field effect on barriers, Peierls stress |
 | self-consistency | stationary (BOPfox) and potential conditions, frozen atoms, warm starts |

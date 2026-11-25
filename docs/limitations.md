@@ -25,17 +25,12 @@
 
 ## Caveats
 
-- The iron-carbon model needs the potential self-consistency (stationarity
-  up to about 0.16 eV in Fe16C), and with it exact (implicit-differentiation)
-  forces: partial derivatives at fixed shifts are off by up to 0.76 eV/A.
-  Its elastic dipole tensor of octahedral carbon has the **wrong
-  anisotropy** (axial 4.3 eV, transverse 6.9 eV, against 8.0 and 3.4), so
-  anything driven by carbon's coupling to shear is wrong: martensite
-  tetragonality (wrong sign), Snoek relaxation (wrong site preference under
-  stress, about a third of the strength), carbon at screw dislocations, and
-  elastic carbon-carbon interactions. Energetics (solution energy,
-  migration barrier, cementite) and pressure coupling (edge dislocations,
-  lattice expansion, about 20 % too strong) are usable. See
+- The iron-carbon model needs the potential self-consistency and, with it,
+  exact (implicit-differentiation) forces. Iron next to carbon has several
+  self-consistent magnetic states, so take results on the lowest one. The
+  dipole anisotropy of octahedral carbon has the right sign at about three
+  quarters of DFT's size (+3.5 eV against +4.6), with the trace right. The
+  migration saddle lies off the tetrahedral site. See
   [Iron-carbon](iron-carbon.md#limitations).
 - `bandwidth_guard` and `atomic_shifts` change a model's energies; a model
   fitted without them needs a refit with them, as carbon had.

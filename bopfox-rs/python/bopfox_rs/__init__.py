@@ -121,7 +121,8 @@ def _tolist(x):
     return np.asarray(x, dtype=float).tolist()
 
 
-_RADIAL = {"powerlaw": "powerlaw", "v0_bond": "v0", "exp_sum": "exp_sum"}
+_RADIAL = {"powerlaw": "powerlaw", "v0_bond": "v0", "exp_sum": "exp_sum",
+           "tapered_exp_sum": "tapered_exp_sum"}
 
 
 def model_from_bopjax(cfg, params, radial="powerlaw", screening_radial=None) -> dict:
@@ -146,6 +147,7 @@ def model_from_bopjax(cfg, params, radial="powerlaw", screening_radial=None) -> 
         "nmom": cfg.nmom, "nexp": cfg.nexp, "bandwidth": cfg.bandwidth,
         "global_ab": list(cfg.global_ab), "terminator": cfg.terminator,
         "alpha_weight": cfg.alpha_weight, "kernel": cfg.kernel,
+        "bandwidth_guard": bool(cfg.bandwidth_guard),
         "rcut": cfg.rcut, "dcut": cfg.dcut, "rcut2": cfg.rcut2, "dcut2": cfg.dcut2,
         "basis": list(cfg.basis), "spin": cfg.spin, "radial": radial,
         "kT": cfg.kT, "smearing_nodes": cfg.smearing_nodes,
@@ -153,6 +155,14 @@ def model_from_bopjax(cfg, params, radial="powerlaw", screening_radial=None) -> 
         "hubbard": _tolist(params["hubbard"]),
         "bond": {k: _tolist(v) for k, v in params["bond"].items()},
     }
+    if cfg.atomic_shifts:
+        raise NotImplementedError("global atomic_shifts: use SpeciesSettings(atomic_shifts=True)")
+    if cfg.species is not None:
+        model["species"] = [
+            {"basis": list(st.basis), "nmom": st.nmom, "nexp": st.nexp,
+             "bandwidth": st.bandwidth, "terminator": st.terminator, "kernel": st.kernel,
+             "bandwidth_guard": st.bandwidth_guard, "spin_polarized": bool(st.spin_polarized),
+             "atomic_shifts": bool(st.atomic_shifts)} for st in cfg.species]
     if cfg.screening:
         model["screening"] = {k: _tolist(v) for k, v in params["screening"].items()}
         if screening_radial is not None:
@@ -170,8 +180,9 @@ def model_from_bopjax(cfg, params, radial="powerlaw", screening_radial=None) -> 
         model["spin_orbit_xi"] = _tolist(params["spin_orbit"])
     if cfg.repulsion is not None:
         from bopjax import pairwise as pw
-        form = {id(pw.V0): "v0", id(pw.POWERLAW): "powerlaw", id(pw.EGOROV): "egorov"}.get(
-            id(cfg.repulsion))
+        from bopjax import models
+        form = {id(pw.V0): "v0", id(pw.POWERLAW): "powerlaw", id(pw.EGOROV): "egorov",
+                id(models.FECARBON_REPULSION): "fecarbon"}.get(id(cfg.repulsion))
         if form is None:
             raise NotImplementedError("unknown repulsion form")
         rp = params["repulsion"]

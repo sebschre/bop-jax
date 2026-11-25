@@ -83,6 +83,9 @@ pub enum Radial {
     V0,
     /// `sum_k c_k exp(-lambda_k r^n_k)`, p = [c1, l1, n1, c2, l2, n2, ...]
     ExpSum,
+    /// `ExpSum` of p[0..9] times a cosine taper from `p[9] - p[10]` to `p[9]`
+    /// (`bopjax.models.tapered_exp_sum`)
+    TaperedExpSum,
 }
 
 impl Radial {
@@ -92,6 +95,13 @@ impl Radial {
             Radial::V0 => {
                 let x = r / p[4];
                 (-(x - 1.0) * p[1]).exp() * (T::cst(1.0) - (-x.powf(p[3]) * p[2]).exp()) * p[0]
+            }
+            Radial::TaperedExpSum => {
+                let fc = cosine_cutoff(r, p[9], p[10]);
+                if fc.val() == 0.0 {
+                    return T::zero();
+                }
+                Radial::ExpSum.eval(&p[..9], r) * fc
             }
             Radial::ExpSum => {
                 let mut s = T::zero();

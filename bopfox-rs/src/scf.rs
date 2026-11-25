@@ -183,9 +183,10 @@ const RESPONSE_FLOOR: f64 = 0.05;
 struct Precond {
     n: usize,
     nc: usize,
-    q: Vec<f64>,  // n * nc * nc, the local response Q (positive)
-    k: Vec<f64>,  // n * nc * nc, the kernel K
-    qv: Vec<f64>, // n * nc, Q 1
+    q: Vec<f64>,     // n * nc * nc, the local response Q (positive)
+    k: Vec<f64>,     // n * nc * nc, the kernel K (projected on the tied shifts)
+    k_raw: Vec<f64>, // n * nc * nc, the kernel K as it acts on the occupations
+    qv: Vec<f64>,    // n * nc, Q 1
     sigma: f64,
     free: Option<Vec<bool>>,
 }
@@ -229,12 +230,49 @@ impl Precond {
                 }
             }
         }
+        // tied shifts (Pi, symmetric projector per atom): the residual is
+        // Pi K N(Pi x) - x, whose Jacobian is -(1 + Pi K P Pi); model it with
+        // Q' = Pi Q Pi + floor (1 - Pi) and K' = Pi K Pi
+        let k_raw = k.clone();
+        for i in 0..n {
+            let Some(pm) = bop.tie_of(i) else { continue };
+            let sandwich = |a: &[f64]| -> Vec<f64> {
+                let mut t = vec![0.0; nc * nc];
+                for r in 0..nc {
+                    for c in 0..nc {
+                        t[r * nc + c] = (0..nc).map(|x| a[r * nc + x] * pm[x * nc + c]).sum();
+                    }
+                }
+                let mut o = vec![0.0; nc * nc];
+                for r in 0..nc {
+                    for c in 0..nc {
+                        o[r * nc + c] = (0..nc).map(|x| pm[r * nc + x] * t[x * nc + c]).sum();
+                    }
+                }
+                o
+            };
+            let blk = i * nc * nc..(i + 1) * nc * nc;
+            let mut qn = sandwich(&q[blk.clone()]);
+            for r in 0..nc {
+                for c in 0..nc {
+                    let id = if r == c { 1.0 } else { 0.0 };
+                    qn[r * nc + c] += RESPONSE_FLOOR * (id - pm[r * nc + c]);
+                }
+            }
+            let kn = sandwich(&k[blk.clone()]);
+            q[blk.clone()].copy_from_slice(&qn);
+            k[blk].copy_from_slice(&kn);
+            for c in 0..nc {
+                qv[i * nc + c] = (0..nc).map(|c2| qn[c * nc + c2]).sum();
+            }
+        }
         let sigma = qv.iter().sum();
         Precond {
             n,
             nc,
             q,
             k,
+            k_raw,
             qv,
             sigma,
             free: free.map(|f| f.to_vec()),
@@ -257,6 +295,11 @@ impl Precond {
     /// K v (the kernel is symmetric)
     fn kernel(&self, v: &[f64]) -> Vec<f64> {
         self.block(&self.k, v)
+    }
+
+    /// K v with the kernel as it acts on the occupations (not projected)
+    fn kernel_raw(&self, v: &[f64]) -> Vec<f64> {
+        self.block(&self.k_raw, v)
     }
 
     /// P v = Q v - q (q.v) / sigma  (= -chi v)
@@ -540,7 +583,7 @@ impl<'a> Bop<'a> {
                 }
             }
         }
-        t
+        self.project_shifts(&t)
     }
 
     /// Self-consistent shifts from `shifts0` (default zero) under
@@ -852,8 +895,10 @@ impl<'a> Bop<'a> {
         res.energy = res.energy_atom.iter().sum();
         let per_atom = n_shift / n.max(1);
         // the full kernel dV/dN: onsite (Hubbard, Stoner) and intersite Coulomb
+        // r = Pi V(N(Pi x)) - x: the seed of (dr/dx)^T u is (dV/dN)^T Pi u
         let kernel = |pc: &Precond, u_full: &[f64]| -> Vec<f64> {
-            let mut v = pc.kernel(u_full);
+            let u_full = &self.project_shifts(u_full)[..];
+            let mut v = pc.kernel_raw(u_full);
             if coulomb {
                 let per: Vec<f64> = (0..n)
                     .map(|i| u_full[i * per_atom..(i + 1) * per_atom].iter().sum())
@@ -908,13 +953,14 @@ impl<'a> Bop<'a> {
         let (z, calls) = gmres_count(|z| a_t(&m_inv(z)), &rhs, opt.adjoint_tol, 30, 300);
         let adjoint_ok = z.is_some();
         let u = m_inv(&z.unwrap_or_else(|| vec![0.0; rhs.len()]));
-        // u^T dr/dR = d(v.N)/dR with v = K u
+        // u^T dr/dR = d(v.N)/dR with v = K Pi u
         let u_full = embed(&u);
         let v = kernel(&pc, &u_full);
         let gs = self.seeded_backward(&fw, pos, cell, 0.0, &self.unflatten(&v), true);
         let (mut g_s, mut w_s) = (gs.pos.clone(), gs.virial);
         if coulomb {
             // the target V_i = sum_j J_ij(R) q_j also depends on R directly
+            let u_full = self.project_shifts(&u_full);
             let per: Vec<f64> = (0..n)
                 .map(|i| u_full[i * per_atom..(i + 1) * per_atom].iter().sum())
                 .collect();
@@ -959,7 +1005,7 @@ impl<'a> Bop<'a> {
         res.forces = grad.iter().map(|g| [-g[0], -g[1], -g[2]]).collect();
         res.virial = symmetrised(virial);
         res.shift_gradient = self.unflatten(&sg);
-        res.moments = fw.mu;
+        res.moments = self.raw_moments(&fw);
         ScfResult {
             shifts: x,
             results: res,

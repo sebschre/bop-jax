@@ -1,6 +1,10 @@
-"""Iron-carbon cells and the calculator the Fe-C cross terms are fitted with.
+"""Iron-carbon cells, and a bopjax calculator for the iron-carbon BOP.
 
-Used by ``examples/fit_iron_carbon.py``.  Species 0 is Fe (the d model of
+The cells are used by the bopfox-rs calculator the model is fitted with
+(``examples/_iron_carbon_rs.py``, ``examples/fit_iron_carbon.py``) and by
+``benchmarks/expansion_vs_exact.py``.  ``Calculator`` runs the same model on
+bopjax (JAX), at minutes per self-consistent solve with exact forces and
+12 GB for Fe16C.  Species 0 is Fe (the d model of
 Egorov et al., ``iron_egorov``), species 1 is C (the sp model ``CARBON_FIT``).  Lengths in
 Angstrom, energies in eV, stresses in GPa, moments in Bohr magnetons.
 """
