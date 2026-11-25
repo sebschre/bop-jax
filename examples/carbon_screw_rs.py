@@ -133,9 +133,12 @@ class Geometry:
         core's symmetry (same sorted Fe distances at the unrelaxed positions)."""
         sites, axis = self.octahedral_sites(rmax)
         placed = np.array([self.place(s, self.easy, fe_pos) for s in sites])
+        # classify on the elastic solution, which keeps the symmetry of the
+        # core exactly (rounding the relaxed one splits classes)
+        el = self.dislocated(self.easy)
         groups = {}
         for s, x, ax in zip(sites, placed, axis):
-            key = tuple(self.descriptor(x, fe_pos))
+            key = tuple(self.descriptor(self.place(s, self.easy, el), el))
             groups.setdefault(key, []).append((s, x, ax))
         out = []
         for members in groups.values():
@@ -149,10 +152,13 @@ class Geometry:
         three hard-core columns, half way between two of their atoms along z."""
         dxy = np.linalg.norm(self.cols.xy - self.hard, axis=1)
         three = np.argsort(dxy)[:3]
-        atoms = [i for i in range(self.n) if self.cols.of_atom[i] in three
-                 and B - 1e-6 <= self.ref[i, 2] < 2 * B - 1e-6]
-        z = fe_pos[atoms, 2]
-        return np.array([*self.hard, np.mean(z) + B / 2])
+        atoms = [i for i in range(self.n) if self.cols.of_atom[i] in three]
+        # the three atoms of one layer: those nearest along z to the first one
+        z0 = fe_pos[atoms[0], 2]
+        dz = fe_pos[atoms, 2] - z0
+        dz -= self.length * np.round(dz / self.length)
+        dz -= B * np.round(dz / B)  # the columns are at one height mod b
+        return np.array([*self.hard, z0 + np.mean(dz) + B / 2])
 
 
 # --- running jobs ------------------------------------------------------------
