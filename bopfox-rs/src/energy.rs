@@ -111,6 +111,10 @@ pub struct Bop<'a> {
     /// `spin_polarized = false`) share their mean, absent shells get none;
     /// None without per-species settings (identity)
     tie: Option<Vec<Vec<f64>>>,
+    /// whether walks are centred on their own levels (`walk_centres`): only
+    /// for a symmetric Hamiltonian, for which the walk's `<H^a e|H^b e>` are
+    /// the moments and the shift leaves them consistent
+    centring: bool,
     /// [species] the start orbitals of its walks (its own orbitals; empty:
     /// all orbitals)
     starts: Vec<Vec<usize>>,
@@ -279,6 +283,13 @@ impl<'a> Bop<'a> {
                 })
                 .collect(),
             tie: Self::tie_projectors(model, nspin),
+            centring: model.spin != crate::model::Spin::Noncollinear
+                && model.screening.is_none()
+                && ["sss", "pps", "ppp", "dds", "ddp", "ddd"].iter().all(|c| {
+                    model.bond.get(*c).is_none_or(|t| {
+                        (0..t.len()).all(|a| (0..t.len()).all(|b| t[a][b] == t[b][a]))
+                    })
+                }),
             starts: (0..model.nspecies())
                 .map(|s| {
                     if model.species.is_none() {
@@ -482,6 +493,11 @@ impl<'a> Bop<'a> {
         (h, dh, screened)
     }
 
+    /// The hopping blocks of every bond (`n_bonds * norb^2`, row-major).
+    pub fn hopping_blocks(&self, pos: &[[f64; 3]], cell: &Cell) -> Vec<f64> {
+        self.blocks(pos, cell, false).0
+    }
+
     /// Gradients with respect to the bond vectors from the contracted block
     /// derivatives (`[0..3]` bond vector, `[3..9]` screening factors).
     fn bond_vector_gradient(&self, fw: &Forward, gbond: &[[f64; 9]]) -> Vec<[f64; 3]> {
@@ -558,6 +574,7 @@ impl<'a> Bop<'a> {
         &self,
         h: &[f64],
         levels: &[Vec<f64>],
+        cols: &[Vec<Vec<f64>>],
         keep: bool,
     ) -> (Vec<Vec<Vec<Vec<f64>>>>, Vec<Vec<Walk>>) {
         let nmom = self.model.nmom;
@@ -572,6 +589,7 @@ impl<'a> Bop<'a> {
                             hblk: h,
                             onsite: &levels[s],
                             starts: &self.starts[self.topo.species[i]],
+                            centre: &cols[i][s],
                         };
                         let (wk, mu) = moments(&self.topo.clusters[i], &hd, nmom);
                         if keep {
@@ -594,6 +612,80 @@ impl<'a> Bop<'a> {
             })
             .collect();
         per_atom.into_iter().unzip()
+    }
+
+    /// Centres of the walks (symmetric Hamiltonians, see `centring`): each
+    /// start column walks `H - c` with c the
+    /// level of its own orbital, so that the moments of an atom whose level
+    /// lies far from the others (carbon 2s, 11 eV below the iron d band) stay
+    /// small and the moments-to-recursion map well conditioned.  Every
+    /// bandwidth estimator but `global` and the BOPfox variant of
+    /// Beer-Pettifor-Aoki is invariant under the shift (with the Fermi level
+    /// shifted along).  Returns the centres per start column and per shell.
+    #[allow(clippy::type_complexity)]
+    fn walk_centres(&self, levels: &[Vec<f64>]) -> (Vec<Vec<Vec<f64>>>, Vec<Vec<Vec<f64>>>) {
+        use crate::model::Bandwidth;
+        let n = self.topo.n_atoms;
+        let mut cols = vec![vec![Vec::new(); self.nspin]; n];
+        let mut centres = vec![vec![vec![0.0; self.nshell]; self.nspin]; n];
+        if !self.centring {
+            return (cols, centres);
+        }
+        for i in 0..n {
+            let sp = self.topo.species[i];
+            if matches!(
+                self.sp_models[sp].bandwidth,
+                Bandwidth::Global | Bandwidth::BeerpettiforaokiBopfox
+            ) {
+                continue;
+            }
+            let starts: Vec<usize> = if self.starts[sp].is_empty() {
+                (0..self.norb).collect()
+            } else {
+                self.starts[sp].clone()
+            };
+            for s in 0..self.nspin {
+                let lev = &levels[s][i * self.norb..(i + 1) * self.norb];
+                cols[i][s] = starts.iter().map(|&o| lev[o]).collect();
+                for (k, &(a, _)) in self.slices.iter().enumerate() {
+                    centres[i][s][k] = lev[a];
+                }
+            }
+        }
+        (cols, centres)
+    }
+
+    /// The moments of `H` from those of `H - c` (binomial expansion).
+    pub(crate) fn raw_moments(&self, fw: &Forward) -> Vec<Vec<Vec<Vec<f64>>>> {
+        let nmom = self.model.nmom;
+        fw.mu
+            .iter()
+            .enumerate()
+            .map(|(i, at)| {
+                at.iter()
+                    .enumerate()
+                    .map(|(s, sp)| {
+                        sp.iter()
+                            .enumerate()
+                            .map(|(k, m)| {
+                                let c = fw.centres[i][s][k];
+                                (0..=nmom)
+                                    .map(|q| {
+                                        let mut binom = 1.0;
+                                        let mut v = 0.0;
+                                        for j in 0..=q {
+                                            v += binom * c.powi((q - j) as i32) * m[j];
+                                            binom = binom * (q - j) as f64 / (j + 1) as f64;
+                                        }
+                                        v
+                                    })
+                                    .collect()
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect()
     }
 
     fn fermi_level(&self, locals: &[Vec<Vec<Local>>], n_total: f64) -> f64 {
@@ -687,6 +779,7 @@ impl<'a> Bop<'a> {
         );
         let (h, dh, screened) = self.blocks(pos, cell, with_derivatives);
         let levels = self.onsite_levels(shifts);
+        let (cols, centres) = self.walk_centres(&levels);
         let keep = keep && self.walk_size() <= WALK_BUDGET;
         let (mut proj, mut onsite_c, mut swalks) = (Vec::new(), Vec::new(), Vec::new());
         let (mu, walks) = if self.noncollinear {
@@ -700,7 +793,7 @@ impl<'a> Bop<'a> {
             swalks = sw;
             (mu, Vec::new())
         } else {
-            self.shell_moments(&h, &levels, keep)
+            self.shell_moments(&h, &levels, &cols, keep)
         };
         let locals: Vec<Vec<Vec<Local>>> = mu
             .par_iter()
@@ -709,12 +802,15 @@ impl<'a> Bop<'a> {
                 let s_i = topo.species[i];
                 let (ms, kern) = (&self.sp_models[s_i], &self.sp_kernels[s_i]);
                 at.iter()
-                    .map(|sp| {
+                    .enumerate()
+                    .map(|(s, sp)| {
                         sp.iter()
                             .enumerate()
                             .map(|(k, x)| {
                                 if self.has_shell[s_i][k] {
-                                    Local::new(x, ms, kern)
+                                    let mut l = Local::new(x, ms, kern);
+                                    l.ainf += centres[i][s][k];
+                                    l
                                 } else {
                                     Local::absent()
                                 }
@@ -737,12 +833,14 @@ impl<'a> Bop<'a> {
                 let s_i = topo.species[i];
                 let (ms, kern) = (&self.sp_models[s_i], &self.sp_kernels[s_i]);
                 at.iter()
-                    .map(|sp| {
+                    .enumerate()
+                    .map(|(s, sp)| {
                         sp.iter()
                             .enumerate()
                             .map(|(k, x)| {
                                 if self.has_shell[s_i][k] {
-                                    local_derivs(x, ef, ms, kern, self.smear.as_ref())
+                                    let ef_c = ef - centres[i][s][k];
+                                    local_derivs(x, ef_c, ms, kern, self.smear.as_ref())
                                 } else {
                                     expansion::LocalDerivs::absent()
                                 }
@@ -765,6 +863,8 @@ impl<'a> Bop<'a> {
             .sum();
         Forward {
             screened,
+            cols,
+            centres,
             coulomb: self.coulomb_integrals(pos, cell),
             h,
             dh,
@@ -836,7 +936,7 @@ impl<'a> Bop<'a> {
             res.forces = forces_grad.iter().map(|g| [-g[0], -g[1], -g[2]]).collect();
             res.virial = symmetrised(virial);
         }
-        res.moments = fw.mu;
+        res.moments = self.raw_moments(&fw);
         res
     }
 
@@ -977,6 +1077,7 @@ impl<'a> Bop<'a> {
                                 hblk: h,
                                 onsite: &levels[s],
                                 starts: &self.starts[self.topo.species[i]],
+                                centre: &fw.cols[i][s],
                             };
                             let cl = &topo.clusters[i];
                             let recomputed;
@@ -1143,6 +1244,7 @@ impl<'a> Bop<'a> {
                                 hblk: h,
                                 onsite: &levels[s],
                                 starts: &self.starts[self.topo.species[i]],
+                                centre: &fw.cols[i][s],
                             };
                             let cl = &topo.clusters[i];
                             let recomputed;
@@ -1335,6 +1437,10 @@ pub struct Screened {
 
 pub struct Forward {
     screened: Option<Screened>,
+    /// walk centres [atom][spin][start column] and shell centres
+    /// [atom][spin][shell]: the moments in `mu` are those of `H - c`
+    cols: Vec<Vec<Vec<f64>>>,
+    centres: Vec<Vec<Vec<f64>>>,
     /// intersite Coulomb integral and its radial derivative per entry of the
     /// second neighbour list (empty unless coulomb = frauenheim)
     coulomb: Vec<(f64, f64)>,

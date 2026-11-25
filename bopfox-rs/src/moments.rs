@@ -24,6 +24,11 @@ pub struct HamiltonianData<'a> {
     pub onsite: &'a [f64],
     /// the start orbitals of the walk (an atom's own orbitals); empty: all
     pub starts: &'a [usize],
+    /// per start column, a constant subtracted from every onsite level: the
+    /// column walks `H - c`, so its moments are centred on c (the start
+    /// orbital's own level keeps them small and the recursion well
+    /// conditioned); empty: no shift
+    pub centre: &'a [f64],
 }
 
 impl HamiltonianData<'_> {
@@ -33,6 +38,15 @@ impl HamiltonianData<'_> {
             self.norb
         } else {
             self.starts.len()
+        }
+    }
+    /// The shift of column c.
+    #[inline(always)]
+    fn shift(&self, c: usize) -> f64 {
+        if self.centre.is_empty() {
+            0.0
+        } else {
+            self.centre[c]
         }
     }
     /// Start orbital of column c.
@@ -152,7 +166,7 @@ fn walk_impl<N: Dim, S: Dim>(
                 let wc = &prev[c * nn..(c + 1) * nn];
                 for al in 0..n {
                     for d in 0..ns {
-                        oc[al * ns + d] += lev[al] * wc[al * ns + d];
+                        oc[al * ns + d] += (lev[al] - h.shift(d)) * wc[al * ns + d];
                     }
                 }
             }
@@ -267,7 +281,7 @@ fn backward_impl<N: Dim, S: Dim, F: FnMut(usize, &[f64])>(
                     let mut acc = 0.0;
                     for d in 0..ns {
                         acc += gc[al * ns + d] * src[al * ns + d];
-                        dst[al * ns + d] += lev[al] * gc[al * ns + d];
+                        dst[al * ns + d] += (lev[al] - h.shift(d)) * gc[al * ns + d];
                     }
                     onsite_bar[o * n + al] += acc;
                 }
@@ -346,7 +360,7 @@ fn tangent_impl<N: Dim, S: Dim>(
                 let wc = &prev[c * nn..(c + 1) * nn];
                 for al in 0..n {
                     for d in 0..ns {
-                        oc[al * ns + d] += lev[al] * wc[al * ns + d];
+                        oc[al * ns + d] += (lev[al] - h.shift(d)) * wc[al * ns + d];
                     }
                 }
                 if cl.origin[c] == centre {

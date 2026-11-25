@@ -1005,7 +1005,7 @@ impl<'a> Bop<'a> {
         res.forces = grad.iter().map(|g| [-g[0], -g[1], -g[2]]).collect();
         res.virial = symmetrised(virial);
         res.shift_gradient = self.unflatten(&sg);
-        res.moments = fw.mu;
+        res.moments = self.raw_moments(&fw);
         ScfResult {
             shifts: x,
             results: res,

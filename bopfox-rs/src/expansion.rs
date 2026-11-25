@@ -636,3 +636,44 @@ mod tests {
         assert!((i - 2.0 / 47.0).abs() < 1e-13, "{i}");
     }
 }
+
+#[cfg(test)]
+mod jacobi_tests {
+    use super::*;
+
+    #[test]
+    fn jacobi_residual_tridiagonal() {
+        let n = 11;
+        let mut worst: f64 = 0.0;
+        for seed in 0..50u64 {
+            let mut s = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let mut rnd = || {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((s >> 11) as f64 / (1u64 << 53) as f64) - 0.5
+            };
+            let mut a = vec![0.0; n * n];
+            for i in 0..n {
+                a[i * n + i] = 0.4 * rnd();
+                if i + 1 < n {
+                    let o = 0.5 + 0.2 * rnd();
+                    a[i * n + i + 1] = o;
+                    a[(i + 1) * n + i] = o;
+                }
+            }
+            let (ev, v) = jacobi_eigen(a.clone(), n);
+            for k in 0..n {
+                let mut r: f64 = 0.0;
+                for i in 0..n {
+                    let av: f64 = (0..n).map(|j| a[i * n + j] * v[j * n + k]).sum();
+                    r = r.max((av - ev[k] * v[i * n + k]).abs());
+                }
+                worst = worst.max(r);
+            }
+        }
+        assert!(worst < 1e-12, "worst eigen residual {worst:e}");
+    }
+}
