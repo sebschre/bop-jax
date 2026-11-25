@@ -268,7 +268,7 @@ def run_job(job, geo, args):
             while k <= steps:
                 p = cell.positions.copy()
                 p[n_c, 2] = z0 + dz * k / steps
-                x_keep, out_keep = cell._x, cell.out
+                x_keep, out_keep = cell._x, getattr(cell, "out", None)
                 try:
                     o = cell.solve(p)
                 except RuntimeError:
