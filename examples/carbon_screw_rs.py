@@ -419,8 +419,18 @@ def drag_end(job, geo, args):
     fe_end = np.asarray(end["positions"])
     near = np.argsort(np.linalg.norm(geo.wrap_z(fe_a - x), axis=1))[:6]
     x = x + (fe_end[near] - fe_a[near]).mean(axis=0)
-    cell, out, s = relax_cell(job, geo, np.vstack([fe_end, x]), np.append(fe, C), args)
-    save(args.out, job, cell, out, s)
+    held = ()
+    if base == "dragB_C":
+        # carbon draws a core one valley away back to A without a barrier, so
+        # B holds the z coordinates of the core columns at those of pure B
+        sfx = "p" if sign == 1 else ""
+        za = np.asarray(require(args.out, "dragA" + sfx)["positions"])[:, 2]
+        dz = fe_end[:, 2] - za
+        dz -= geo.length * np.round(dz / geo.length)
+        held = tuple((int(i), 2) for i in np.nonzero((np.abs(dz) > 0.2) & geo.mobile)[0])
+    cell, out, s = relax_cell(job, geo, np.vstack([fe_end, x]), np.append(fe, C), args,
+                              fixed_components=held)
+    save(args.out, job, cell, out, s, held=np.array([i for i, _ in held]))
 
 
 def drag_path(with_c, geo, args, suffix=""):
