@@ -300,6 +300,8 @@ def run_job(job, geo, args):
     elif job in ("dragA", "dragB", "dragA_C", "dragB_C", "dragAp", "dragBp", "dragA_Cp",
                  "dragB_Cp"):
         drag_end(job, geo, args)
+    elif job in ("dragback_C", "dragback_Cp"):
+        drag_back(job[8:], geo, args)
     elif job in ("dragpath", "dragpath_C", "dragpath_Cp"):
         drag_path("_C" in job, geo, args, "p" if job.endswith("p") else "")
     elif job.startswith("oct_"):
@@ -467,6 +469,38 @@ def drag_path(with_c, geo, args, suffix=""):
               flush=True)
 
 
+def drag_back(tag, geo, args):
+    """Backward pass of a drag from fraction ``--from-fraction``: carbon can
+    switch configuration along the path (two short Fe-C bonds to one), and
+    the forward pass keeps the earlier one where the other is lower.  The
+    fractions below it (and f = 0, the core held at A) are relaxed again from
+    the switched state, saved as drag_<f><tag>r; the report keeps the lower
+    energy of the two passes."""
+    a, b = require(args.out, "dragA" + tag), require(args.out, "dragB" + tag)
+    pa, pb = np.asarray(a["positions"], float), np.asarray(b["positions"], float)
+    dz = pb[: geo.n, 2] - pa[: geo.n, 2]
+    dz -= geo.length * np.round(dz / geo.length)
+    core = np.nonzero((np.abs(dz) > 0.2) & geo.mobile)[0]
+    pos = np.asarray(require(args.out, f"drag_{args.from_fraction:g}{tag}")["positions"])
+    species = np.asarray(a["species"])
+    for f in sorted([x for x in args.fractions if x < args.from_fraction] + [0.0],
+                    reverse=True):
+        job = f"drag_{f:g}{tag}r"
+        done = load(args.out, job)
+        if done is not None:
+            pos = np.asarray(done["positions"])
+            continue
+        start = pos.copy()
+        start[core, 2] = pa[core, 2] + f * dz[core]
+        cell, out, s = relax_cell(job, geo, start, species, args,
+                                  fixed_components=tuple((int(i), 2) for i in core))
+        pos = cell.positions
+        save(args.out, job, cell, out, s, fraction=f, core_atoms=core)
+        print(f"{job}: E - E_A = {out['energy'] - float(a['energy']):+.4f} eV "
+              f"({(out['energy'] - float(a['energy'])) / geo.layers * 1e3:+.1f} meV/b)",
+              flush=True)
+
+
 def require(out_dir, job):
     d = load(out_dir, job)
     if d is None:
@@ -549,14 +583,17 @@ def report_drag(geo, e):
         a, b = e.get("dragA" + tag), e.get("dragB" + tag)
         if a is None:
             continue
-        pts = [(0.0, float(a["energy"]))]
+        best = {0.0: float(a["energy"])}
         for job, d in e.items():
-            if job.startswith("drag_") and job.endswith(tag) and (
-                    job[5:-len(tag)] if tag else job[5:]).replace(".", "").isdigit():
-                pts.append((float(d["fraction"]), float(d["energy"])))
+            for t in (tag, tag + "r"):
+                head = job[5:-len(t)] if t else job[5:]
+                if (job.startswith("drag_") and (job.endswith(t) if t else True)
+                        and head.replace(".", "").isdigit()):
+                    fr = float(d["fraction"])
+                    best[fr] = min(best.get(fr, np.inf), float(d["energy"]))
         if b is not None:
-            pts.append((1.0, float(b["energy"])))
-        pts.sort()
+            best[1.0] = float(b["energy"])
+        pts = sorted(best.items())
         f = np.array([q[0] for q in pts])
         en = (np.array([q[1] for q in pts]) - pts[0][1]) / geo.layers  # eV per b
         if tag == "" and f[f < 1].max() <= 0.5 + 1e-9:  # mirror the symmetric profile
@@ -596,6 +633,8 @@ def main():
     ap.add_argument("--fractions", type=float, nargs="+",
                     default=[0.15, 0.3, 0.4, 0.5, 0.6, 0.7, 0.85],
                     help="fractions of the Peierls drag")
+    ap.add_argument("--from-fraction", type=float, default=0.4,
+                    help="start of the backward pass of a drag")
     ap.add_argument("--ground-state", action=argparse.BooleanOptionalAction, default=True,
                     help="check the relaxed state against cold magnetic starts")
     args = ap.parse_args()
