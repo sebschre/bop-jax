@@ -529,9 +529,50 @@ def report(geo, args):
                  f"x{int(d['multiplicity'])}" if "site_r" in d else "prismatic site")
         print(f"{job:8s} E_b = {eb:+.3f} eV  fmax {float(d['max_force']):.3f}  [{start}]  "
               f"{describe(geo, d)}")
+    drags = report_drag(geo, e)
     summary = {job: dict(E_b=float(eb), max_force=float(d["max_force"])) for job, eb, d in rows}
     with open(os.path.join(args.out, "binding.json"), "w") as fh:
-        json.dump(dict(E_perfect_C_minus_perfect=e_sol, binding=summary), fh, indent=1)
+        json.dump(dict(E_perfect_C_minus_perfect=e_sol, binding=summary, drag=drags), fh,
+                  indent=1)
+
+
+def report_drag(geo, e):
+    """Drag profiles E(f) - E_A per b, and the stress of the steepest segment,
+    tau = (dE/dx) / (b L): the 0 K Peierls (or depinning) stress of the
+    straight segment along that path, an upper bound (constrained path,
+    finite differences between the computed fractions)."""
+    lam = A * np.sqrt(2 / 3)
+    out = {}
+    for tag, label in (("", "pure Fe"), ("_C", "C, core moved away"),
+                       ("_Cp", "C, core moved past")):
+        sfx = "p" if tag.endswith("p") else ""
+        a, b = e.get("dragA" + tag), e.get("dragB" + tag)
+        if a is None:
+            continue
+        pts = [(0.0, float(a["energy"]))]
+        for job, d in e.items():
+            if job.startswith("drag_") and job.endswith(tag) and (
+                    job[5:-len(tag)] if tag else job[5:]).replace(".", "").isdigit():
+                pts.append((float(d["fraction"]), float(d["energy"])))
+        if b is not None:
+            pts.append((1.0, float(b["energy"])))
+        pts.sort()
+        f = np.array([q[0] for q in pts])
+        en = (np.array([q[1] for q in pts]) - pts[0][1]) / geo.layers  # eV per b
+        if tag == "" and f[f < 1].max() <= 0.5 + 1e-9:  # mirror the symmetric profile
+            en = en[f <= 0.5 + 1e-9]
+            f = f[f <= 0.5 + 1e-9]
+            f = np.concatenate([f, 1 - f[::-1][1:]])
+            en = np.concatenate([en, en[::-1][1:]])
+        slope = np.diff(en) / np.diff(f * lam)  # eV / A per b of line
+        tau = slope / B**2 * GPA * 1e3  # MPa
+        k = int(np.argmax(tau)) if len(tau) else 0
+        print(f"drag, {label}: " + "  ".join(f"{x:.2f}:{y * 1e3:.1f}" for x, y in zip(f, en))
+              + " meV/b" + (f"; steepest {f[k]:.2f}-{f[k + 1]:.2f}: tau = {tau[k]:.0f} MPa"
+                             if len(tau) else ""))
+        out[label] = dict(fraction=f.tolist(), energy_per_b=en.tolist(),
+                          tau_max_MPa=float(tau[k]) if len(tau) else None)
+    return out
 
 
 def main():
