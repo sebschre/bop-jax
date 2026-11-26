@@ -481,11 +481,13 @@ def drag_back(tag, geo, args):
     dz = pb[: geo.n, 2] - pa[: geo.n, 2]
     dz -= geo.length * np.round(dz / geo.length)
     core = np.nonzero((np.abs(dz) > 0.2) & geo.mobile)[0]
-    pos = np.asarray(require(args.out, f"drag_{args.from_fraction:g}{tag}")["positions"])
+    sfx = args.back_suffix
+    pos = np.asarray(require(args.out, f"dragB{tag}" if args.from_fraction >= 1
+                             else f"drag_{args.from_fraction:g}{tag}")["positions"])
     species = np.asarray(a["species"])
-    for f in sorted([x for x in args.fractions if x < args.from_fraction] + [0.0],
-                    reverse=True):
-        job = f"drag_{f:g}{tag}r"
+    lower = [x for x in args.fractions if x < args.from_fraction]
+    for f in sorted(lower + ([0.0] if args.from_fraction < 1 else []), reverse=True):
+        job = f"drag_{f:g}{tag}{sfx}"
         done = load(args.out, job)
         if done is not None:
             pos = np.asarray(done["positions"])
@@ -585,7 +587,7 @@ def report_drag(geo, e):
             continue
         best = {0.0: float(a["energy"])}
         for job, d in e.items():
-            for t in (tag, tag + "r"):
+            for t in (tag, tag + "r", tag + "b"):
                 head = job[5:-len(t)] if t else job[5:]
                 if (job.startswith("drag_") and (job.endswith(t) if t else True)
                         and head.replace(".", "").isdigit()):
@@ -635,6 +637,7 @@ def main():
                     help="fractions of the Peierls drag")
     ap.add_argument("--from-fraction", type=float, default=0.4,
                     help="start of the backward pass of a drag")
+    ap.add_argument("--back-suffix", default="r", help="job suffix of a backward pass")
     ap.add_argument("--ground-state", action=argparse.BooleanOptionalAction, default=True,
                     help="check the relaxed state against cold magnetic starts")
     args = ap.parse_args()
