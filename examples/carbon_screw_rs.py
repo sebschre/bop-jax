@@ -297,10 +297,11 @@ def run_job(job, geo, args):
         save(args.out, job, cell, out, time.time() - t0)
     elif job.startswith("shear_"):
         shear(job[6:], geo, args)
-    elif job in ("dragA", "dragB", "dragA_C", "dragB_C"):
+    elif job in ("dragA", "dragB", "dragA_C", "dragB_C", "dragAp", "dragBp", "dragA_Cp",
+                 "dragB_Cp"):
         drag_end(job, geo, args)
-    elif job in ("dragpath", "dragpath_C"):
-        drag_path(job.endswith("_C"), geo, args)
+    elif job in ("dragpath", "dragpath_C", "dragpath_Cp"):
+        drag_path("_C" in job, geo, args, "p" if job.endswith("p") else "")
     elif job.startswith("oct_"):
         k = int(job[4:])
         base = require(args.out, "easy")
@@ -380,17 +381,19 @@ def shear(base, geo, args):
 
 # --- Peierls drag: the core moved one valley, the boundary at the midpoint -------
 
-def drag_sites(geo):
-    """Easy site A and its neighbour B one a sqrt(2/3) along -x on the (-110)
-    plane: away from carbon in its deepest bound state (+0.9, +0.7 A from A)."""
+def drag_sites(geo, sign=-1):
+    """Easy site A and its neighbour B one a sqrt(2/3) along x on the (-110)
+    plane: along -x (sign -1, jobs without the suffix "p") away from carbon
+    in its deepest bound state (+0.9, +0.7 A from A), along +x (suffix "p")
+    past it."""
     a_site = geo.easy
-    return a_site, a_site - np.array([A * np.sqrt(2 / 3), 0.0])
+    return a_site, a_site + sign * np.array([A * np.sqrt(2 / 3), 0.0])
 
 
-def drag_elastic(geo, site):
+def drag_elastic(geo, site, sign=-1):
     """Mobile region at the elastic solution of a core at ``site``, the fixed
     shell at that of the midpoint of A and B (as examples/peierls_drag.py)."""
-    sa, sb = drag_sites(geo)
+    sa, sb = drag_sites(geo, sign)
     mid = 0.5 * (sa + sb)
     u_site = geo.u_el(geo.ref[:, 0] - site[0], geo.ref[:, 1] - site[1])
     u_mid = geo.u_el(geo.ref[:, 0] - mid[0], geo.ref[:, 1] - mid[1])
@@ -398,10 +401,12 @@ def drag_elastic(geo, site):
 
 
 def drag_end(job, geo, args):
-    sa, sb = drag_sites(geo)
+    sign = 1 if job.endswith("p") else -1
+    base = job[:-1] if sign == 1 else job
+    sa, sb = drag_sites(geo, sign)
     fe = np.full(geo.n, FE)
-    if job in ("dragA", "dragB"):
-        pos = drag_elastic(geo, sa if job == "dragA" else sb)
+    if base in ("dragA", "dragB"):
+        pos = drag_elastic(geo, sa if base == "dragA" else sb, sign)
         cell, out, s = relax_cell(job, geo, pos, fe, args)
         save(args.out, job, cell, out, s)
         return
@@ -410,7 +415,7 @@ def drag_end(job, geo, args):
     bound = require(args.out, "hard_C_free")
     x = np.asarray(bound["positions"][-1], float)
     fe_a = np.asarray(bound["positions"][: geo.n])
-    end = require(args.out, job[:-2])
+    end = require(args.out, base[:-2] + ("p" if sign == 1 else ""))
     fe_end = np.asarray(end["positions"])
     near = np.argsort(np.linalg.norm(geo.wrap_z(fe_a - x), axis=1))[:6]
     x = x + (fe_end[near] - fe_a[near]).mean(axis=0)
@@ -418,11 +423,11 @@ def drag_end(job, geo, args):
     save(args.out, job, cell, out, s)
 
 
-def drag_path(with_c, geo, args):
+def drag_path(with_c, geo, args, suffix=""):
     """The z coordinates of the core columns (those that differ by more than
     0.2 A between A and B) held at z_A + f (z_B - z_A), everything else
     relaxed (carbon included), continuing from the previous fraction."""
-    tag = "_C" if with_c else ""
+    tag = ("_C" if with_c else "") + suffix
     a, b = require(args.out, "dragA" + tag), require(args.out, "dragB" + tag)
     pa, pb = np.asarray(a["positions"], float), np.asarray(b["positions"], float)
     dz = pb[: geo.n, 2] - pa[: geo.n, 2]
