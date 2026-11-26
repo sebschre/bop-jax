@@ -151,6 +151,7 @@ given shifts, and 30-50 times faster self-consistently (256-atom d band:
 | [Iron](docs/iron.md) | magnetic d-band iron models: the fit of this repository, and the Fe model of Egorov et al. used for dislocations |
 | [Carbon](docs/carbon.md) | sp-valent carbon model: fit, diamond, graphene and dense phases, elastic constants |
 | [Iron-carbon](docs/iron-carbon.md) | Fe-C on the Egorov iron and sp carbon models: cross terms fitted on bopfox-rs with every atom relaxed, C in bcc Fe, cementite; limitations (several magnetic states, saddle off the tetrahedral site) |
+| [Carbon at a screw dislocation](docs/carbon-dislocation.md) | Fe-C BOP on bopfox-rs: carbon binding energies around a 1/2<111> screw, no hard-core reconstruction, Peierls drag with and without carbon |
 | [Limitations](docs/limitations.md) | what is not implemented, caveats |
 
 ## References

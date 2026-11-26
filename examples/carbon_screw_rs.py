@@ -15,9 +15,18 @@ Jobs (each written to ``OUT/<job>.npz``, skipped when present):
   perfect_C      ... with C at the octahedral site nearest the axis
   easy           relaxed easy core
   hard           hard core (unstable in pure Fe: it shows where it relaxes to)
-  hard_C         hard core with C in the prismatic site at its centre
+  hard_C         hard core with C at the prism centre (no self-consistent state)
+  offcentre_hardC  ... with C 0.41 A above the lower Fe triangle
+  hard_C_held    C moved to the prism centre by continuation, held there
+  hard_C_free    ... then released
   oct_<k>        easy core with C at the k-th inequivalent octahedral site
-  drag_<f>[_C]   Peierls drag, see ``--help`` of the drag subcommand
+  shear_<job>    resolved shear stress raised in steps (``--taus``)
+  dragA, dragB   Peierls drag end points (core moved along -x; suffix "p": +x)
+  dragA_C, dragB_C[p]  ... with carbon (B holds the core columns)
+  dragpath[_C[p]]      drag at ``--fractions``, written as drag_<f>[_C[p]]
+  dragback_C[p]  backward pass from ``--from-fraction`` (drag_<f>_C[p]r / b)
+
+Results and the physics: docs/carbon-dislocation.md.
 
 Binding energy:  E_b = [E(disl + C) - E(easy)] - [E(perfect_C) - E(perfect)],
 negative when carbon is attracted.
@@ -242,6 +251,14 @@ def run_job(job, geo, args):
         k = np.argmin(np.hypot(*sites[:, :2].T))
         x = sites[k]
         cell, out, s = relax_cell(job, geo, np.vstack([base["positions"], x]), sp_c, args)
+        save(args.out, job, cell, out, s, carbon_start=x)
+    elif job == "offcentre_hardC":
+        # carbon 0.41 A above the lower Fe triangle of the prism: the start
+        # from which hard_C_held reaches the centre (from the centre itself
+        # no self-consistent state is found)
+        el = geo.dislocated(geo.hard)
+        x = geo.prismatic_site(el) - np.array([0.0, 0.0, B / 2 - 0.41])
+        cell, out, s = relax_cell(job, geo, np.vstack([el, x]), sp_c, args)
         save(args.out, job, cell, out, s, carbon_start=x)
     elif job == "hard_C":
         el = geo.dislocated(geo.hard)
