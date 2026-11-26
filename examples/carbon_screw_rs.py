@@ -297,6 +297,10 @@ def run_job(job, geo, args):
         save(args.out, job, cell, out, time.time() - t0)
     elif job.startswith("shear_"):
         shear(job[6:], geo, args)
+    elif job in ("dragA", "dragB", "dragA_C", "dragB_C"):
+        drag_end(job, geo, args)
+    elif job in ("dragpath", "dragpath_C"):
+        drag_path(job.endswith("_C"), geo, args)
     elif job.startswith("oct_"):
         k = int(job[4:])
         base = require(args.out, "easy")
@@ -372,6 +376,80 @@ def shear(base, geo, args):
         rows.append((tau, float(out["energy"]), core))
         if not np.isfinite(moved) or moved > A * np.sqrt(2 / 3) / 2:
             break
+
+
+# --- Peierls drag: the core moved one valley, the boundary at the midpoint -------
+
+def drag_sites(geo):
+    """Easy site A and its neighbour B one a sqrt(2/3) along -x on the (-110)
+    plane: away from carbon in its deepest bound state (+0.9, +0.7 A from A)."""
+    a_site = geo.easy
+    return a_site, a_site - np.array([A * np.sqrt(2 / 3), 0.0])
+
+
+def drag_elastic(geo, site):
+    """Mobile region at the elastic solution of a core at ``site``, the fixed
+    shell at that of the midpoint of A and B (as examples/peierls_drag.py)."""
+    sa, sb = drag_sites(geo)
+    mid = 0.5 * (sa + sb)
+    u_site = geo.u_el(geo.ref[:, 0] - site[0], geo.ref[:, 1] - site[1])
+    u_mid = geo.u_el(geo.ref[:, 0] - mid[0], geo.ref[:, 1] - mid[1])
+    return geo.ref + np.where(geo.mobile[:, None], u_site, u_mid)
+
+
+def drag_end(job, geo, args):
+    sa, sb = drag_sites(geo)
+    fe = np.full(geo.n, FE)
+    if job in ("dragA", "dragB"):
+        pos = drag_elastic(geo, sa if job == "dragA" else sb)
+        cell, out, s = relax_cell(job, geo, pos, fe, args)
+        save(args.out, job, cell, out, s)
+        return
+    # carbon where it binds most strongly next to A (hard_C_free), carried
+    # along by the change of its six nearest Fe atoms
+    bound = require(args.out, "hard_C_free")
+    x = np.asarray(bound["positions"][-1], float)
+    fe_a = np.asarray(bound["positions"][: geo.n])
+    end = require(args.out, job[:-2])
+    fe_end = np.asarray(end["positions"])
+    near = np.argsort(np.linalg.norm(geo.wrap_z(fe_a - x), axis=1))[:6]
+    x = x + (fe_end[near] - fe_a[near]).mean(axis=0)
+    cell, out, s = relax_cell(job, geo, np.vstack([fe_end, x]), np.append(fe, C), args)
+    save(args.out, job, cell, out, s)
+
+
+def drag_path(with_c, geo, args):
+    """The z coordinates of the core columns (those that differ by more than
+    0.2 A between A and B) held at z_A + f (z_B - z_A), everything else
+    relaxed (carbon included), continuing from the previous fraction."""
+    tag = "_C" if with_c else ""
+    a, b = require(args.out, "dragA" + tag), require(args.out, "dragB" + tag)
+    pa, pb = np.asarray(a["positions"], float), np.asarray(b["positions"], float)
+    dz = pb[: geo.n, 2] - pa[: geo.n, 2]
+    dz -= geo.length * np.round(dz / geo.length)
+    core = np.nonzero((np.abs(dz) > 0.2) & geo.mobile)[0]
+    print(f"drag{tag}: {len(core)} core atoms, E_B - E_A = "
+          f"{float(b['energy']) - float(a['energy']):+.4f} eV", flush=True)
+    pos = pa.copy()
+    species = np.asarray(a["species"])
+    for f in args.fractions:
+        job = f"drag_{f:g}{tag}"
+        done = load(args.out, job)
+        if done is not None:
+            pos = np.asarray(done["positions"])
+            continue
+        target = pa + f * (pb - pa)  # starting guess, then the held z set
+        target[:, 2] = pa[:, 2]
+        target[core, 2] = pa[core, 2] + f * dz[core]
+        start = pos.copy()
+        start[core] = target[core]
+        cell, out, s = relax_cell(job, geo, start, species, args,
+                                  fixed_components=tuple((int(i), 2) for i in core))
+        pos = cell.positions
+        save(args.out, job, cell, out, s, fraction=f, core_atoms=core)
+        print(f"{job}: E - E_A = {out['energy'] - float(a['energy']):+.4f} eV "
+              f"({(out['energy'] - float(a['energy'])) / geo.layers * 1e3:+.1f} meV/b)",
+              flush=True)
 
 
 def require(out_dir, job):
@@ -459,6 +537,9 @@ def main():
     ap.add_argument("--taus", type=float, nargs="+",
                     default=[0.5, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.4, 2.7, 3.0],
                     help="resolved shear stresses of the shear jobs (GPa)")
+    ap.add_argument("--fractions", type=float, nargs="+",
+                    default=[0.15, 0.3, 0.4, 0.5, 0.6, 0.7, 0.85],
+                    help="fractions of the Peierls drag")
     ap.add_argument("--ground-state", action=argparse.BooleanOptionalAction, default=True,
                     help="check the relaxed state against cold magnetic starts")
     args = ap.parse_args()
