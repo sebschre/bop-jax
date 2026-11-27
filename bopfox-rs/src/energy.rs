@@ -1886,8 +1886,10 @@ impl<'a> Bop<'a> {
 
     /// The explicit Zeeman energy `sum_i (h_i.e_i) m_i` (collinear: `h_z m`)
     /// at fixed occupations, added to an energy gradient.
+    /// The explicit part `(h.e) m` of the field energy: its derivative `m e`
+    /// enters dE/dh also at zero field (the moments at B = 0).
     pub(crate) fn add_explicit_zeeman(&self, moments: &[f64], grad: &mut Grad) {
-        if self.spin_field.is_empty() || moments.is_empty() {
+        if moments.is_empty() || grad.spin_field.is_empty() {
             return;
         }
         for i in 0..self.topo.n_atoms {
@@ -1896,7 +1898,7 @@ impl<'a> Bop<'a> {
                 let e = unit(self.axes[i]);
                 let a = self.axes[i];
                 let na = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
-                let h = self.spin_field[i];
+                let h = self.spin_field.get(i).copied().unwrap_or([0.0; 3]);
                 let hp = self.h_par(i);
                 for x in 0..3 {
                     grad.spin_field[i][x] += m * e[x];

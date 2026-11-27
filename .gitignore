@@ -7,3 +7,4 @@ dist/
 bopfox-rs/target/
 bopfox-rs/python/bopfox_rs/*.so
 fits/
+runs/

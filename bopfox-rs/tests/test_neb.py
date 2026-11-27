@@ -126,3 +126,29 @@ def test_vacancy_hop_and_the_field_derivative_of_its_barrier():
     fd = ((e_plus[1] - e_plus[0]) - (e_minus[1] - e_minus[0])) / 2.0
     assert fd == pytest.approx(float(fo["gradient"] @ b), rel=1e-3, abs=1e-8)
     np.testing.assert_allclose(zeeman.first_order_energies(m, b), [0.0, float(fo["gradient"] @ b)])
+
+
+@pytest.mark.parametrize("spin", ["collinear", "noncollinear"])
+@pytest.mark.parametrize("condition", ["stationary", "potential"])
+def test_moments_without_a_field(spin, condition):
+    """The moments at zero field do not need a field to be passed: the
+    explicit Zeeman term (h.e) m contributes m e to dE/dh at h = 0 as well."""
+    cfg = bj.BOPConfig(spin=spin, **IRON_CONFIG)
+    pot = bopfox_rs.Potential(bopfox_rs.model_from_bopjax(cfg, iron(), hamiltonian.v0_bond))
+    a = 2.83
+    pos = a * np.array([[0, 0, 0], [0.5, 0.5, 0.5], [1, 0, 0], [1.5, 0.5, 0.5]])
+    pos = pos + np.random.default_rng(5).normal(scale=0.05, size=pos.shape)
+    cell = np.diag([2 * a, a, a])
+    s0 = np.zeros((4, 2, 1))
+    s0[:, 0], s0[:, 1] = -1.3, 1.3
+    kw = dict(tol=1e-11, condition=condition)
+    none = pot.scf(pos, [0] * 4, cell, s0, **kw)
+    zero = pot.scf(pos, [0] * 4, cell, s0, magnetic_field=np.zeros(3), **kw)
+    assert none["converged"] and zero["converged"]
+    np.testing.assert_allclose(none["magnetic_moment"], zero["magnetic_moment"], atol=1e-9)
+    assert none["magnetic_moment"][:, 2].sum() > 4.0  # ferromagnetic, about 2 muB per atom
+    direct = pot.compute(pos, [0] * 4, cell, zero["shifts"])
+    np.testing.assert_allclose(direct["magnetic_moment"],
+                               pot.compute(pos, [0] * 4, cell, zero["shifts"],
+                                           magnetic_field=np.zeros(3))["magnetic_moment"],
+                               atol=1e-12)
