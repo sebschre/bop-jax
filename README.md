@@ -144,7 +144,7 @@ given shifts, and 30-50 times faster self-consistently (256-atom d band:
 | [Spin dynamics](docs/spin-dynamics.md) | Landau-Lifshitz-Gilbert dynamics of the spin axes |
 | [Spin-orbit coupling](docs/spin-orbit.md) | onsite `xi L.S`, magnetic anisotropy, orbital moment, its limits |
 | [Spin-lattice dynamics](docs/spin-lattice.md) | atoms and spin axes moving together |
-| [Magnetic field](docs/magnetic-field.md) | Zeeman term, magnetic moments, first-order field effect on the Peierls barrier of a screw dislocation in iron |
+| [Magnetic field](docs/magnetic-field.md) | Zeeman term, magnetic moments, first-order field effect on the Peierls barrier of a screw dislocation in iron (drag and free NEB, with and without spin-orbit coupling) |
 | [Visualisation](docs/visualisation.md) | trajectories and animations with OVITO |
 | [Validation](docs/validation.md) | agreement with BOPfox, and where the two codes differ |
 | [Screening](docs/screening.md) | environment-dependent d-d bond integrals |
