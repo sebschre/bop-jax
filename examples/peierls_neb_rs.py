@@ -55,7 +55,12 @@ parser.add_argument("--radius", type=float, default=12.0)
 parser.add_argument("--fixed", type=float, default=6.0)
 parser.add_argument("--fmax", type=float, default=0.01, help="force tolerance (eV/A)")
 parser.add_argument("--steps", type=int, default=600, help="NEB steps")
-parser.add_argument("--check-field", type=float, default=100.0)
+parser.add_argument("--check-field", type=float, default=100.0,
+                    help="field of the self-consistent check, collinear (T)")
+parser.add_argument("--so-check-field", type=float, default=1.0,
+                    help="field of the self-consistent check with spin-orbit coupling (T): "
+                         "with fixed axes the response is strongly nonlinear, and at 100 T the "
+                         "third-order terms are as large as the moment differences")
 parser.add_argument("--xi", type=float, default=0.05, help="d-shell spin-orbit constant (eV)")
 args = parser.parse_args()
 os.makedirs(args.out, exist_ok=True)
@@ -161,7 +166,7 @@ dz = pos_b[:, 2] - pos_a[:, 2]
 core = np.abs(dz) > 0.2
 
 
-def analyse(pot, axes=None, direction=(0.0, 0.0, 1.0), label=""):
+def analyse(pot, axes=None, direction=(0.0, 0.0, 1.0), label="", check=None):
     """Energies and moments along the band; first-order barrier shift along
     ``direction``; self-consistent check at the saddle."""
     d = np.asarray(direction, float)
@@ -195,7 +200,7 @@ def analyse(pot, axes=None, direction=(0.0, 0.0, 1.0), label=""):
     tau0, _ = zeeman.peierls_stress(x_glide, e, b, b)
     tau10, _ = zeeman.peierls_stress(x_glide, e - MU_B * 10.0 * (m - m[0]), b, b)
     # self-consistent check at +-B along d, fixed positions
-    bc = args.check_field
+    bc = args.check_field if check is None else check
     shifted = []
     for k in (0, s):
         shifted.append([pot.scf(images[k], species, cell, outs[k]["shifts"],
@@ -210,7 +215,7 @@ def analyse(pot, axes=None, direction=(0.0, 0.0, 1.0), label=""):
                   peierls_stress_change_10T_MPa=(tau10 - tau0) * GPA * 1e3)
     print(f"{label}: barrier {1e3 * e[s]:.2f} meV/b at f = {frac[s]:.3f}; M(saddle) - M(A) = "
           f"{m[s] - m[0]:+.4f} muB; dE_P/dB = {1e6 * grad:+.4f} micro-eV/T per b "
-          f"({grad / e[s]:+.2e} per T); check at +-{bc:.0f} T {1e6 * direct:+.4f}, second "
+          f"({grad / e[s]:+.2e} per T); check at +-{bc:g} T {1e6 * direct:+.4f}, second "
           f"order {1e6 * second:+.2f} micro-eV; Peierls stress {tau0 * GPA * 1e3:.0f} MPa, "
           f"{(tau10 - tau0) * GPA * 1e3:+.3f} MPa in 10 T", flush=True)
     return result
@@ -234,5 +239,5 @@ if args.xi > 0 and not os.path.exists(path("spin_orbit.json")):
                     ("normal [-110]", (0, 1, 0))):
         d = np.asarray(d, float)
         so[name] = analyse(Potential(model_so), axes=np.tile(d, (n, 1)), direction=d,
-                           label=f"SO, B || {name}")
+                           label=f"SO, B || {name}", check=args.so_check_field)
     json.dump(so, open(path("spin_orbit.json"), "w"), indent=1)
