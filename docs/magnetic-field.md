@@ -132,7 +132,12 @@ Egorov et al. Fe model (`models.iron_egorov`) the path is well behaved: the
 barrier is 47 meV/b, the moments of the core stay within 1.5 % of bulk, and
 `dE_P/dB = -5.67 micro-eV/T per b` (-1.2e-4 of the barrier per Tesla),
 confirmed by self-consistent energies in +-100 T (`examples/peierls_drag.py`
-reproduces the drag, the moments and the check).
+reproduces the drag, the moments and the check). Without the drag
+constraint (climbing-image NEB on bopfox-rs, `examples/peierls_neb_rs.py`)
+the barrier is 41.8 meV/b and `dE_P/dB = -6.52 micro-eV/T per b` (-1.6e-4
+per Tesla); spin-orbit coupling adds an orbital part of a few per cent, and
+its effect on the spin part is not converged with the number of moments
+([below](#free-peierls-path-and-spin-orbit-coupling-bopfox-rs)).
 The steps that led there follow.
 
 **`IRON_FIT`: no converged Peierls path.** Run on a 4-core cloud machine
@@ -299,3 +304,101 @@ also gives the size of the moment change that enters `dE_P/dB`; and checking
 whether it survives more moments, and how it compares with DFT for the core
 moments of a moving screw dislocation, before reading anything physical into
 it.
+
+## Free Peierls path and spin-orbit coupling (bopfox-rs)
+
+`examples/peierls_neb_rs.py` repeats the Egorov calculation without the
+drag constraint, on [bopfox-rs](../bopfox-rs/README.md) (exact
+potential-condition forces, about 2 s per warm-started self-consistency of
+the 91-atom cylinder against 2.5 minutes per relaxation step in bopjax): the
+same cylinder and end points, a climbing-image NEB with 7 images between
+them, and then the spin-orbit evaluation. The whole run takes about 40
+minutes on 4 CPU cores.
+
+**Free NEB, collinear.** The end points relax in 41 FIRE steps to
+`max|F| < 0.01 eV/A` and are equivalent to 0.01 meV; the NEB converges in 35
+steps (`max|F| < 0.01 eV/A`), climbing image in the middle, the path
+symmetric about it.
+
+| f | E - E_A (meV) | M_cell (muB) | M - M_A (muB) | mean core moment (muB) |
+|---|---|---|---|---|
+| 0 (A) | 0 | 265.2216 | 0 | 2.808 |
+| 0.123 | 8.13 | 265.2322 | +0.011 | 2.809 |
+| 0.246 | 23.94 | 265.2741 | +0.053 | 2.821 |
+| 0.373 | 36.86 | 265.3163 | +0.095 | 2.834 |
+| 0.5 (saddle) | 41.81 | 265.3341 | +0.113 | 2.839 |
+
+(f: projection of the image on B - A; the second half mirrors the first.)
+
+- Barrier **41.8 meV/b**, 5.2 meV below the drag's 47.0 (an upper bound, as
+  it should be), and close to the ~40 meV/b of Mrovec et al.; DFT range
+  35-58 meV/b.
+- `M(saddle) - M(A) = +0.113 muB per b` (drag: +0.098), so
+  **`dE_P/dB = -6.52 micro-eV/T per b`**, -1.56e-4 of the barrier per Tesla
+  (drag: -5.67 micro-eV/T, -1.21e-4). The free path raises the core moments
+  a little more and lowers the barrier, so the relative effect grows by about
+  30 %.
+- Self-consistent check at +-100 T: -6.513 against -6.516 micro-eV/T first
+  order; second-order shift +11.2 micro-eV at 100 T.
+- Peierls stress from the band (projected glide distance, finite-difference
+  slopes): **1596 MPa** (drag 1784); in 10 T along the magnetisation it
+  changes by -2.50 MPa (-1.6e-3), i.e. **-0.25 MPa per Tesla**.
+
+**Spin-orbit coupling** (`--xi 0.05`, d shell). Every image of the
+collinear band is re-evaluated non-collinearly with `xi L.S`, all spin axes
+along the field, for fields along the line, the glide direction and the
+glide-plane normal. With `xi = 0` this reproduces the collinear numbers
+exactly (41.809 meV, +0.1126 muB).
+
+| B and axes along | barrier (meV/b) | dS (muB) | dL (muB) | dE_P/dB (micro-eV/T per b) | check at +-1 T |
+|---|---|---|---|---|---|
+| line z = [111] | 39.86 | +0.0168 | +0.0016 | -1.06 | -1.06 |
+| glide x = [11-2] | 39.88 | +0.0110 | +0.0032 | -0.82 | -0.91 |
+| normal y = [-110] | 40.02 | +0.0175 | -0.0027 | -0.86 | -0.86 |
+
+(`dS`, `dL`: change of the spin moment g/2 <sigma> and the orbital moment
+<L> of the cell along the field between A and the saddle.)
+
+Read at face value, spin-orbit coupling would lower the barrier by 2 meV and
+cut the field effect sixfold. **It should not be read at face value.** A scan
+of `xi` (field and axes along the line, A and the saddle, the same solution
+from warm and cold starts at every `xi`) shows that the spin part of the
+response is not a smooth function of `xi`:
+
+| xi (eV) | 0 | 0.01 | 0.02 | 0.03 | 0.04 | 0.045 | 0.05 | 0.06 |
+|---|---|---|---|---|---|---|---|---|
+| barrier (meV/b) | 41.81 | 41.50 | 40.71 | 39.69 | 39.20 | 39.38 | 39.86 | 41.12 |
+| S_A (muB) | 265.22 | 265.02 | 264.66 | 264.31 | 263.23 | 262.67 | 262.37 | 262.44 |
+| dS (muB) | +0.113 | +0.104 | +0.093 | +0.059 | +0.064 | -0.051 | +0.017 | +0.055 |
+| dL (muB) | 0 | +0.0005 | +0.0021 | +0.0041 | +0.0024 | +0.0032 | +0.0016 | +0.0033 |
+
+A spin-orbit splitting of 0.05 eV lies far below what 9 moments resolve in
+the d band (about W/9, 0.6 eV), so the spin moments and their difference
+between core configurations respond to `xi` through the truncation of the
+expansion rather than through the physics; the same lack of convergence as
+for the magnetic anisotropy ([Spin-orbit coupling](spin-orbit.md)). What
+holds over the whole scan and all three directions:
+
+- the orbital moment changes by **at most 0.004 muB per b** (either sign)
+  between the easy core and the saddle, against 0.11 muB of spin: the orbital contribution to
+  `dE_P/dB` is at most about 0.2 micro-eV/T per b, a few per cent of the
+  spin one;
+- the dependence of the barrier on the direction of the magnetisation is
+  0.16 meV/b at `xi = 0.05` (0.4 %); at laboratory fields it is the
+  magnetisation direction, not the Zeeman energy, that sets it, and its size
+  is not converged either.
+
+The collinear free-path result, `dE_P/dB = -6.5 micro-eV/T per b`, i.e. a
+barrier lower by about 0.016 % per Tesla along the magnetisation, is the
+number to use; spin-orbit coupling adds an orbital part of a few per cent and
+a direction dependence whose size this model cannot give. The spin-orbit
+check field is 1 T: with fixed axes the response is strongly nonlinear (the
+moment of the cell grows by 2.8 muB in 100 T against 0.7 muB collinear), and
+at 100 T the third-order terms are as large as the moment differences.
+
+The scan revealed a bug in bopfox-rs, fixed with this run: without a
+`magnetic_field` (or `spin_field`) argument the zero-field moments missed the
+explicit term `(h.e) m` of the field energy and came out as the response part
+alone (about 1 % of the moment); passing a zero field gave the right values,
+which is what the tests did. The bopjax numbers above (`peierls_drag.py`) are
+not affected.
